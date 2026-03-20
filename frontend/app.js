@@ -5,9 +5,7 @@ const API_BASE = '';
 function buildQuery(params) {
   const q = new URLSearchParams();
   Object.entries(params).forEach(([k, v]) => {
-    if (v !== undefined && v !== null && v !== '') {
-      q.set(k, v);
-    }
+    if (v !== undefined && v !== null && v !== '') q.set(k, v);
   });
   const raw = q.toString();
   return raw ? `?${raw}` : '';
@@ -25,12 +23,10 @@ createApp({
       activePage: 'overview',
       buildings: [],
       globalRangeText: '-',
-      filters: {
-        buildingId: '',
-        range: [],
-      },
+      filters: { buildingId: '', range: [] },
       anomalyQuery: {
         severity: '',
+        status: '',
         sort: 'timestamp_desc',
         page: 1,
         pageSize: 20,
@@ -39,18 +35,29 @@ createApp({
       trendSeries: [],
       rankRows: [],
       anomalyRows: [],
-      overview: {
-        totalKwh: 0,
-        avgKwh: 0,
-        anomalyCount: 0,
-        savingPct: 0,
-        carbonKg: 0,
-      },
+      overview: { totalKwh: 0, avgKwh: 0, anomalyCount: 0, savingPct: 0, carbonKg: 0 },
       chatInput: '',
+      aiProvider: 'template',
+      aiStats: {
+        windowHours: 24,
+        totalCalls: 0,
+        llmCalls: 0,
+        fallbackCalls: 0,
+        fallbackRate: 0,
+        avgLatency: 0,
+      },
       diagnosis: null,
       selectedAnomaly: null,
       anomalyDetailVisible: false,
       anomalyDetail: null,
+      anomalyHistory: [],
+      actionDialogVisible: false,
+      actionForm: {
+        anomalyId: null,
+        action: 'ack',
+        assignee: '',
+        note: '',
+      },
       loading: {
         overview: false,
         trend: false,
@@ -58,19 +65,10 @@ createApp({
         anomaly: false,
         ai: false,
         detail: false,
+        action: false,
       },
-      errors: {
-        overview: '',
-        trend: '',
-        rank: '',
-        anomaly: '',
-      },
-      charts: {
-        overview: null,
-        trend: null,
-        rank: null,
-        anomalyType: null,
-      },
+      errors: { overview: '', trend: '', rank: '', anomaly: '' },
+      charts: { overview: null, trend: null, rank: null, anomalyType: null },
       refreshTimer: null,
     };
   },
@@ -80,10 +78,7 @@ createApp({
   },
   beforeUnmount() {
     window.removeEventListener('resize', this.resizeCharts);
-    if (this.refreshTimer) {
-      clearTimeout(this.refreshTimer);
-      this.refreshTimer = null;
-    }
+    if (this.refreshTimer) clearTimeout(this.refreshTimer);
   },
   methods: {
     async fetchJson(url, options) {
@@ -97,17 +92,16 @@ createApp({
       return Array.isArray(range) && range.length === 2 && !!range[0] && !!range[1];
     },
     getTimeParams() {
-      const range = this.filters.range || [];
-      const hasCompleteRange = this.isCompleteRange(range);
-      const [start, end] = hasCompleteRange ? range : [undefined, undefined];
+      const complete = this.isCompleteRange(this.filters.range);
       return {
         building_id: this.filters.buildingId,
-        start_time: start,
-        end_time: end,
+        start_time: complete ? this.filters.range[0] : undefined,
+        end_time: complete ? this.filters.range[1] : undefined,
       };
     },
     async bootstrap() {
       await this.loadBuildings();
+      await this.loadAiStats();
       await this.refreshAll();
     },
     onBuildingChange() {
@@ -137,13 +131,7 @@ createApp({
     async loadBuildings() {
       try {
         const data = await this.fetchJson(`${API_BASE}/api/buildings`);
-        this.buildings = (data.items || []).map((x) => ({
-          id: x.building_id,
-          name: x.building_name,
-          type: x.building_type,
-          startTime: x.start_time,
-          endTime: x.end_time,
-        }));
+        this.buildings = (data.items || []).map((x) => ({ id: x.building_id, name: x.building_name, type: x.building_type }));
         const range = data.global_range || {};
         this.globalRangeText = range.start_time && range.end_time ? `${range.start_time} ~ ${range.end_time}` : '-';
       } catch (err) {
@@ -203,14 +191,7 @@ createApp({
       this.loading.anomaly = true;
       this.errors.anomaly = '';
       try {
-        const query = {
-          ...this.getTimeParams(),
-          severity: this.anomalyQuery.severity,
-          sort: this.anomalyQuery.sort,
-          page: this.anomalyQuery.page,
-          page_size: this.anomalyQuery.pageSize,
-        };
-        const data = await this.fetchJson(`${API_BASE}/api/anomaly/list${buildQuery(query)}`);
+        const data = await this.fetchJson(`${API_BASE}/api/anomaly/list${buildQuery({ ...this.getTimeParams(), severity: this.anomalyQuery.severity, status: this.anomalyQuery.status, sort: this.anomalyQuery.sort, page: this.anomalyQuery.page, page_size: this.anomalyQuery.pageSize })}`);
         this.anomalyRows = data.items || [];
         this.anomalyQuery.total = data.total_count || 0;
         this.anomalyQuery.page = data.page || this.anomalyQuery.page;
@@ -223,6 +204,19 @@ createApp({
         this.anomalyRows = [];
       } finally {
         this.loading.anomaly = false;
+      }
+    },
+    async loadAiStats() {
+      try {
+        const data = await this.fetchJson(`${API_BASE}/api/ai/stats?hours=24`);
+        this.aiStats.windowHours = data.window_hours ?? 24;
+        this.aiStats.totalCalls = data.total_calls ?? 0;
+        this.aiStats.llmCalls = data.llm_calls ?? 0;
+        this.aiStats.fallbackCalls = data.fallback_calls ?? 0;
+        this.aiStats.fallbackRate = data.fallback_rate_pct ?? 0;
+        this.aiStats.avgLatency = data.avg_latency_ms ?? 0;
+      } catch (err) {
+        console.error(err);
       }
     },
     async refreshAll() {
@@ -247,11 +241,51 @@ createApp({
       this.activePage = key;
       this.refreshCurrentPage();
     },
+    statusLabel(v) {
+      const map = { new: 'new', acknowledged: 'acknowledged', ignored: 'ignored', resolved: 'resolved' };
+      return map[v] || v;
+    },
+    openActionDialog(row, action) {
+      this.actionForm.anomalyId = row.anomaly_id;
+      this.actionForm.action = action;
+      this.actionForm.assignee = row.assignee || '';
+      this.actionForm.note = '';
+      this.actionDialogVisible = true;
+    },
+    async submitAnomalyAction() {
+      if (!this.actionForm.anomalyId) return;
+      this.loading.action = true;
+      try {
+        await this.fetchJson(`${API_BASE}/api/anomaly/action`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            anomaly_id: this.actionForm.anomalyId,
+            action: this.actionForm.action,
+            assignee: this.actionForm.assignee,
+            note: this.actionForm.note,
+          }),
+        });
+        this.actionDialogVisible = false;
+        this.$message.success('处理动作已保存');
+        await this.loadAnomalies();
+        if (this.anomalyDetailVisible && this.anomalyDetail?.anomaly?.anomaly_id === this.actionForm.anomalyId) {
+          await this.openAnomalyDetail({ anomaly_id: this.actionForm.anomalyId });
+        }
+      } catch (err) {
+        console.error(err);
+        this.$message.error(`提交失败：${err.message}`);
+      } finally {
+        this.loading.action = false;
+      }
+    },
     async openAnomalyDetail(row) {
       this.loading.detail = true;
       try {
-        const data = await this.fetchJson(`${API_BASE}/api/anomaly/detail?anomaly_id=${encodeURIComponent(row.anomaly_id)}`);
-        this.anomalyDetail = data;
+        const detail = await this.fetchJson(`${API_BASE}/api/anomaly/detail?anomaly_id=${encodeURIComponent(row.anomaly_id)}`);
+        const history = await this.fetchJson(`${API_BASE}/api/anomaly/history?anomaly_id=${encodeURIComponent(row.anomaly_id)}`);
+        this.anomalyDetail = detail;
+        this.anomalyHistory = history.items || [];
         this.anomalyDetailVisible = true;
       } catch (err) {
         console.error(err);
@@ -275,6 +309,21 @@ createApp({
       this.chatInput = `${row.building_name} 在 ${row.timestamp} 出现 ${row.anomaly_name}，请给出诊断和处理建议。`;
       this.submitDiagnosis();
     },
+    copyDiagnosisToActionNote() {
+      if (!this.diagnosis || !this.selectedAnomaly) return;
+      this.actionForm.anomalyId = this.selectedAnomaly.anomaly_id;
+      this.actionForm.action = 'ack';
+      this.actionForm.assignee = this.selectedAnomaly.assignee || '';
+      const lines = [];
+      lines.push(`诊断结论：${this.diagnosis.conclusion || ''}`);
+      if (Array.isArray(this.diagnosis.recommended_actions) && this.diagnosis.recommended_actions.length) {
+        lines.push(`建议动作：${this.diagnosis.recommended_actions.join('；')}`);
+      }
+      lines.push(`Provider=${this.diagnosis.provider}，Fallback=${this.diagnosis.fallback_used}`);
+      this.actionForm.note = lines.join('\n');
+      this.actionDialogVisible = true;
+      this.activePage = 'anomaly';
+    },
     async submitDiagnosis() {
       if (!this.chatInput.trim() && !this.selectedAnomaly) {
         this.$message.warning('请先输入问题或从异常列表触发诊断');
@@ -284,6 +333,7 @@ createApp({
       try {
         const payload = {
           message: this.chatInput,
+          provider: this.aiProvider,
           building_id: this.selectedAnomaly?.building_id || this.filters.buildingId || null,
           anomaly_id: this.selectedAnomaly?.anomaly_id || null,
           timestamp: this.selectedAnomaly?.timestamp || null,
@@ -301,6 +351,7 @@ createApp({
         diag.recommended_actions = diag.recommended_actions || [];
         diag.evidence = diag.evidence || [];
         this.diagnosis = diag;
+        await this.loadAiStats();
       } catch (err) {
         console.error(err);
         this.$message.error('诊断失败，请稍后重试');
@@ -341,27 +392,23 @@ createApp({
     renderRankChart() {
       const chart = this.ensureChart('rank', 'rankChart');
       if (!chart) return;
-      const rows = this.rankRows;
       chart.setOption({
         tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
         xAxis: { type: 'value', name: 'kWh' },
-        yAxis: { type: 'category', data: rows.map((r) => r.building_name) },
-        series: [{ type: 'bar', data: rows.map((r) => r.avg_kwh), itemStyle: { color: '#1368ce' } }],
+        yAxis: { type: 'category', data: this.rankRows.map((r) => r.building_name) },
+        series: [{ type: 'bar', data: this.rankRows.map((r) => r.avg_kwh), itemStyle: { color: '#1368ce' } }],
       });
     },
     renderAnomalyTypeChart(byType) {
       const chart = this.ensureChart('anomalyType', 'anomalyTypeChart');
       if (!chart) return;
-      const data = Object.entries(byType).map(([name, value]) => ({ name, value }));
       chart.setOption({
         tooltip: { trigger: 'item' },
-        series: [{ type: 'pie', radius: ['35%', '70%'], data }],
+        series: [{ type: 'pie', radius: ['35%', '70%'], data: Object.entries(byType).map(([name, value]) => ({ name, value })) }],
       });
     },
     resizeCharts() {
-      Object.values(this.charts).forEach((c) => {
-        if (c) c.resize();
-      });
+      Object.values(this.charts).forEach((c) => c && c.resize());
     },
   },
 })

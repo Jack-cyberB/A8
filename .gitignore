@@ -11,3 +11,6 @@ data/normalized/
 
 .agents/
 .codex/
+data/runtime/
+.env
+.env.*

@@ -4,7 +4,8 @@
   "private": true,
   "scripts": {
     "test:e2e": "playwright test",
-    "test:all": "python scripts/run_regression.py"
+    "test:all": "python scripts/run_regression.py",
+    "test:llm-live": "python scripts/smoke_test_llm_live.py"
   },
   "devDependencies": {
     "@playwright/test": "^1.53.0"

@@ -11,17 +11,12 @@
   <div id="app">
     <header class="topbar">
       <h1>A8 建筑能源智能管理系统</h1>
-      <div class="topbar-sub">V0 可交付版 | 真实数据 + 预警 + 诊断闭环</div>
+      <div class="topbar-sub">V1 闭环版 | 预警处理 + AI诊断 + 回归保障</div>
     </header>
 
     <div class="layout">
       <aside class="sidebar">
-        <button
-          v-for="p in pages"
-          :key="p.key"
-          class="nav-btn"
-          :class="{ active: activePage === p.key }"
-          @click="switchPage(p.key)">
+        <button v-for="p in pages" :key="p.key" class="nav-btn" :class="{ active: activePage === p.key }" @click="switchPage(p.key)">
           {{ p.label }}
         </button>
       </aside>
@@ -30,12 +25,7 @@
         <section class="filter-row">
           <el-select v-model="filters.buildingId" placeholder="建筑" style="width: 220px" @change="onBuildingChange">
             <el-option label="全部建筑" value=""></el-option>
-            <el-option
-              v-for="b in buildings"
-              :key="b.id"
-              :label="`${b.name} (${b.type})`"
-              :value="b.id">
-            </el-option>
+            <el-option v-for="b in buildings" :key="b.id" :label="`${b.name} (${b.type})`" :value="b.id"></el-option>
           </el-select>
 
           <el-date-picker
@@ -85,7 +75,7 @@
           </div>
 
           <div class="panel">
-            <div class="panel-title">故障列表（分页 + 排序 + 严重级别筛选）</div>
+            <div class="panel-title">故障列表（可执行处理闭环）</div>
             <div class="anomaly-toolbar">
               <el-select v-model="anomalyQuery.severity" placeholder="严重级别" style="width: 140px" @change="onAnomalyFilterChange">
                 <el-option label="全部级别" value=""></el-option>
@@ -93,6 +83,15 @@
                 <el-option label="中" value="medium"></el-option>
                 <el-option label="低" value="low"></el-option>
               </el-select>
+
+              <el-select v-model="anomalyQuery.status" placeholder="处理状态" style="width: 160px" @change="onAnomalyFilterChange">
+                <el-option label="全部状态" value=""></el-option>
+                <el-option label="新告警" value="new"></el-option>
+                <el-option label="已确认" value="acknowledged"></el-option>
+                <el-option label="已忽略" value="ignored"></el-option>
+                <el-option label="已完成" value="resolved"></el-option>
+              </el-select>
+
               <el-select v-model="anomalyQuery.sort" placeholder="排序" style="width: 200px" @change="onAnomalyFilterChange">
                 <el-option label="时间倒序" value="timestamp_desc"></el-option>
                 <el-option label="时间正序" value="timestamp_asc"></el-option>
@@ -100,73 +99,79 @@
                 <el-option label="严重级别优先" value="severity_desc"></el-option>
               </el-select>
             </div>
+
             <div v-if="errors.anomaly" class="state-error">{{ errors.anomaly }}</div>
             <el-table :data="anomalyRows" height="360" stripe v-loading="loading.anomaly">
               <el-table-column prop="anomaly_id" label="ID" width="70"></el-table-column>
               <el-table-column prop="building_name" label="建筑" width="130"></el-table-column>
               <el-table-column prop="anomaly_name" label="类型" width="180"></el-table-column>
               <el-table-column prop="severity" label="级别" width="90"></el-table-column>
+              <el-table-column prop="status" label="状态" width="120"></el-table-column>
+              <el-table-column prop="assignee" label="处理人" width="110"></el-table-column>
               <el-table-column prop="timestamp" label="时间" width="180"></el-table-column>
-              <el-table-column prop="electricity_kwh" label="实测(kWh)" width="110"></el-table-column>
               <el-table-column prop="deviation_pct" label="偏差(%)" width="100"></el-table-column>
-              <el-table-column label="操作" width="190">
+              <el-table-column label="操作" width="300">
                 <template #default="scope">
                   <el-button size="small" @click="openAnomalyDetail(scope.row)">详情</el-button>
                   <el-button size="small" type="danger" @click="diagnoseFromAnomaly(scope.row)">诊断</el-button>
+                  <el-button size="small" type="primary" @click="openActionDialog(scope.row, 'ack')">确认</el-button>
+                  <el-button size="small" @click="openActionDialog(scope.row, 'ignore')">忽略</el-button>
+                  <el-button size="small" type="success" @click="openActionDialog(scope.row, 'resolve')">完成</el-button>
                 </template>
               </el-table-column>
             </el-table>
+
             <div class="empty-tip" v-if="!loading.anomaly && !anomalyRows.length">暂无异常数据</div>
-            <el-pagination
-              class="pager"
-              layout="total, sizes, prev, pager, next"
-              :total="anomalyQuery.total"
-              :page-size="anomalyQuery.pageSize"
-              :current-page="anomalyQuery.page"
-              :page-sizes="[10,20,50,100]"
-              @size-change="onAnomalyPageSizeChange"
-              @current-change="onAnomalyPageChange"></el-pagination>
+            <el-pagination class="pager" layout="total, sizes, prev, pager, next" :total="anomalyQuery.total" :page-size="anomalyQuery.pageSize" :current-page="anomalyQuery.page" :page-sizes="[10,20,50,100]" @size-change="onAnomalyPageSizeChange" @current-change="onAnomalyPageChange"></el-pagination>
           </div>
         </section>
 
         <section v-show="activePage === 'assistant'" class="page">
           <div class="panel">
-            <div class="panel-title">智能助手（词典+模板诊断）</div>
+            <div class="panel-title">智能助手（Provider 可切换）</div>
             <div class="assistant-box">
               <div class="template-row">
                 <span class="template-label">快捷模板：</span>
                 <el-button size="small" @click="applyDiagnosisTemplate('spike')">突增排查</el-button>
                 <el-button size="small" @click="applyDiagnosisTemplate('offline')">低负荷排查</el-button>
                 <el-button size="small" @click="applyDiagnosisTemplate('highload')">高负荷排查</el-button>
+                <el-select v-model="aiProvider" style="width: 160px">
+                  <el-option label="模板 Provider" value="template"></el-option>
+                  <el-option label="LLM Provider" value="llm"></el-option>
+                  <el-option label="Auto (优先LLM)" value="auto"></el-option>
+                </el-select>
               </div>
-              <el-input
-                v-model="chatInput"
-                type="textarea"
-                :rows="3"
-                placeholder="例如：B002 今天上午突增的原因是什么？"></el-input>
+
+              <el-input v-model="chatInput" type="textarea" :rows="3" placeholder="例如：B002 今天上午突增的原因是什么？"></el-input>
               <div class="assistant-actions">
                 <el-button type="primary" @click="submitDiagnosis" :loading="loading.ai">生成诊断</el-button>
+                <el-button @click="copyDiagnosisToActionNote" :disabled="!diagnosis || !selectedAnomaly">写入处理备注草稿</el-button>
+              </div>
+
+              <div class="ai-stats">
+                <div class="ai-stats-title">近{{ aiStats.windowHours }}小时 AI 运行统计</div>
+                <div class="ai-stats-grid">
+                  <div>总调用: {{ aiStats.totalCalls }}</div>
+                  <div>LLM调用: {{ aiStats.llmCalls }}</div>
+                  <div>降级次数: {{ aiStats.fallbackCalls }}</div>
+                  <div>降级率: {{ aiStats.fallbackRate }}%</div>
+                  <div>平均耗时: {{ aiStats.avgLatency }} ms</div>
+                </div>
               </div>
 
               <div v-if="diagnosis" class="diagnosis">
                 <h3>{{ diagnosis.anomaly_name }} ({{ diagnosis.risk_level }})</h3>
-                <p>置信度：{{ diagnosis.confidence }}</p>
+                <p>置信度：{{ diagnosis.confidence }} | Provider: {{ diagnosis.provider }} | 耗时: {{ diagnosis.latency_ms }}ms</p>
+                <p v-if="diagnosis.fallback_used" class="state-error">已降级到模板诊断：{{ diagnosis.degrade_message || 'LLM不可用' }}</p>
                 <p>{{ diagnosis.conclusion }}</p>
-                <h4>可能原因</h4>
-                <ul><li v-for="item in diagnosis.causes" :key="item">{{ item }}</li></ul>
-                <h4>排查步骤</h4>
-                <ul><li v-for="item in diagnosis.steps" :key="item">{{ item }}</li></ul>
-                <h4>优先动作</h4>
-                <ul><li v-for="item in diagnosis.recommended_actions" :key="item">{{ item }}</li></ul>
-                <h4>预防建议</h4>
-                <ul><li v-for="item in diagnosis.prevention" :key="item">{{ item }}</li></ul>
+                <h4>可能原因</h4><ul><li v-for="item in diagnosis.causes" :key="item">{{ item }}</li></ul>
+                <h4>排查步骤</h4><ul><li v-for="item in diagnosis.steps" :key="item">{{ item }}</li></ul>
+                <h4>优先动作</h4><ul><li v-for="item in diagnosis.recommended_actions" :key="item">{{ item }}</li></ul>
+                <h4>预防建议</h4><ul><li v-for="item in diagnosis.prevention" :key="item">{{ item }}</li></ul>
                 <h4>知识证据</h4>
-                <ul>
-                  <li v-for="item in diagnosis.evidence" :key="item.chunk_id">
-                    {{ item.title }} / {{ item.section }} - {{ item.excerpt }}
-                  </li>
-                </ul>
+                <ul><li v-for="item in diagnosis.evidence" :key="item.chunk_id">{{ item.title }} / {{ item.section }} - {{ item.excerpt }}</li></ul>
               </div>
+
               <div v-else class="empty-tip">暂无诊断结果，请先输入问题或从故障列表点击“诊断”。</div>
             </div>
           </div>
@@ -174,18 +179,36 @@
       </main>
     </div>
 
-    <el-dialog v-model="anomalyDetailVisible" title="异常详情" width="900px">
+    <el-dialog v-model="anomalyDetailVisible" title="异常详情" width="980px">
       <div v-if="anomalyDetail">
         <p><strong>异常类型：</strong>{{ anomalyDetail.anomaly.anomaly_name }}</p>
         <p><strong>建筑：</strong>{{ anomalyDetail.anomaly.building_name }} ({{ anomalyDetail.anomaly.building_id }})</p>
         <p><strong>时间：</strong>{{ anomalyDetail.anomaly.timestamp }}</p>
+        <p><strong>状态：</strong>{{ anomalyDetail.processing_summary.latest_status }}，处理人：{{ anomalyDetail.processing_summary.assignee || '-' }}</p>
         <p><strong>影响估算：</strong>{{ anomalyDetail.impact.estimated_loss_kwh }} kWh，减排潜力 {{ anomalyDetail.impact.carbon_kg }} kg</p>
         <p><strong>基线对比：</strong>{{ anomalyDetail.baseline_window.avg_kwh }} kWh（24h均值）</p>
         <p><strong>同类对比：</strong>{{ anomalyDetail.peer_compare.peer_avg_kwh }} kWh，偏差 {{ anomalyDetail.peer_compare.vs_peer_pct }}%</p>
         <p><strong>建议动作：</strong>{{ (anomalyDetail.recommended_actions || []).join('；') }}</p>
+        <h4>处理时间线</h4>
+        <ul class="history-list">
+          <li v-for="h in anomalyHistory" :key="`${h.created_at}-${h.action}`">{{ h.created_at }} | {{ h.action }} -> {{ h.status }} | {{ h.assignee || '未指派' }} | {{ h.note || '-' }}</li>
+        </ul>
       </div>
       <template #footer>
         <el-button @click="anomalyDetailVisible = false">关闭</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-model="actionDialogVisible" title="处理异常" width="560px">
+      <div class="action-form">
+        <p><strong>异常ID：</strong>{{ actionForm.anomalyId }}</p>
+        <p><strong>动作：</strong>{{ actionForm.action }}</p>
+        <el-input v-model="actionForm.assignee" placeholder="处理人（如：张三）"></el-input>
+        <el-input v-model="actionForm.note" type="textarea" :rows="4" placeholder="处理备注"></el-input>
+      </div>
+      <template #footer>
+        <el-button @click="actionDialogVisible = false">取消</el-button>
+        <el-button type="primary" :loading="loading.action" @click="submitAnomalyAction">提交</el-button>
       </template>
     </el-dialog>
   </div>
