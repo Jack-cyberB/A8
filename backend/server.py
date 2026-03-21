@@ -68,7 +68,7 @@ def load_local_env() -> None:
             if not line or line.startswith("#") or "=" not in line:
                 continue
             key, value = line.split("=", 1)
-            key = key.strip()
+            key = key.strip().lstrip("\ufeff")
             value = value.strip().strip("'\"")
             if key and key not in os.environ:
                 os.environ[key] = value
@@ -2142,6 +2142,139 @@ class EnergyRepository:
             "insights": insights,
         }
 
+    def _truncate_text(self, value: Any, limit: int = 160) -> str:
+        text = str(value or "").strip()
+        if len(text) <= limit:
+            return text
+        return f"{text[:limit].rstrip()}..."
+
+    def _build_analysis_prompt_context(
+        self,
+        payload: dict[str, Any],
+        context: dict[str, Any],
+        analysis_seed: dict[str, Any],
+    ) -> dict[str, Any]:
+        summary = context.get("summary") or {}
+        insights = context.get("insights") or {}
+        compare = context.get("compare") or {}
+        trend_snapshot = payload.get("trend_snapshot") if isinstance(payload.get("trend_snapshot"), dict) else {}
+        distribution_snapshot = payload.get("distribution_snapshot") if isinstance(payload.get("distribution_snapshot"), dict) else {}
+        compare_snapshot = payload.get("compare_snapshot") if isinstance(payload.get("compare_snapshot"), dict) else {}
+
+        def compact_findings(items: list[Any], limit: int = 4) -> list[dict[str, str]]:
+            compacted = []
+            for item in (items or [])[:limit]:
+                if not isinstance(item, dict):
+                    continue
+                compacted.append(
+                    {
+                        "title": self._truncate_text(item.get("title", ""), 80),
+                        "detail": self._truncate_text(item.get("detail", ""), 180),
+                        "severity": str(item.get("severity", "")).strip() or "info",
+                    }
+                )
+            return compacted
+
+        def compact_opportunities(items: list[Any], limit: int = 4) -> list[dict[str, Any]]:
+            compacted = []
+            for item in (items or [])[:limit]:
+                if not isinstance(item, dict):
+                    continue
+                compacted.append(
+                    {
+                        "title": self._truncate_text(item.get("title", ""), 80),
+                        "detail": self._truncate_text(item.get("detail", ""), 180),
+                        "priority": str(item.get("priority", "")).strip() or "info",
+                        "estimated_loss_kwh": item.get("estimated_loss_kwh", 0),
+                    }
+                )
+            return compacted
+
+        def compact_windows(items: list[Any], limit: int = 5) -> list[dict[str, Any]]:
+            compacted = []
+            for item in (items or [])[:limit]:
+                if not isinstance(item, dict):
+                    continue
+                compacted.append(
+                    {
+                        "timestamp": item.get("timestamp"),
+                        "anomaly_name": self._truncate_text(item.get("anomaly_name", ""), 60),
+                        "severity": item.get("severity"),
+                        "deviation_pct": item.get("deviation_pct"),
+                        "estimated_loss_kwh": item.get("estimated_loss_kwh"),
+                    }
+                )
+            return compacted
+
+        compact_evidence = []
+        for idx, item in enumerate((analysis_seed.get("evidence") or [])[:3], start=1):
+            if isinstance(item, dict):
+                compact_evidence.append(
+                    {
+                        "chunk_id": item.get("chunk_id", f"seed-{idx}"),
+                        "title": self._truncate_text(item.get("title", ""), 80),
+                        "section": self._truncate_text(item.get("section", ""), 80),
+                        "excerpt": self._truncate_text(item.get("excerpt", ""), 180),
+                    }
+                )
+            else:
+                compact_evidence.append(
+                    {
+                        "chunk_id": f"seed-{idx}",
+                        "title": "seed",
+                        "section": "",
+                        "excerpt": self._truncate_text(item, 180),
+                    }
+                )
+
+        return {
+            "building": {
+                "building_id": context.get("building_id"),
+                "building_name": context.get("building_name"),
+                "building_type": context.get("building_type"),
+                "metric_type": context.get("metric_type"),
+                "start_time": context.get("start_time"),
+                "end_time": context.get("end_time"),
+            },
+            "summary": {
+                "metric_label": summary.get("metric_label"),
+                "unit": summary.get("unit"),
+                "point_count": summary.get("point_count"),
+                "total_value": summary.get("total_value"),
+                "avg_value": summary.get("avg_value"),
+                "peak_value": summary.get("peak_value"),
+                "volatility_pct": summary.get("volatility_pct"),
+                "anomaly_count": summary.get("anomaly_count"),
+                "working_hour_avg": summary.get("working_hour_avg"),
+                "off_hour_avg": summary.get("off_hour_avg"),
+            },
+            "trend_snapshot": {
+                "window_change_pct": trend_snapshot.get("window_change_pct", context.get("trend", {}).get("summary", {}).get("window_change_pct")),
+                "temperature_correlation": trend_snapshot.get("temperature_correlation", context.get("trend", {}).get("summary", {}).get("temperature_correlation")),
+            },
+            "distribution_snapshot": {
+                "weekday_peak_hours": distribution_snapshot.get("weekday_peak_hours") or (context.get("distribution", {}).get("weekday_peak_hours") or [])[:4],
+                "night_base_load": distribution_snapshot.get("night_base_load") or context.get("distribution", {}).get("night_base_load") or {},
+            },
+            "compare_snapshot": compare_snapshot or compare.get("peer_group") or {},
+            "insight_snapshot": {
+                "scope_summary": insights.get("scope_summary") or {},
+                "trend_findings": compact_findings(insights.get("trend_findings") or []),
+                "weather_findings": compact_findings(insights.get("weather_findings") or []),
+                "compare_findings": compact_findings(insights.get("compare_findings") or []),
+                "saving_opportunities": compact_opportunities(insights.get("saving_opportunities") or []),
+                "anomaly_windows": compact_windows(insights.get("anomaly_windows") or []),
+            },
+            "analysis_seed": {
+                "summary": self._truncate_text(analysis_seed.get("summary", ""), 220),
+                "findings": [self._truncate_text(item, 160) for item in (analysis_seed.get("findings") or [])[:5]],
+                "possible_causes": [self._truncate_text(item, 160) for item in (analysis_seed.get("possible_causes") or [])[:4]],
+                "energy_saving_suggestions": [self._truncate_text(item, 160) for item in (analysis_seed.get("energy_saving_suggestions") or [])[:4]],
+                "operations_suggestions": [self._truncate_text(item, 160) for item in (analysis_seed.get("operations_suggestions") or [])[:4]],
+                "evidence": compact_evidence,
+            },
+        }
+
     def _analyze_by_template(self, payload: dict[str, Any]) -> dict[str, Any]:
         context = self._build_analysis_context(payload)
         summary = context["summary"]
@@ -2235,7 +2368,8 @@ class EnergyRepository:
 
                 base_url = os.getenv("OPENAI_BASE_URL", "https://api.deepseek.com").strip() or "https://api.deepseek.com"
                 model = os.getenv("OPENAI_MODEL", "deepseek-chat").strip() or "deepseek-chat"
-                timeout_sec = float(os.getenv("OPENAI_TIMEOUT_SEC", "20"))
+                base_timeout_sec = float(os.getenv("OPENAI_TIMEOUT_SEC", "20"))
+                timeout_sec = float(os.getenv("OPENAI_ANALYZE_TIMEOUT_SEC", str(max(base_timeout_sec, 45.0))))
                 context = template_result["context"]
                 analysis_seed = template_result["analysis"]
                 user_question = str(payload.get("message", "")).strip() or "请围绕当前筛选范围输出一份可直接用于汇报的分析结论。"
@@ -2247,9 +2381,9 @@ class EnergyRepository:
                     "请使用中文；不要输出空泛套话；结论必须引用给定的时间范围、趋势、同类对比、天气联动或异常窗口。"
                     "建议动作尽量落到具体时段、运行策略、夜间基线或异常事件。"
                 )
+                prompt_context = self._build_analysis_prompt_context(payload, context, analysis_seed)
                 user_prompt = (
-                    f"当前分析上下文: {json.dumps(context, ensure_ascii=False)}\n"
-                    f"当前结构化分析种子: {json.dumps(analysis_seed, ensure_ascii=False)}\n"
+                    f"当前分析上下文: {json.dumps(prompt_context, ensure_ascii=False)}\n"
                     f"用户补充问题: {user_question}\n"
                     "请基于当前建筑、筛选时间、KPI 摘要、趋势变化、温度关系、同类差距、节能机会和异常窗口生成结果。\n"
                     "如果证据不足，请明确说明证据不足，但仍要给出最稳妥的建议。\n"
@@ -2305,6 +2439,10 @@ class EnergyRepository:
             msg = (error_message or "").lower()
             if "http status 429" in msg:
                 error_type = "rate_limit"
+            elif "maximum context length" in msg or "reduce the length of the messages" in msg:
+                error_type = "context_too_long"
+            elif "timed out" in msg:
+                error_type = "timeout"
             elif "http status" in msg:
                 error_type = "http_error"
             elif "network error" in msg:
@@ -2413,6 +2551,10 @@ class EnergyRepository:
         lowered = raw.lower()
         if "not configured" in lowered:
             return "当前环境未配置 DeepSeek API Key，本次使用模板兜底。"
+        if "maximum context length" in lowered or "reduce the length of the messages" in lowered:
+            return "发送给 DeepSeek 的分析上下文过长，系统已切换到模板兜底。"
+        if "timed out" in lowered:
+            return "DeepSeek 分析响应超时，系统已切换到模板兜底。"
         if "network error" in lowered:
             return "DeepSeek 网络请求失败，本次使用模板兜底。"
         if "http status 429" in lowered:
