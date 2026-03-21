@@ -65,6 +65,8 @@ createApp({
         hourly_profile: [],
         weekday_weekend_split: [],
         day_night_split: [],
+        weekday_peak_hours: [],
+        night_base_load: { avg_value: 0, ratio_vs_avg_pct: 0 },
       },
       analysisCompare: {
         building: null,
@@ -72,6 +74,27 @@ createApp({
         items: [],
         peer_ranking: [],
         message: '',
+      },
+      analysisInsights: {
+        scope_summary: {
+          building_id: 'ALL',
+          building_name: '全部建筑',
+          building_type: 'portfolio',
+          selected_start_time: null,
+          selected_end_time: null,
+          data_start_time: null,
+          data_end_time: null,
+          point_count: 0,
+          granularity: 'hourly',
+          anomaly_count: 0,
+          metric_label: '电力',
+          unit: 'kWh',
+        },
+        trend_findings: [],
+        weather_findings: [],
+        compare_findings: [],
+        saving_opportunities: [],
+        anomaly_windows: [],
       },
       analysisInsight: null,
       analysisFeedbackLabel: '',
@@ -124,6 +147,7 @@ createApp({
         analysisTrend: false,
         analysisDistribution: false,
         analysisCompare: false,
+        analysisInsights: false,
         analysisInsight: false,
       },
       errors: {
@@ -134,6 +158,7 @@ createApp({
         analysisTrend: '',
         analysisDistribution: '',
         analysisCompare: '',
+        analysisInsights: '',
       },
       charts: {
         overview: null,
@@ -323,6 +348,8 @@ createApp({
         hourly_profile: [],
         weekday_weekend_split: [],
         day_night_split: [],
+        weekday_peak_hours: [],
+        night_base_load: { avg_value: 0, ratio_vs_avg_pct: 0 },
       };
       this.analysisCompare = {
         building: null,
@@ -330,6 +357,27 @@ createApp({
         items: [],
         peer_ranking: [],
         message: '',
+      };
+      this.analysisInsights = {
+        scope_summary: {
+          building_id: this.filters.buildingId || 'ALL',
+          building_name: this.selectedBuildingMeta()?.name || '全部建筑',
+          building_type: this.selectedBuildingMeta()?.type || 'portfolio',
+          selected_start_time: this.isCompleteRange(this.filters.range) ? this.filters.range[0] : null,
+          selected_end_time: this.isCompleteRange(this.filters.range) ? this.filters.range[1] : null,
+          data_start_time: null,
+          data_end_time: null,
+          point_count: 0,
+          granularity: 'hourly',
+          anomaly_count: 0,
+          metric_label: this.currentMetricLabel(),
+          unit: 'kWh',
+        },
+        trend_findings: [],
+        weather_findings: [],
+        compare_findings: [],
+        saving_opportunities: [],
+        anomaly_windows: [],
       };
     },
     setAnalysisUnsupported(message) {
@@ -510,6 +558,23 @@ createApp({
         this.loading.analysisCompare = false;
       }
     },
+    async loadAnalysisInsights() {
+      this.loading.analysisInsights = true;
+      this.errors.analysisInsights = '';
+      try {
+        const data = await this.fetchJson(`${API_BASE}/api/analysis/insights${buildQuery(this.getAnalysisParams())}`);
+        this.analysisInsights = data;
+      } catch (err) {
+        console.error(err);
+        if (String(err.message || '').includes('暂未接入')) {
+          this.setAnalysisUnsupported(err.message);
+          return;
+        }
+        this.errors.analysisInsights = '分析结论加载失败';
+      } finally {
+        this.loading.analysisInsights = false;
+      }
+    },
     async loadAnalysisWorkspace() {
       this.analysisUnsupportedMessage = '';
       await this.loadAnalysisSummary();
@@ -517,7 +582,7 @@ createApp({
         await nextTick();
         return;
       }
-      await Promise.all([this.loadAnalysisTrend(), this.loadAnalysisDistribution(), this.loadAnalysisCompare()]);
+      await Promise.all([this.loadAnalysisTrend(), this.loadAnalysisDistribution(), this.loadAnalysisCompare(), this.loadAnalysisInsights()]);
       await this.syncVisibleCharts();
     },
     async loadAnomalies() {
@@ -821,6 +886,14 @@ createApp({
           building_id: this.filters.buildingId || null,
           start_time: this.isCompleteRange(this.filters.range) ? this.filters.range[0] : null,
           end_time: this.isCompleteRange(this.filters.range) ? this.filters.range[1] : null,
+          insights: this.analysisInsights,
+          summary_snapshot: this.analysisSummary,
+          trend_snapshot: this.analysisTrend.summary,
+          distribution_snapshot: {
+            weekday_peak_hours: this.analysisDistribution.weekday_peak_hours || [],
+            night_base_load: this.analysisDistribution.night_base_load || {},
+          },
+          compare_snapshot: this.analysisCompare.peer_group || null,
           message: `${this.currentAnalysisScopeText()}，请输出结构化分析结论。`,
         };
         const data = await this.fetchJson(`${API_BASE}/api/ai/analyze`, {
@@ -909,6 +982,26 @@ createApp({
         },
       };
     },
+    insightToneClass(level) {
+      const map = {
+        danger: 'is-danger',
+        warning: 'is-warning',
+        success: 'is-success',
+        info: 'is-info',
+        high: 'is-danger',
+        medium: 'is-warning',
+        low: 'is-success',
+      };
+      return map[level] || 'is-info';
+    },
+    priorityTagType(level) {
+      const map = { high: 'danger', medium: 'warning', low: 'success' };
+      return map[level] || 'info';
+    },
+    formatInsightKwh(value) {
+      const num = Number(value || 0);
+      return Number.isFinite(num) ? `${num.toFixed(1)} kWh` : '0.0 kWh';
+    },
     bucketAnalysisSeries(series, bucketHours) {
       if (!Array.isArray(series) || !series.length || !bucketHours || bucketHours <= 1) {
         return series || [];
@@ -931,18 +1024,62 @@ createApp({
     },
     buildTrendChartSeries() {
       const rawSeries = this.analysisTrend.series || [];
+      const rawComparison = this.analysisTrend.comparison_series || [];
       const rawWeather = this.analysisTrend.weather_series || [];
       let bucketHours = 1;
       if (rawSeries.length > 1200) bucketHours = 24;
       else if (rawSeries.length > 480) bucketHours = 12;
       else if (rawSeries.length > 240) bucketHours = 6;
       const series = this.bucketAnalysisSeries(rawSeries, bucketHours);
+      const comparisonSeries = this.bucketAnalysisSeries(rawComparison, bucketHours);
       const weatherSeries = this.bucketAnalysisSeries(rawWeather, bucketHours);
       return {
         series,
+        comparisonSeries,
         weatherSeries,
         bucketHours,
       };
+    },
+    findTrendBucketForTimestamp(series, timestamp) {
+      if (!Array.isArray(series) || !series.length || !timestamp) return null;
+      const target = new Date(String(timestamp).replace(' ', 'T')).getTime();
+      let matched = null;
+      let minDiff = Number.POSITIVE_INFINITY;
+      series.forEach((item) => {
+        const bucketStart = new Date(String(item.bucket_start || item.timestamp).replace(' ', 'T')).getTime();
+        const bucketEnd = new Date(String(item.bucket_end || item.timestamp).replace(' ', 'T')).getTime();
+        if (target >= bucketStart && target <= bucketEnd) {
+          matched = item;
+          minDiff = 0;
+          return;
+        }
+        const diff = Math.abs(bucketStart - target);
+        if (diff < minDiff) {
+          matched = item;
+          minDiff = diff;
+        }
+      });
+      return matched;
+    },
+    buildTrendMarkerPoints(series) {
+      return (this.analysisTrend.markers || [])
+        .map((item) => {
+          const bucket = this.findTrendBucketForTimestamp(series, item.timestamp);
+          if (!bucket) return null;
+          return {
+            name: item.anomaly_name,
+            value: item.value,
+            coord: [bucket.timestamp, bucket.value],
+            itemStyle: {
+              color: item.severity === 'high' ? '#d94f4f' : item.severity === 'medium' ? '#f0a024' : '#3cb179',
+            },
+            label: {
+              show: false,
+            },
+            anomaly: item,
+          };
+        })
+        .filter(Boolean);
     },
     renderOverviewChart() {
       const chart = this.ensureChart('overview', 'overviewChart');
@@ -959,13 +1096,14 @@ createApp({
     renderTrendChart() {
       const chart = this.ensureChart('trend', 'trendChart');
       if (!chart) return;
-      const { series, weatherSeries, bucketHours } = this.buildTrendChartSeries();
+      const { series, comparisonSeries, weatherSeries, bucketHours } = this.buildTrendChartSeries();
       if (!series.length) {
         chart.clear();
         return;
       }
       const timeAxisLabel = this.buildTimeAxisLabels(series.map((item) => item.timestamp));
       const tooltipLabel = bucketHours > 1 ? `平均负荷（${bucketHours}h）` : `${this.currentMetricLabel()}负荷`;
+      const markerPoints = this.buildTrendMarkerPoints(series);
       const option = {
         grid: { left: 60, right: 62, top: 52, bottom: 46 },
         tooltip: {
@@ -1005,9 +1143,38 @@ createApp({
             smooth: 0.22,
             lineStyle: { width: 2.5, color: '#1462d9' },
             areaStyle: { color: 'rgba(20, 98, 217, 0.09)' },
+            markPoint: markerPoints.length ? {
+              symbol: 'circle',
+              symbolSize: 11,
+              itemStyle: { color: '#d94f4f' },
+              data: markerPoints,
+              tooltip: {
+                formatter: (params) => {
+                  const item = params?.data?.anomaly;
+                  if (!item) return params?.name || '';
+                  return [
+                    `${item.timestamp}`,
+                    `${item.anomaly_name} / ${item.severity}`,
+                    `偏差：${this.formatNumber(item.deviation_pct, 1)}%`,
+                    `影响估算：${this.formatNumber(item.estimated_loss_kwh, 1)} kWh`,
+                  ].join('<br/>');
+                },
+              },
+            } : undefined,
           },
         ],
       };
+      if (comparisonSeries?.length) {
+        option.series.push({
+          name: '同小时基线',
+          type: 'line',
+          data: comparisonSeries.map((i) => i.value),
+          showSymbol: false,
+          sampling: 'lttb',
+          smooth: 0.14,
+          lineStyle: { width: 1.6, type: 'dashed', color: '#7e90ac' },
+        });
+      }
       if (this.analysisOverlayWeather && this.analysisTrend.overlayAvailable && weatherSeries?.length) {
         option.series.push({
           name: '气温',
@@ -1125,8 +1292,13 @@ createApp({
         series: [{
           type: 'bar',
           barMaxWidth: 18,
-          data: items.map((item) => item.value),
-          itemStyle: { color: '#0f6adf', borderRadius: 8 },
+          data: items.map((item) => ({
+            value: item.value,
+            itemStyle: {
+              color: item.label.includes('当前') ? '#0f6adf' : '#7f90aa',
+              borderRadius: 8,
+            },
+          })),
           label: {
             show: true,
             position: 'right',

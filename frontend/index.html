@@ -126,6 +126,29 @@
           </div>
 
           <template v-else>
+            <div class="analysis-scope">
+              <div class="analysis-scope-item">
+                <div class="analysis-scope-label">当前建筑</div>
+                <div class="analysis-scope-value">{{ analysisInsights.scope_summary.building_name || '全部建筑' }}</div>
+                <div class="analysis-scope-note">{{ analysisInsights.scope_summary.building_type || 'portfolio' }}</div>
+              </div>
+              <div class="analysis-scope-item">
+                <div class="analysis-scope-label">筛选时间</div>
+                <div class="analysis-scope-value">{{ formatCompactDateTime(analysisInsights.scope_summary.selected_start_time) }} ~ {{ formatCompactDateTime(analysisInsights.scope_summary.selected_end_time) }}</div>
+                <div class="analysis-scope-note">顶部时间范围是唯一分析控制入口</div>
+              </div>
+              <div class="analysis-scope-item">
+                <div class="analysis-scope-label">有效数据</div>
+                <div class="analysis-scope-value">{{ formatCompactDateTime(analysisInsights.scope_summary.data_start_time) }} ~ {{ formatCompactDateTime(analysisInsights.scope_summary.data_end_time) }}</div>
+                <div class="analysis-scope-note">{{ analysisInsights.scope_summary.point_count || 0 }} 个点位 | {{ analysisInsights.scope_summary.granularity || 'hourly' }}</div>
+              </div>
+              <div class="analysis-scope-item">
+                <div class="analysis-scope-label">分析摘要</div>
+                <div class="analysis-scope-value">{{ currentMetricLabel() }} / {{ analysisSummary.unit || 'kWh' }}</div>
+                <div class="analysis-scope-note">异常窗口 {{ analysisInsights.scope_summary.anomaly_count || 0 }} 个</div>
+              </div>
+            </div>
+
             <div class="cards cards--analysis">
               <div class="card card--metric">
                 <div class="card-title">总量</div>
@@ -149,7 +172,7 @@
               </div>
             </div>
 
-            <div class="analysis-grid">
+            <div class="analysis-main-grid">
               <div class="panel panel--feature">
                 <div class="panel-head">
                   <div>
@@ -165,6 +188,53 @@
                 <div id="trendChart" class="chart chart--trend"></div>
               </div>
 
+              <div class="panel panel--insight">
+                <div class="panel-head">
+                  <div>
+                    <div class="panel-eyebrow">Insights</div>
+                    <div class="panel-title">本轮分析结论</div>
+                  </div>
+                  <div class="panel-meta">{{ analysisInsights.scope_summary.point_count || 0 }} 个数据点</div>
+                </div>
+                <div v-if="errors.analysisInsights" class="state-error">{{ errors.analysisInsights }}</div>
+                <div v-else class="insight-groups">
+                  <div class="insight-group">
+                    <div class="insight-group-title">趋势结论</div>
+                    <div v-if="!analysisInsights.trend_findings.length" class="empty-tip">当前时间范围暂无可解释趋势。</div>
+                    <div v-else class="insight-list">
+                      <div v-for="item in analysisInsights.trend_findings" :key="`trend-${item.title}`" class="insight-item" :class="insightToneClass(item.severity)">
+                        <div class="insight-item-title">{{ item.title }}</div>
+                        <div class="insight-item-detail">{{ item.detail }}</div>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div class="insight-group">
+                    <div class="insight-group-title">天气联动</div>
+                    <div v-if="!analysisInsights.weather_findings.length" class="empty-tip">当前没有温度联动结论。</div>
+                    <div v-else class="insight-list">
+                      <div v-for="item in analysisInsights.weather_findings" :key="`weather-${item.title}`" class="insight-item" :class="insightToneClass(item.severity)">
+                        <div class="insight-item-title">{{ item.title }}</div>
+                        <div class="insight-item-detail">{{ item.detail }}</div>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div class="insight-group">
+                    <div class="insight-group-title">同类对比</div>
+                    <div v-if="!analysisInsights.compare_findings.length" class="empty-tip">选择单体建筑后，这里会给出同类位置和差距解释。</div>
+                    <div v-else class="insight-list">
+                      <div v-for="item in analysisInsights.compare_findings" :key="`compare-${item.title}`" class="insight-item" :class="insightToneClass(item.severity)">
+                        <div class="insight-item-title">{{ item.title }}</div>
+                        <div class="insight-item-detail">{{ item.detail }}</div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="analysis-secondary-grid">
               <div class="panel">
                 <div class="panel-head">
                   <div>
@@ -198,6 +268,20 @@
                   <div id="compareChart" class="chart chart--compare"></div>
                   <div class="peer-list">
                     <div class="peer-list-title">同类建筑均值排名</div>
+                    <div v-if="analysisCompare.peer_group" class="peer-summary">
+                      <div class="peer-summary-item">
+                        <span>偏离同类均值</span>
+                        <strong>{{ formatNumber(analysisCompare.peer_group.gap_pct, 1) }}%</strong>
+                      </div>
+                      <div class="peer-summary-item">
+                        <span>同类百分位</span>
+                        <strong>{{ formatNumber(analysisCompare.peer_group.peer_percentile, 1) }}</strong>
+                      </div>
+                      <div class="peer-summary-item">
+                        <span>排名位置</span>
+                        <strong>{{ analysisCompare.peer_group.ranking_position || '-' }}/{{ analysisCompare.peer_group.peer_count || '-' }}</strong>
+                      </div>
+                    </div>
                     <div v-if="!analysisCompare.peer_ranking.length" class="empty-tip">请选择单体建筑后查看同类对比。</div>
                     <ul v-else>
                       <li v-for="item in analysisCompare.peer_ranking" :key="item.building_id">
@@ -205,6 +289,55 @@
                         <strong>{{ formatNumber(item.avg_value, 1) }} kWh</strong>
                       </li>
                     </ul>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="analysis-bottom-grid">
+              <div class="panel">
+                <div class="panel-head">
+                  <div>
+                    <div class="panel-eyebrow">Opportunity</div>
+                    <div class="panel-title">节能机会与优化动作</div>
+                  </div>
+                  <div class="panel-meta">先解释高耗，再落到动作</div>
+                </div>
+                <div v-if="!analysisInsights.saving_opportunities.length" class="empty-tip">当前时间范围暂无明显节能机会点。</div>
+                <div v-else class="opportunity-grid">
+                  <div v-for="item in analysisInsights.saving_opportunities" :key="item.title" class="opportunity-card">
+                    <div class="opportunity-head">
+                      <div class="opportunity-title">{{ item.title }}</div>
+                      <el-tag size="small" effect="light" :type="priorityTagType(item.priority)">{{ item.priority || 'info' }}</el-tag>
+                    </div>
+                    <div class="opportunity-detail">{{ item.detail }}</div>
+                    <div class="opportunity-meta">影响估算 {{ formatInsightKwh(item.estimated_loss_kwh) }}</div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="panel">
+                <div class="panel-head">
+                  <div>
+                    <div class="panel-eyebrow">Anomaly Windows</div>
+                    <div class="panel-title">异常窗口与影响估算</div>
+                  </div>
+                  <div class="panel-meta">把异常点直接映射到可解释时间段</div>
+                </div>
+                <div v-if="!analysisInsights.anomaly_windows.length" class="empty-tip">当前筛选范围内没有识别到异常窗口。</div>
+                <div v-else class="anomaly-window-list">
+                  <div v-for="item in analysisInsights.anomaly_windows" :key="`${item.timestamp}-${item.anomaly_name}`" class="anomaly-window-card">
+                    <div class="anomaly-window-head">
+                      <div>
+                        <div class="anomaly-window-title">{{ item.anomaly_name }}</div>
+                        <div class="anomaly-window-time">{{ formatCompactDateTime(item.timestamp) }}</div>
+                      </div>
+                      <div class="anomaly-window-tags">
+                        <el-tag size="small" effect="light" :type="severityTagType(item.severity)">{{ severityLabel(item.severity) }}</el-tag>
+                        <el-tag size="small" effect="plain">{{ formatNumber(item.deviation_pct, 1) }}%</el-tag>
+                      </div>
+                    </div>
+                    <div class="anomaly-window-detail">影响估算 {{ formatInsightKwh(item.estimated_loss_kwh) }}，建议优先检查对应时间段内的设备工况与控制策略。</div>
                   </div>
                 </div>
               </div>

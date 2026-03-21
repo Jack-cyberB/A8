@@ -26,9 +26,28 @@ class RepositoryTests(unittest.TestCase):
         self.assertGreater(summary["total_value"], 0)
         self.assertGreater(len(trend["series"]), 0)
         self.assertIn("overlay_available", trend)
+        self.assertIn("comparison_series", trend)
+        self.assertIn("markers", trend)
         self.assertEqual(len(distribution["hourly_profile"]), 24)
         self.assertEqual(len(distribution["weekday_weekend_split"]), 2)
+        self.assertIn("weekday_peak_hours", distribution)
+        self.assertIn("night_base_load", distribution)
         self.assertEqual(len(compare["items"]), 2)
+        self.assertIn("peer_percentile", compare["peer_group"])
+        self.assertIn("gap_pct", compare["peer_group"])
+
+    def test_analysis_insights_shape(self):
+        buildings = REPO.query_buildings()["items"]
+        building_id = buildings[0]["building_id"]
+        insights = REPO.query_analysis_insights(building_id, None, None, "electricity")
+
+        self.assertIn("scope_summary", insights)
+        self.assertIn("trend_findings", insights)
+        self.assertIn("weather_findings", insights)
+        self.assertIn("compare_findings", insights)
+        self.assertIn("saving_opportunities", insights)
+        self.assertIn("anomaly_windows", insights)
+        self.assertGreater(insights["scope_summary"]["point_count"], 0)
 
     def test_analysis_interfaces_unsupported_metric(self):
         with self.assertRaises(ValueError):

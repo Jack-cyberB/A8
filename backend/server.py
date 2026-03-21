@@ -1153,6 +1153,105 @@ class EnergyRepository:
             return 0.0
         return round(numerator / denominator, 4)
 
+    def _granularity_label(self, rows: list[dict[str, Any]]) -> str:
+        ordered = sorted(rows, key=lambda item: item["timestamp"])
+        if len(ordered) < 2:
+            return "single-point"
+        deltas = [
+            max(1.0, round((ordered[index + 1]["timestamp"] - ordered[index]["timestamp"]).total_seconds() / 3600, 2))
+            for index in range(min(len(ordered) - 1, 48))
+        ]
+        avg_delta = sum(deltas) / len(deltas)
+        if avg_delta <= 1.2:
+            return "hourly"
+        if avg_delta <= 6.5:
+            return "6-hour"
+        if avg_delta <= 12.5:
+            return "12-hour"
+        return "daily"
+
+    def _comparison_series(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        ordered = sorted(rows, key=lambda item: item["timestamp"])
+        if not ordered:
+            return []
+        by_hour: dict[int, list[float]] = {hour: [] for hour in range(24)}
+        for row in ordered:
+            by_hour[int(row["hour"])].append(float(row["electricity_kwh"]))
+        baseline_by_hour = {
+            hour: (sum(values) / len(values)) if values else 0.0
+            for hour, values in by_hour.items()
+        }
+        return [
+            {
+                "timestamp": to_iso(row["timestamp"]),
+                "value": round(baseline_by_hour[int(row["hour"])], 4),
+            }
+            for row in ordered
+        ]
+
+    def _weather_relation_stats(self, series: list[dict[str, Any]]) -> dict[str, float]:
+        pairs = [
+            (float(item["temperature_c"]), float(item["value"]))
+            for item in series
+            if item.get("temperature_c") is not None
+        ]
+        if len(pairs) < 6:
+            return {
+                "hot_avg_load": 0.0,
+                "cold_avg_load": 0.0,
+                "hot_avg_temp": 0.0,
+                "cold_avg_temp": 0.0,
+                "hot_cold_gap_pct": 0.0,
+            }
+
+        sorted_pairs = sorted(pairs, key=lambda item: item[0])
+        bucket_size = max(2, len(sorted_pairs) // 3)
+        cold_bucket = sorted_pairs[:bucket_size]
+        hot_bucket = sorted_pairs[-bucket_size:]
+        cold_avg_load = sum(item[1] for item in cold_bucket) / len(cold_bucket)
+        hot_avg_load = sum(item[1] for item in hot_bucket) / len(hot_bucket)
+        cold_avg_temp = sum(item[0] for item in cold_bucket) / len(cold_bucket)
+        hot_avg_temp = sum(item[0] for item in hot_bucket) / len(hot_bucket)
+        gap_pct = ((hot_avg_load - cold_avg_load) / cold_avg_load * 100) if cold_avg_load else 0.0
+        return {
+            "hot_avg_load": round(hot_avg_load, 4),
+            "cold_avg_load": round(cold_avg_load, 4),
+            "hot_avg_temp": round(hot_avg_temp, 2),
+            "cold_avg_temp": round(cold_avg_temp, 2),
+            "hot_cold_gap_pct": round(gap_pct, 2),
+        }
+
+    def _trend_markers(self, anomalies: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        ranked = sorted(
+            anomalies,
+            key=lambda item: (SEVERITY_SCORE.get(str(item.get("severity")), 0), float(item.get("deviation_pct", 0.0))),
+            reverse=True,
+        )[:12]
+        ranked.sort(key=lambda item: item["timestamp"])
+        return [
+            {
+                "anomaly_id": int(item["anomaly_id"]),
+                "timestamp": to_iso(item["timestamp"]),
+                "anomaly_name": self.dict_data.get(str(item.get("anomaly_type", "")), {}).get("name", item.get("anomaly_type", "异常")),
+                "severity": item["severity"],
+                "deviation_pct": round(float(item["deviation_pct"]), 2),
+                "value": round(float(item["electricity_kwh"]), 4),
+                "estimated_loss_kwh": round(max(float(item["electricity_kwh"]) - float(item["mean_kwh"]), 0.0), 4),
+            }
+            for item in ranked
+        ]
+
+    def _insight_item(self, title: str, detail: str, severity: str = "info") -> dict[str, str]:
+        return {"title": title, "detail": detail, "severity": severity}
+
+    def _opportunity_item(self, title: str, detail: str, priority: str, estimated_kwh: float = 0.0) -> dict[str, Any]:
+        return {
+            "title": title,
+            "detail": detail,
+            "priority": priority,
+            "estimated_kwh": round(float(estimated_kwh), 4),
+        }
+
     def _analysis_target_building(self, building_id: str | None, rows: list[dict[str, Any]]) -> tuple[str | None, list[dict[str, Any]]]:
         if building_id and building_id in self.by_building:
             return building_id, self._filter_rows(building_id, None, None)
@@ -1265,6 +1364,7 @@ class EnergyRepository:
         metric = self._require_metric_type(metric_type)
         rows = self._filter_rows(building_id, start_time, end_time)
         series, weather_series = self._series_with_weather(rows, building_id)
+        anomalies = self._filter_anomalies(building_id, start_time, end_time)
         values = [item["value"] for item in series]
         summary = self._summarize_values(values)
 
@@ -1283,7 +1383,9 @@ class EnergyRepository:
             "unit": "kWh",
             "building_id": building_id or "ALL",
             "series": series,
+            "comparison_series": self._comparison_series(rows),
             "weather_series": weather_series,
+            "markers": self._trend_markers(anomalies),
             "overlay_available": bool(weather_series),
             "summary": {
                 "total_value": summary["total"],
@@ -1305,22 +1407,27 @@ class EnergyRepository:
         metric = self._require_metric_type(metric_type)
         rows = self._filter_rows(building_id, start_time, end_time)
         hourly: dict[int, list[float]] = {hour: [] for hour in range(24)}
+        weekday_hourly: dict[int, list[float]] = {hour: [] for hour in range(24)}
         weekday_total = 0.0
         weekend_total = 0.0
         day_total = 0.0
         night_total = 0.0
+        night_base_values: list[float] = []
 
         for row in rows:
             value = float(row["electricity_kwh"])
             hourly[row["hour"]].append(value)
             if row["timestamp"].weekday() < 5:
                 weekday_total += value
+                weekday_hourly[row["hour"]].append(value)
             else:
                 weekend_total += value
             if 8 <= row["hour"] <= 20:
                 day_total += value
             else:
                 night_total += value
+            if row["hour"] < 6 or row["hour"] >= 22:
+                night_base_values.append(value)
 
         hourly_profile = [
             {
@@ -1332,6 +1439,18 @@ class EnergyRepository:
         ]
         total = weekday_total + weekend_total
         active_total = day_total + night_total
+        weekday_peak_hours = [
+            {
+                "hour": hour,
+                "label": f"{hour:02d}:00",
+                "avg_value": round(sum(values) / len(values), 4),
+            }
+            for hour, values in weekday_hourly.items()
+            if values
+        ]
+        weekday_peak_hours.sort(key=lambda item: item["avg_value"], reverse=True)
+        night_base_avg = round(sum(night_base_values) / len(night_base_values), 4) if night_base_values else 0.0
+        summary_avg = round(sum(float(row["electricity_kwh"]) for row in rows) / len(rows), 4) if rows else 0.0
 
         return {
             "metric_type": metric,
@@ -1347,6 +1466,11 @@ class EnergyRepository:
                 {"label": "白天", "value": round(day_total, 4), "ratio_pct": round((day_total / active_total * 100) if active_total else 0.0, 2)},
                 {"label": "夜间", "value": round(night_total, 4), "ratio_pct": round((night_total / active_total * 100) if active_total else 0.0, 2)},
             ],
+            "weekday_peak_hours": weekday_peak_hours[:3],
+            "night_base_load": {
+                "avg_value": night_base_avg,
+                "ratio_vs_avg_pct": round((night_base_avg / summary_avg * 100) if summary_avg else 0.0, 2),
+            },
         }
 
     def query_analysis_compare(
@@ -1396,6 +1520,14 @@ class EnergyRepository:
         peer_avg = round(sum(peer_candidates.values()) / len(peer_candidates), 4) if peer_candidates else 0.0
         target_avg = round(building_avg.get(target_building_id, 0.0), 4)
         vs_peer_pct = round(((target_avg - peer_avg) / peer_avg * 100) if peer_avg else 0.0, 2)
+        percentile = round(
+            (
+                sum(1 for avg in peer_candidates.values() if avg <= target_avg) / len(peer_candidates) * 100
+            ) if peer_candidates else 0.0,
+            2,
+        )
+        ordered_peers = [bid for bid, _ in sorted(peer_candidates.items(), key=lambda item: item[1], reverse=True)]
+        ranking_position = ordered_peers.index(target_building_id) + 1 if target_building_id in ordered_peers else None
 
         ranking = [
             {
@@ -1421,12 +1553,179 @@ class EnergyRepository:
                 "peer_avg_value": peer_avg,
                 "peer_count": len(peer_candidates),
                 "vs_peer_pct": vs_peer_pct,
+                "gap_pct": vs_peer_pct,
+                "peer_percentile": percentile,
+                "ranking_position": ranking_position,
             },
             "items": [
                 {"label": "当前建筑", "value": target_avg},
                 {"label": "同类均值", "value": peer_avg},
             ],
             "peer_ranking": ranking,
+        }
+
+    def query_analysis_insights(
+        self,
+        building_id: str | None,
+        start_time: dt.datetime | None,
+        end_time: dt.datetime | None,
+        metric_type: str | None = "electricity",
+    ) -> dict[str, Any]:
+        metric = self._require_metric_type(metric_type)
+        rows = self._filter_rows(building_id, start_time, end_time)
+        ordered_rows = sorted(rows, key=lambda item: item["timestamp"])
+        summary = self.query_analysis_summary(building_id, start_time, end_time, metric)
+        trend = self.query_analysis_trend(building_id, start_time, end_time, metric)
+        distribution = self.query_analysis_distribution(building_id, start_time, end_time, metric)
+        compare = self.query_analysis_compare(building_id, start_time, end_time, metric)
+        anomalies = self._filter_anomalies(building_id, start_time, end_time)
+        building_meta = self.buildings_meta.get(building_id or "", {})
+        weather_stats = self._weather_relation_stats(trend["series"])
+
+        scope_summary = {
+            "building_id": building_id or "ALL",
+            "building_name": building_meta.get("building_name", "全部建筑"),
+            "building_type": building_meta.get("building_type", "portfolio") if building_id else "portfolio",
+            "selected_start_time": to_iso(start_time) if start_time else None,
+            "selected_end_time": to_iso(end_time) if end_time else None,
+            "data_start_time": to_iso(ordered_rows[0]["timestamp"]) if ordered_rows else None,
+            "data_end_time": to_iso(ordered_rows[-1]["timestamp"]) if ordered_rows else None,
+            "point_count": len(ordered_rows),
+            "granularity": self._granularity_label(ordered_rows),
+            "anomaly_count": len(anomalies),
+            "metric_label": "电力",
+            "unit": "kWh",
+        }
+
+        trend_findings: list[dict[str, str]] = []
+        weather_findings: list[dict[str, str]] = []
+        compare_findings: list[dict[str, str]] = []
+        saving_opportunities: list[dict[str, Any]] = []
+
+        change_pct = float(trend["summary"].get("window_change_pct", 0.0))
+        volatility_pct = float(summary.get("volatility_pct", 0.0))
+        temp_corr = float(trend["summary"].get("temperature_correlation", 0.0))
+        working_hour_avg = float(summary.get("working_hour_avg", 0.0))
+        off_hour_avg = float(summary.get("off_hour_avg", 0.0))
+        working_off_gap_pct = ((working_hour_avg - off_hour_avg) / off_hour_avg * 100) if off_hour_avg else 0.0
+
+        if change_pct >= 12:
+            trend_findings.append(self._insight_item("近期负荷抬升", f"前后窗口均值上升 {round(change_pct, 2)}%，近期存在明显增载。", "warning"))
+        elif change_pct <= -12:
+            trend_findings.append(self._insight_item("近期负荷回落", f"前后窗口均值下降 {round(abs(change_pct), 2)}%，近期运行压力有所回落。", "success"))
+        else:
+            trend_findings.append(self._insight_item("趋势整体平稳", f"窗口变化 {round(change_pct, 2)}%，当前负荷没有明显阶跃变化。", "info"))
+
+        if volatility_pct >= 35:
+            trend_findings.append(self._insight_item("波动偏大", f"波动率 {round(volatility_pct, 2)}%，建议重点关注启停频繁时段。", "danger"))
+        else:
+            trend_findings.append(self._insight_item("稳定性可控", f"波动率 {round(volatility_pct, 2)}%，曲线整体处于可解释区间。", "success"))
+
+        if working_off_gap_pct >= 60:
+            trend_findings.append(self._insight_item("工作时段主导负荷", f"工作时段均值较非工作时段高 {round(working_off_gap_pct, 2)}%，节能重点应放在白天主业务时段。", "info"))
+        elif off_hour_avg and (off_hour_avg / max(working_hour_avg, 1e-6)) >= 0.7:
+            trend_findings.append(self._insight_item("非工作时段负荷偏高", "非工作时段负荷没有明显回落，可能存在待机或常开设备。", "warning"))
+
+        if trend["overlay_available"]:
+            if temp_corr >= 0.35:
+                weather_findings.append(self._insight_item("温度正相关明显", f"温度相关系数 {round(temp_corr, 2)}，热天气会显著抬升负荷。", "warning"))
+            elif temp_corr <= -0.35:
+                weather_findings.append(self._insight_item("温度反向影响", f"温度相关系数 {round(temp_corr, 2)}，低温时段负荷抬升更明显。", "info"))
+            else:
+                weather_findings.append(self._insight_item("天气影响有限", f"温度相关系数 {round(temp_corr, 2)}，当前窗口内负荷更受内部运行策略影响。", "info"))
+
+            if weather_stats["hot_avg_load"] and weather_stats["cold_avg_load"]:
+                weather_findings.append(
+                    self._insight_item(
+                        "冷热天差异",
+                        f"热天均值 {weather_stats['hot_avg_load']} kWh，冷天均值 {weather_stats['cold_avg_load']} kWh，差异 {round(weather_stats['hot_cold_gap_pct'], 2)}%。",
+                        "info" if abs(weather_stats["hot_cold_gap_pct"]) < 12 else "warning",
+                    )
+                )
+
+        peer_group = compare.get("peer_group") or {}
+        if compare.get("message"):
+            compare_findings.append(self._insight_item("同类对比待选定", compare["message"], "info"))
+        else:
+            compare_findings.append(
+                self._insight_item(
+                    "同类位置",
+                    f"当前建筑在同类中位于前 {round(peer_group.get('peer_percentile', 0.0), 2)} 百分位，排名 {peer_group.get('ranking_position') or '-'} / {peer_group.get('peer_count') or '-'}。",
+                    "warning" if float(peer_group.get("gap_pct", 0.0)) > 10 else "info",
+                )
+            )
+            compare_findings.append(
+                self._insight_item(
+                    "与同类均值差距",
+                    f"当前均值较同类均值 {'高' if float(peer_group.get('gap_pct', 0.0)) >= 0 else '低'} {round(abs(float(peer_group.get('gap_pct', 0.0))), 2)}%。",
+                    "warning" if abs(float(peer_group.get("gap_pct", 0.0))) >= 10 else "success",
+                )
+            )
+
+        if distribution["night_base_load"]["avg_value"] > 0:
+            saving_opportunities.append(
+                self._opportunity_item(
+                    "夜间基线负荷优化",
+                    f"夜间基线约 {distribution['night_base_load']['avg_value']} kWh，为整体均值的 {distribution['night_base_load']['ratio_vs_avg_pct']}%。可优先排查夜间常开设备。",
+                    "high" if distribution["night_base_load"]["ratio_vs_avg_pct"] >= 55 else "medium",
+                    distribution["night_base_load"]["avg_value"],
+                )
+            )
+
+        anomaly_waste = sum(max(float(item["electricity_kwh"]) - float(item["mean_kwh"]), 0.0) for item in anomalies)
+        if anomaly_waste > 0:
+            saving_opportunities.append(
+                self._opportunity_item(
+                    "异常浪费回收",
+                    f"当前窗口异常额外损失约 {round(anomaly_waste, 2)} kWh，可通过优先处理突增和持续高负荷事件回收损耗。",
+                    "high" if len(anomalies) >= 3 else "medium",
+                    anomaly_waste,
+                )
+            )
+
+        if float(peer_group.get("gap_pct", 0.0)) > 8 and summary["point_count"] > 0:
+            estimated_gap = max(float(summary["avg_value"]) - float(peer_group.get("peer_avg_value", 0.0)), 0.0) * summary["point_count"]
+            saving_opportunities.append(
+                self._opportunity_item(
+                    "同类差距收敛",
+                    f"若将均值收敛到同类水平，当前窗口理论可优化约 {round(estimated_gap, 2)} kWh。",
+                    "medium",
+                    estimated_gap,
+                )
+            )
+
+        peak_hours = distribution.get("weekday_peak_hours") or []
+        if peak_hours:
+            top_hour = peak_hours[0]
+            saving_opportunities.append(
+                self._opportunity_item(
+                    "高峰时段策略优化",
+                    f"工作日高峰集中在 {top_hour['label']} 左右，平均负荷 {top_hour['avg_value']} kWh，适合做错峰和设定点优化。",
+                    "medium",
+                    top_hour["avg_value"],
+                )
+            )
+
+        anomaly_windows = [
+            {
+                "anomaly_id": item["anomaly_id"],
+                "timestamp": item["timestamp"],
+                "anomaly_name": item["anomaly_name"],
+                "severity": item["severity"],
+                "deviation_pct": item["deviation_pct"],
+                "estimated_loss_kwh": item["estimated_loss_kwh"],
+            }
+            for item in self._trend_markers(anomalies)[:4]
+        ]
+
+        return {
+            "metric_type": metric,
+            "scope_summary": scope_summary,
+            "trend_findings": trend_findings[:4],
+            "weather_findings": weather_findings[:3],
+            "compare_findings": compare_findings[:3],
+            "saving_opportunities": saving_opportunities[:4],
+            "anomaly_windows": anomaly_windows,
         }
 
     def query_trend(self, building_id: str | None, start_time: dt.datetime | None, end_time: dt.datetime | None) -> dict[str, Any]:
@@ -1802,6 +2101,8 @@ class EnergyRepository:
         trend = self.query_analysis_trend(building_id, start_time, end_time, metric_type)
         distribution = self.query_analysis_distribution(building_id, start_time, end_time, metric_type)
         compare = self.query_analysis_compare(building_id, start_time, end_time, metric_type)
+        payload_insights = payload.get("insights")
+        insights = payload_insights if isinstance(payload_insights, dict) else self.query_analysis_insights(building_id, start_time, end_time, metric_type)
         building = compare.get("building") or {}
 
         return {
@@ -1815,82 +2116,63 @@ class EnergyRepository:
             "trend": trend,
             "distribution": distribution,
             "compare": compare,
+            "insights": insights,
         }
 
     def _analyze_by_template(self, payload: dict[str, Any]) -> dict[str, Any]:
         context = self._build_analysis_context(payload)
         summary = context["summary"]
-        trend = context["trend"]
-        distribution = context["distribution"]
-        compare = context["compare"]
+        insights = context["insights"]
         building_name = context.get("building_name") or "当前建筑"
         metric_label = "电力"
+        findings = [
+            f"{item['title']}：{item['detail']}"
+            for item in (
+                (insights.get("trend_findings") or []) +
+                (insights.get("weather_findings") or []) +
+                (insights.get("compare_findings") or [])
+            )[:6]
+        ]
 
-        findings: list[str] = []
         possible_causes: list[str] = []
-        energy_saving: list[str] = []
-        operations: list[str] = []
-
-        change_pct = float(trend["summary"].get("window_change_pct", 0.0))
-        volatility_pct = float(summary.get("volatility_pct", 0.0))
-        temp_corr = float(trend["summary"].get("temperature_correlation", 0.0))
-        vs_peer_pct = float(compare.get("peer_group", {}).get("vs_peer_pct", 0.0))
-
-        if change_pct >= 10:
-            findings.append(f"近阶段 {metric_label}负荷较前段上升 {round(change_pct, 2)}%，存在近期增载迹象。")
-            possible_causes.append("近期时段内设备启停策略变化或使用强度上升。")
-        elif change_pct <= -10:
-            findings.append(f"近阶段 {metric_label}负荷较前段下降 {round(abs(change_pct), 2)}%，负荷回落明显。")
-            possible_causes.append("近期运行时长下降或局部区域空置。")
-        else:
-            findings.append("近阶段负荷变化整体平稳，没有出现明显阶跃波动。")
-
-        if volatility_pct >= 35:
-            findings.append(f"波动率达到 {round(volatility_pct, 2)}%，曲线稳定性偏弱。")
-            possible_causes.append("存在频繁启停、时段切换不稳定或策略控制震荡。")
-            operations.append("优先核查高峰时段设备启停逻辑，确认是否存在频繁切换。")
-        else:
-            findings.append(f"波动率为 {round(volatility_pct, 2)}%，曲线总体可控。")
-
-        if vs_peer_pct >= 15:
-            findings.append(f"当前建筑较同类平均高出 {round(vs_peer_pct, 2)}%，存在同类对比偏高问题。")
-            energy_saving.append("优先对照同类建筑运行策略，定位高于同类均值的关键时段。")
-        elif vs_peer_pct <= -15:
-            findings.append(f"当前建筑较同类平均低 {round(abs(vs_peer_pct), 2)}%，运行表现优于同类。")
-        else:
-            findings.append("当前建筑与同类均值接近，负荷水平处于正常区间。")
-
-        if temp_corr >= 0.35:
-            findings.append("用电与气温呈明显正相关，受天气热负荷影响较大。")
-            possible_causes.append("外部温度上升带动空调和通风负荷提升。")
-            energy_saving.append("结合温度变化优化空调设定点和分时启停策略。")
-        elif temp_corr <= -0.35:
-            findings.append("用电与气温呈反向相关，可能受采暖或特殊设备运行影响。")
-            possible_causes.append("低温时段带来的采暖或伴热负荷抬升。")
-        else:
-            findings.append("当前时段内气温与用电相关性不强，更多受到内部运行策略影响。")
-
-        weekday = distribution["weekday_weekend_split"][0]
-        weekend = distribution["weekday_weekend_split"][1]
-        if weekday["ratio_pct"] >= 70:
-            energy_saving.append("将节能优化重点放在工作日白天主负荷区间。")
-        if distribution["day_night_split"][1]["ratio_pct"] >= 40:
-            operations.append("夜间负荷占比偏高，建议排查夜间常开设备和待机策略。")
-
-        if not energy_saving:
-            energy_saving.append("保持当前负荷控制策略，重点关注异常波动时段。")
-        if not operations:
-            operations.append("持续跟踪高峰时段与低谷时段的设备运行记录，形成排班对照。")
+        for item in insights.get("weather_findings") or []:
+            text = str(item.get("detail", ""))
+            if "热天气" in text or "温度正相关" in text:
+                possible_causes.append("负荷受外部气温影响明显，空调或通风策略可能抬高用电。")
+            elif "低温" in text or "反向影响" in text:
+                possible_causes.append("低温时段相关负荷抬升，需排查采暖或伴热运行策略。")
+        for item in insights.get("trend_findings") or []:
+            text = str(item.get("detail", ""))
+            if "启停" in text or "波动" in text:
+                possible_causes.append("设备启停节奏可能偏密，导致曲线稳定性下降。")
+            elif "非工作时段负荷偏高" in f"{item.get('title', '')}{text}":
+                possible_causes.append("存在夜间待机、常开或联动策略未收敛的问题。")
         if not possible_causes:
-            possible_causes.append("建议进一步结合设备台账和运行日程补充根因判断。")
+            possible_causes.append("建议结合设备台账、运行日程和异常时间窗进一步定位根因。")
+
+        energy_saving = [
+            f"{item['title']}：{item['detail']}"
+            for item in (insights.get("saving_opportunities") or [])[:4]
+        ]
+        if not energy_saving:
+            energy_saving.append("当前窗口未发现明确的高优先节能机会，可继续跟踪高峰和夜间负荷。")
+
+        operations = [
+            f"优先复核 {item['timestamp']} 的 {item['anomaly_name']}，偏差 {item['deviation_pct']}%，影响约 {item['estimated_loss_kwh']} kWh。"
+            for item in (insights.get("anomaly_windows") or [])[:3]
+        ]
+        if not operations:
+            operations.append("继续跟踪高峰时段与夜间基线，形成设备运行排班对照。")
 
         evidence = []
         message = str(payload.get("message", "")).strip() or f"{building_name} {metric_label} 分析"
         for item in self._search_knowledge("anomaly_sustained_high_load", message, limit=3):
             evidence.append(item)
 
+        scope = insights.get("scope_summary") or {}
         summary_text = (
-            f"{building_name} 当前{metric_label}分析显示，均值 {summary['avg_value']} kWh，"
+            f"{building_name} 当前{metric_label}分析覆盖 {scope.get('data_start_time') or '-'} 至 {scope.get('data_end_time') or '-'}，"
+            f"共 {scope.get('point_count', 0)} 个数据点；均值 {summary['avg_value']} kWh，"
             f"峰值 {summary['peak_value']} kWh，波动率 {summary['volatility_pct']}%。"
         )
 
@@ -2264,6 +2546,15 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/analysis/distribution":
             try:
                 data = REPO.query_analysis_distribution(building_id, start_time, end_time, metric_type)
+            except ValueError as exc:
+                self._json({"code": 400, "message": str(exc), "data": None}, HTTPStatus.BAD_REQUEST)
+                return
+            self._json({"code": 0, "message": "ok", "data": data})
+            return
+
+        if parsed.path == "/api/analysis/insights":
+            try:
+                data = REPO.query_analysis_insights(building_id, start_time, end_time, metric_type)
             except ValueError as exc:
                 self._json({"code": 400, "message": str(exc), "data": None}, HTTPStatus.BAD_REQUEST)
                 return

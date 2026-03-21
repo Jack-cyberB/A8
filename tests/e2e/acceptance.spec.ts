@@ -24,7 +24,7 @@ test.describe('A8 acceptance chains', () => {
       await page.getByRole('button', { name: '提交' }).click();
       await page.waitForTimeout(1000);
       if (await page.locator('.action-form').isVisible()) {
-        await page.locator('.el-dialog:has(.action-form) .el-dialog__footer .el-button').first().click();
+        await page.keyboard.press('Escape');
       }
       await expect(page.locator('.action-form')).toBeHidden();
     }

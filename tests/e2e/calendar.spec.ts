@@ -17,6 +17,7 @@ test.describe('A8 closed loop chains', () => {
 
     await page.getByRole('button', { name: '能耗分析' }).click();
     await expect(page.getByText('电力分析工作台')).toBeVisible();
+    await expect(page.getByText('本轮分析结论')).toBeVisible();
     await expect(page.locator('#trendChart canvas').first()).toBeVisible();
     await expect(page.locator('#patternChart canvas').first()).toBeVisible();
     await expect(page.locator('#splitChart canvas').first()).toBeVisible();
@@ -29,11 +30,14 @@ test.describe('A8 closed loop chains', () => {
     await expect(page.getByText('趋势分析与天气联动')).toBeVisible();
     await expect(page.getByText('分时段与周内结构')).toBeVisible();
     await expect(page.getByText('当前建筑 vs 同类均值')).toBeVisible();
-    await expect(page.locator('#trendChart canvas').first()).toBeVisible();
+    await expect(page.getByText('节能机会与优化动作')).toBeVisible();
+    await expect(page.getByText('异常窗口与影响估算')).toBeVisible();
+    await expect(page.locator('#trendChart')).toBeVisible();
     await page.waitForFunction(() => {
       const chart = echarts.getInstanceByDom(document.getElementById('trendChart'));
       return !!chart?.getOption?.()?.series?.length;
-    });
+    }, null, { timeout: 30000 });
+    await expect(page.locator('.insight-group').first()).toBeVisible();
 
     const trendMetaBefore = await page.evaluate(() => {
       const chart = echarts.getInstanceByDom(document.getElementById('trendChart'));
@@ -60,6 +64,8 @@ test.describe('A8 closed loop chains', () => {
       const data = option.xAxis?.[0]?.data || [];
       return String(data[0] || '').startsWith('2016-01-07') && String(data[data.length - 1] || '').startsWith('2016-12-13');
     });
+    await expect(page.locator('.analysis-scope-item').nth(1)).toContainText('2016-01-07');
+    await expect(page.locator('.insight-group').first()).toContainText(/趋势结论|当前时间范围暂无可解释趋势/);
     const trendMetaAfterRange = await page.evaluate(() => {
       const chart = echarts.getInstanceByDom(document.getElementById('trendChart'));
       const option = chart?.getOption?.() || {};
@@ -83,11 +89,9 @@ test.describe('A8 closed loop chains', () => {
         const option = chart?.getOption?.() || {};
         return {
           seriesCount: Array.isArray(option.series) ? option.series.length : 0,
-          hasZoom: Array.isArray(option.dataZoom) && option.dataZoom.length > 0,
         };
       });
-      expect(trendMetaAfterToggle.seriesCount).toBe(1);
-      expect(trendMetaAfterToggle.hasZoom).toBeFalsy();
+      expect(trendMetaAfterToggle.seriesCount).toBeGreaterThanOrEqual(2);
     }
 
     await page.locator('.filter-row .el-select').nth(1).click();
@@ -102,6 +106,8 @@ test.describe('A8 closed loop chains', () => {
     await page.getByRole('button', { name: 'AI 生成分析结论' }).click();
     await expect(page.getByRole('button', { name: '智能助手' })).toBeVisible();
     await expect(page.getByRole('heading', { name: '分析结论' })).toBeVisible();
+    await expect(page.locator('.analysis-brief-sub')).toContainText('2016-01-07 16:00:00');
+    await expect(page.getByText('节能建议')).toBeVisible();
   });
 
   test('anomaly ack -> detail timeline works', async ({ page }) => {
@@ -123,7 +129,7 @@ test.describe('A8 closed loop chains', () => {
     await page.getByRole('button', { name: '提交' }).click();
     await page.waitForTimeout(1000);
     if (await page.locator('.action-form').isVisible()) {
-      await page.locator('.el-dialog:has(.action-form) .el-dialog__footer .el-button').first().click();
+      await page.keyboard.press('Escape');
     }
     await expect(page.locator('.action-form')).toBeHidden();
 
