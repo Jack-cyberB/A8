@@ -164,10 +164,12 @@
                 </div>
                 <div v-if="errors.analysisDistribution" class="state-error">{{ errors.analysisDistribution }}</div>
                 <div class="mini-grid">
-                  <div>
+                  <div class="mini-panel">
+                    <div class="mini-panel-title">24 小时负荷轮廓</div>
                     <div id="patternChart" class="chart chart--mini"></div>
                   </div>
-                  <div>
+                  <div class="mini-panel">
+                    <div class="mini-panel-title">工作日 / 周末 / 昼夜占比</div>
                     <div id="splitChart" class="chart chart--mini"></div>
                   </div>
                 </div>
@@ -244,22 +246,40 @@
             </div>
 
             <div v-if="errors.anomaly" class="state-error">{{ errors.anomaly }}</div>
-            <el-table :data="anomalyRows" height="360" stripe v-loading="loading.anomaly">
+            <el-table :data="anomalyRows" height="420" stripe v-loading="loading.anomaly" class="anomaly-table">
               <el-table-column prop="anomaly_id" label="ID" width="70"></el-table-column>
-              <el-table-column prop="building_name" label="建筑" width="130"></el-table-column>
-              <el-table-column prop="anomaly_name" label="类型" width="180"></el-table-column>
-              <el-table-column prop="severity" label="级别" width="90"></el-table-column>
-              <el-table-column prop="status" label="状态" width="120"></el-table-column>
-              <el-table-column prop="assignee" label="处理人" width="110"></el-table-column>
-              <el-table-column prop="timestamp" label="时间" width="180"></el-table-column>
-              <el-table-column prop="deviation_pct" label="偏差(%)" width="100"></el-table-column>
-              <el-table-column label="操作" width="300">
+              <el-table-column label="建筑" min-width="180" show-overflow-tooltip>
                 <template #default="scope">
-                  <el-button size="small" @click="openAnomalyDetail(scope.row)">详情</el-button>
-                  <el-button size="small" type="danger" @click="diagnoseFromAnomaly(scope.row)">诊断</el-button>
-                  <el-button size="small" type="primary" @click="openActionDialog(scope.row, 'ack')">确认</el-button>
-                  <el-button size="small" @click="openActionDialog(scope.row, 'ignore')">忽略</el-button>
-                  <el-button size="small" type="success" @click="openActionDialog(scope.row, 'resolve')">完成</el-button>
+                  <div class="table-title-cell">{{ scope.row.building_name }}</div>
+                </template>
+              </el-table-column>
+              <el-table-column prop="anomaly_name" label="类型" min-width="140" show-overflow-tooltip></el-table-column>
+              <el-table-column label="级别" width="90">
+                <template #default="scope">
+                  <el-tag size="small" effect="light" :type="severityTagType(scope.row.severity)">{{ severityLabel(scope.row.severity) }}</el-tag>
+                </template>
+              </el-table-column>
+              <el-table-column label="状态" width="108">
+                <template #default="scope">
+                  <el-tag size="small" effect="light" :type="statusTagType(scope.row.status)">{{ statusDisplay(scope.row.status) }}</el-tag>
+                </template>
+              </el-table-column>
+              <el-table-column prop="assignee" label="处理人" width="110" show-overflow-tooltip></el-table-column>
+              <el-table-column label="时间" width="152">
+                <template #default="scope">
+                  <span class="table-time">{{ formatCompactDateTime(scope.row.timestamp) }}</span>
+                </template>
+              </el-table-column>
+              <el-table-column prop="deviation_pct" label="偏差(%)" width="100"></el-table-column>
+              <el-table-column label="操作" min-width="290" fixed="right">
+                <template #default="scope">
+                  <div class="action-cell">
+                    <el-button size="small" @click="openAnomalyDetail(scope.row)">详情</el-button>
+                    <el-button size="small" type="danger" @click="diagnoseFromAnomaly(scope.row)">诊断</el-button>
+                    <el-button size="small" type="primary" @click="openActionDialog(scope.row, 'ack')">确认</el-button>
+                    <el-button size="small" @click="openActionDialog(scope.row, 'ignore')">忽略</el-button>
+                    <el-button size="small" type="success" @click="openActionDialog(scope.row, 'resolve')">完成</el-button>
+                  </div>
                 </template>
               </el-table-column>
             </el-table>

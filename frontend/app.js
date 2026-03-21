@@ -174,6 +174,26 @@ createApp({
       const num = Number(value || 0);
       return Number.isFinite(num) ? num.toFixed(digits) : '0.0';
     },
+    formatCompactDateTime(value) {
+      if (!value) return '-';
+      return String(value).replace('T', ' ').slice(0, 16);
+    },
+    severityLabel(value) {
+      const map = { high: '高', medium: '中', low: '低' };
+      return map[value] || value || '-';
+    },
+    severityTagType(value) {
+      const map = { high: 'danger', medium: 'warning', low: 'info' };
+      return map[value] || 'info';
+    },
+    statusDisplay(value) {
+      const map = { new: '新告警', acknowledged: '已确认', ignored: '已忽略', resolved: '已完成' };
+      return map[value] || value || '-';
+    },
+    statusTagType(value) {
+      const map = { new: 'danger', acknowledged: 'warning', ignored: 'info', resolved: 'success' };
+      return map[value] || 'info';
+    },
     currentMetricLabel() {
       return this.analysisMetrics.find((item) => item.value === this.analysisMetric)?.label || '电力';
     },
@@ -760,13 +780,63 @@ createApp({
       this.charts[key] = echarts.init(node);
       return this.charts[key];
     },
-    chartAxisStyle(name) {
+    chartAxisStyle(name, extra = {}) {
       return {
         axisLine: { lineStyle: { color: 'rgba(84, 103, 135, 0.45)' } },
-        axisLabel: { color: '#5a6982' },
+        axisTick: { show: false },
+        axisLabel: { color: '#5a6982', fontSize: 11, margin: 12 },
         splitLine: { lineStyle: { color: 'rgba(115, 137, 176, 0.12)' } },
         name,
-        nameTextStyle: { color: '#5a6982' },
+        nameTextStyle: { color: '#5a6982', padding: [0, 0, 8, 0] },
+        ...extra,
+      };
+    },
+    buildTimeAxisLabels(items) {
+      const count = items.length;
+      const interval = count > 600 ? 119 : count > 240 ? 47 : count > 96 ? 11 : count > 48 ? 5 : 0;
+      return {
+        interval,
+        hideOverlap: true,
+        formatter: (value) => {
+          const text = String(value || '');
+          if (count > 240) return text.slice(0, 10);
+          return text.slice(5, 16).replace('T', ' ');
+        },
+      };
+    },
+    bucketAnalysisSeries(series, bucketHours) {
+      if (!Array.isArray(series) || !series.length || !bucketHours || bucketHours <= 1) {
+        return series || [];
+      }
+      const buckets = [];
+      for (let index = 0; index < series.length; index += bucketHours) {
+        const chunk = series.slice(index, index + bucketHours);
+        const values = chunk.map((item) => Number(item.value || 0)).filter((item) => Number.isFinite(item));
+        if (!values.length) continue;
+        const first = chunk[0];
+        const last = chunk[chunk.length - 1];
+        buckets.push({
+          timestamp: first.timestamp,
+          bucket_start: first.timestamp,
+          bucket_end: last.timestamp,
+          value: values.reduce((sum, item) => sum + item, 0) / values.length,
+        });
+      }
+      return buckets;
+    },
+    buildTrendChartSeries() {
+      const rawSeries = this.analysisTrend.series || [];
+      const rawWeather = this.analysisTrend.weather_series || [];
+      let bucketHours = 1;
+      if (rawSeries.length > 1200) bucketHours = 24;
+      else if (rawSeries.length > 480) bucketHours = 12;
+      else if (rawSeries.length > 240) bucketHours = 6;
+      const series = this.bucketAnalysisSeries(rawSeries, bucketHours);
+      const weatherSeries = this.bucketAnalysisSeries(rawWeather, bucketHours);
+      return {
+        series,
+        weatherSeries,
+        bucketHours,
       };
     },
     renderOverviewChart() {
@@ -784,83 +854,148 @@ createApp({
     renderTrendChart() {
       const chart = this.ensureChart('trend', 'trendChart');
       if (!chart) return;
-      const series = this.analysisTrend.series || [];
+      const { series, weatherSeries, bucketHours } = this.buildTrendChartSeries();
       if (!series.length) {
         chart.clear();
         return;
       }
+      const timeAxisLabel = this.buildTimeAxisLabels(series.map((item) => item.timestamp));
+      const tooltipLabel = bucketHours > 1 ? `平均负荷（${bucketHours}h）` : `${this.currentMetricLabel()}负荷`;
       const option = {
-        grid: { left: 54, right: 56, top: 36, bottom: 56 },
-        tooltip: { trigger: 'axis' },
-        legend: { top: 0, textStyle: { color: '#52617b' } },
-        dataZoom: [{ type: 'inside' }, { type: 'slider', height: 20, bottom: 8 }],
-        xAxis: { type: 'category', data: series.map((i) => i.timestamp.slice(0, 16)), ...this.chartAxisStyle('') },
+        grid: { left: 60, right: 62, top: 52, bottom: 72 },
+        tooltip: {
+          trigger: 'axis',
+          backgroundColor: 'rgba(15, 25, 43, 0.92)',
+          borderWidth: 0,
+          textStyle: { color: '#f5f8ff' },
+          formatter: (params) => {
+            const head = params?.[0]?.axisValueLabel || '-';
+            const lines = [head];
+            params.forEach((item) => {
+              const unit = item.seriesName === '气温' ? '°C' : this.analysisSummary.unit || 'kWh';
+              lines.push(`${item.marker}${item.seriesName}：${this.formatNumber(item.value, 1)} ${unit}`);
+            });
+            return lines.join('<br/>');
+          },
+        },
+        legend: { top: 0, itemWidth: 14, itemHeight: 8, textStyle: { color: '#52617b', fontSize: 12 } },
+        dataZoom: series.length > 120
+          ? [{ type: 'inside' }, { type: 'slider', height: 14, bottom: 16, brushSelect: false }]
+          : [],
+        xAxis: {
+          type: 'category',
+          data: series.map((i) => i.timestamp),
+          ...this.chartAxisStyle(''),
+          boundaryGap: false,
+          axisLabel: { ...this.chartAxisStyle('').axisLabel, ...timeAxisLabel },
+        },
         yAxis: [
-          { type: 'value', ...this.chartAxisStyle(this.analysisSummary.unit || 'kWh') },
-          { type: 'value', ...this.chartAxisStyle('°C') },
+          { type: 'value', ...this.chartAxisStyle(this.analysisSummary.unit || 'kWh'), splitNumber: 4 },
+          { type: 'value', ...this.chartAxisStyle('°C'), splitLine: { show: false }, splitNumber: 4 },
         ],
         series: [
           {
-            name: `${this.currentMetricLabel()}负荷`,
+            name: tooltipLabel,
             type: 'line',
             data: series.map((i) => i.value),
             showSymbol: false,
-            smooth: true,
-            lineStyle: { width: 3, color: '#1462d9' },
-            areaStyle: { color: 'rgba(20, 98, 217, 0.12)' },
+            sampling: 'lttb',
+            smooth: 0.22,
+            lineStyle: { width: 2.5, color: '#1462d9' },
+            areaStyle: { color: 'rgba(20, 98, 217, 0.09)' },
           },
         ],
       };
-      if (this.analysisOverlayWeather && this.analysisTrend.overlayAvailable && this.analysisTrend.weather_series?.length) {
+      if (this.analysisOverlayWeather && this.analysisTrend.overlayAvailable && weatherSeries?.length) {
         option.series.push({
           name: '气温',
           type: 'line',
           yAxisIndex: 1,
-          data: this.analysisTrend.weather_series.map((i) => i.value),
+          data: weatherSeries.map((i) => i.value),
           showSymbol: false,
-          smooth: true,
-          lineStyle: { width: 2, type: 'dashed', color: '#f08a24' },
+          sampling: 'lttb',
+          smooth: 0.18,
+          lineStyle: { width: 2, type: 'solid', color: '#f08a24' },
         });
       }
-      chart.setOption(option);
+      chart.setOption(option, true);
     },
     renderHourlyProfileChart() {
       const chart = this.ensureChart('hourlyProfile', 'patternChart');
       if (!chart) return;
       const items = this.analysisDistribution.hourly_profile || [];
       chart.setOption({
-        grid: { left: 42, right: 18, top: 24, bottom: 34 },
-        tooltip: { trigger: 'axis' },
-        xAxis: { type: 'category', data: items.map((item) => item.label), axisLabel: { color: '#61718c', interval: 3 } },
-        yAxis: { type: 'value', ...this.chartAxisStyle(this.analysisSummary.unit || 'kWh') },
-        series: [{ type: 'bar', data: items.map((item) => item.avg_value), itemStyle: { color: '#2d82f7', borderRadius: [4, 4, 0, 0] } }],
-      });
+        grid: { left: 48, right: 16, top: 28, bottom: 42 },
+        tooltip: {
+          trigger: 'axis',
+          axisPointer: { type: 'shadow' },
+          formatter: (params) => {
+            const item = params?.[0];
+            return `${item?.axisValue || ''}<br/>平均负荷：${this.formatNumber(item?.value, 1)} ${this.analysisSummary.unit || 'kWh'}`;
+          },
+        },
+        xAxis: {
+          type: 'category',
+          data: items.map((item) => item.label),
+          axisLabel: { color: '#61718c', interval: 5, fontSize: 11 },
+          axisTick: { show: false },
+        },
+        yAxis: { type: 'value', ...this.chartAxisStyle(this.analysisSummary.unit || 'kWh'), splitNumber: 4 },
+        series: [{
+          type: 'bar',
+          barMaxWidth: 12,
+          data: items.map((item) => item.avg_value),
+          itemStyle: { color: '#2d82f7', borderRadius: [4, 4, 0, 0] },
+        }],
+      }, true);
     },
     renderSplitChart() {
       const chart = this.ensureChart('split', 'splitChart');
       if (!chart) return;
+      const weekdayWeekend = this.analysisDistribution.weekday_weekend_split || [];
+      const dayNight = this.analysisDistribution.day_night_split || [];
+      const rows = [
+        ...weekdayWeekend.map((item) => ({ name: item.label, value: item.ratio_pct, color: String(item.label || '').includes('周末') ? '#89c86a' : '#4a78d5' })),
+        ...dayNight.map((item) => ({ name: item.label, value: item.ratio_pct, color: String(item.label || '').includes('夜') ? '#8f6de8' : '#f2a43c' })),
+      ];
       chart.setOption({
-        tooltip: { trigger: 'item' },
-        legend: { bottom: 0, textStyle: { color: '#5d6a81' } },
-        series: [
-          {
-            name: '工作日/周末',
-            type: 'pie',
-            radius: ['48%', '72%'],
-            center: ['50%', '44%'],
-            label: { formatter: '{b}' },
-            data: this.analysisDistribution.weekday_weekend_split || [],
+        grid: { left: 74, right: 30, top: 16, bottom: 18 },
+        tooltip: {
+          trigger: 'axis',
+          axisPointer: { type: 'shadow' },
+          formatter: (params) => {
+            const item = params?.[0];
+            return `${item?.name || ''}<br/>占比：${this.formatNumber(item?.value, 1)}%`;
           },
-          {
-            name: '白天/夜间',
-            type: 'pie',
-            radius: ['20%', '38%'],
-            center: ['50%', '44%'],
-            label: { formatter: '{b}' },
-            data: this.analysisDistribution.day_night_split || [],
+        },
+        xAxis: {
+          type: 'value',
+          max: 100,
+          ...this.chartAxisStyle('%', { splitNumber: 4 }),
+        },
+        yAxis: {
+          type: 'category',
+          data: rows.map((item) => item.name),
+          axisLine: { show: false },
+          axisTick: { show: false },
+          axisLabel: { color: '#55657e', fontSize: 12 },
+        },
+        series: [{
+          type: 'bar',
+          barWidth: 16,
+          data: rows.map((item) => ({
+            value: item.value,
+            itemStyle: { color: item.color, borderRadius: 8 },
+          })),
+          label: {
+            show: true,
+            position: 'right',
+            color: '#42526d',
+            fontSize: 11,
+            formatter: ({ value }) => `${this.formatNumber(value, 1)}%`,
           },
-        ],
-      });
+        }],
+      }, true);
     },
     renderCompareChart() {
       const chart = this.ensureChart('compare', 'compareChart');
@@ -871,12 +1006,34 @@ createApp({
         return;
       }
       chart.setOption({
-        grid: { left: 48, right: 18, top: 24, bottom: 24 },
+        grid: { left: 56, right: 24, top: 26, bottom: 20 },
         tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
-        xAxis: { type: 'value', ...this.chartAxisStyle(this.analysisSummary.unit || 'kWh') },
-        yAxis: { type: 'category', data: items.map((item) => item.label), axisLabel: { color: '#596982' } },
-        series: [{ type: 'bar', data: items.map((item) => item.value), itemStyle: { color: '#0f6adf', borderRadius: 8 } }],
-      });
+        xAxis: { type: 'value', ...this.chartAxisStyle(this.analysisSummary.unit || 'kWh'), splitNumber: 4 },
+        yAxis: {
+          type: 'category',
+          data: items.map((item) => item.label),
+          axisLabel: {
+            color: '#596982',
+            fontSize: 11,
+            width: 80,
+            overflow: 'truncate',
+          },
+          axisTick: { show: false },
+        },
+        series: [{
+          type: 'bar',
+          barMaxWidth: 18,
+          data: items.map((item) => item.value),
+          itemStyle: { color: '#0f6adf', borderRadius: 8 },
+          label: {
+            show: true,
+            position: 'right',
+            color: '#42526d',
+            fontSize: 11,
+            formatter: ({ value }) => `${this.formatNumber(value, 1)}`,
+          },
+        }],
+      }, true);
     },
     renderAnomalyTypeChart(byType) {
       const chart = this.ensureChart('anomalyType', 'anomalyTypeChart');
