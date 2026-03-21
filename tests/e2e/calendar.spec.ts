@@ -38,14 +38,19 @@ test.describe('A8 closed loop chains', () => {
     const trendMetaBefore = await page.evaluate(() => {
       const chart = echarts.getInstanceByDom(document.getElementById('trendChart'));
       const option = chart?.getOption?.() || {};
+      const raw = chart?.getModel?.()?.option || {};
       return {
         seriesCount: Array.isArray(option.series) ? option.series.length : 0,
         zoomStart: option.dataZoom?.[0]?.startValue,
         zoomEnd: option.dataZoom?.[0]?.endValue,
+        zoomLabel: typeof raw.dataZoom?.[1]?.labelFormatter === 'function'
+          ? raw.dataZoom[1].labelFormatter(option.dataZoom?.[0]?.startValue, '')
+          : '',
       };
     });
     expect(trendMetaBefore.seriesCount).toBeGreaterThanOrEqual(1);
     expect(Number(trendMetaBefore.zoomEnd)).toBeGreaterThan(Number(trendMetaBefore.zoomStart));
+    expect(trendMetaBefore.zoomLabel).toMatch(/\d{4}-\d{2}-\d{2}/);
 
     await page.getByRole('button', { name: '近7天' }).click();
     await page.waitForTimeout(300);

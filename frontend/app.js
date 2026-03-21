@@ -908,16 +908,31 @@ createApp({
     },
     buildTimeAxisLabels(items) {
       const count = items.length;
-      const interval = count > 600 ? 119 : count > 240 ? 47 : count > 96 ? 11 : count > 48 ? 5 : 0;
+      const interval = count > 720 ? 143 : count > 360 ? 71 : count > 180 ? 35 : count > 90 ? 17 : count > 45 ? 8 : 0;
       return {
         interval,
         hideOverlap: true,
+        showMinLabel: true,
+        showMaxLabel: true,
         formatter: (value) => {
           const text = String(value || '');
-          if (count > 240) return text.slice(0, 10);
-          return text.slice(5, 16).replace('T', ' ');
+          if (!text) return '';
+          if (count > 180) return text.slice(5, 10);
+          if (count > 45) return text.slice(5, 16).replace('T', ' ');
+          return text.slice(5, 16).replace('T', '\n');
         },
       };
+    },
+    formatTrendZoomLabel(value, valueStr, series) {
+      const directLabel = String(valueStr || '');
+      if (directLabel && directLabel.includes('-')) {
+        return directLabel.slice(0, 10);
+      }
+      const index = Number(value);
+      if (Number.isFinite(index) && Array.isArray(series) && series[index]) {
+        return String(series[index].timestamp || '').slice(0, 10);
+      }
+      return '';
     },
     bucketAnalysisSeries(series, bucketHours) {
       if (!Array.isArray(series) || !series.length || !bucketHours || bucketHours <= 1) {
@@ -981,6 +996,12 @@ createApp({
       const defaultEndValue = Math.max(0, series.length - 1);
       const timeAxisLabel = this.buildTimeAxisLabels(series.map((item) => item.timestamp));
       const tooltipLabel = bucketHours > 1 ? `平均负荷（${bucketHours}h）` : `${this.currentMetricLabel()}负荷`;
+      const shouldShowZoom = series.length > 14;
+      const normalizedStartValue = Number.isFinite(Number(previousZoom?.startValue)) ? Number(previousZoom.startValue) : defaultStartValue;
+      const normalizedEndValue = Number.isFinite(Number(previousZoom?.endValue)) ? Number(previousZoom.endValue) : defaultEndValue;
+      const zoomStartValue = Math.max(0, Math.min(series.length - 1, normalizedStartValue));
+      const zoomEndValue = Math.max(zoomStartValue, Math.min(series.length - 1, normalizedEndValue));
+      const zoomLabelFormatter = (value, valueStr) => this.formatTrendZoomLabel(value, valueStr, series);
       const option = {
         grid: { left: 60, right: 62, top: 52, bottom: 72 },
         tooltip: {
@@ -999,14 +1020,16 @@ createApp({
           },
         },
         legend: { top: 0, itemWidth: 14, itemHeight: 8, textStyle: { color: '#52617b', fontSize: 12 } },
-        dataZoom: series.length > 120
+        dataZoom: shouldShowZoom
           ? [
               {
                 type: 'inside',
+                filterMode: 'filter',
+                throttle: 50,
                 start: previousZoom?.start,
                 end: previousZoom?.end,
-                startValue: previousZoom?.startValue ?? defaultStartValue,
-                endValue: previousZoom?.endValue ?? defaultEndValue,
+                startValue: zoomStartValue,
+                endValue: zoomEndValue,
               },
               {
                 type: 'slider',
@@ -1014,6 +1037,8 @@ createApp({
                 bottom: 12,
                 brushSelect: false,
                 showDetail: true,
+                realtime: true,
+                filterMode: 'filter',
                 fillerColor: 'rgba(53, 127, 237, 0.18)',
                 borderColor: 'rgba(110, 138, 182, 0.25)',
                 backgroundColor: 'rgba(232, 239, 249, 0.7)',
@@ -1035,11 +1060,11 @@ createApp({
                   shadowColor: 'rgba(41, 94, 191, 0.18)',
                 },
                 textStyle: { color: '#60708b', fontSize: 11 },
-                labelFormatter: (value) => String(value || '').slice(0, 10),
+                labelFormatter: zoomLabelFormatter,
                 start: previousZoom?.start,
                 end: previousZoom?.end,
-                startValue: previousZoom?.startValue ?? defaultStartValue,
-                endValue: previousZoom?.endValue ?? defaultEndValue,
+                startValue: zoomStartValue,
+                endValue: zoomEndValue,
               },
             ]
           : [],
