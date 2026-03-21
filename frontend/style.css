@@ -159,6 +159,27 @@ body {
   justify-self: end;
 }
 
+.filter-scope {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  padding-top: 2px;
+  color: #5f708a;
+  font-size: 12px;
+}
+
+.filter-scope-label {
+  font-weight: 700;
+  color: #72829b;
+}
+
+.filter-scope-value {
+  font-variant-numeric: tabular-nums;
+  color: #30425f;
+}
+
 .filter-label {
   font-size: 12px;
   font-weight: 700;
@@ -262,6 +283,20 @@ body {
   color: var(--muted);
   font-size: 12px;
   text-align: right;
+}
+
+.trend-tools {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
+}
+
+.trend-window-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 
 .chart { height: 320px; }
@@ -587,6 +622,9 @@ body {
   .compare-layout { grid-template-columns: 1fr; }
   .peer-list { border-left: 0; padding-left: 0; }
   .chart--compare { height: 320px; }
+  .trend-tools {
+    align-items: flex-start;
+  }
 }
 
 @media (max-width: 960px) {
@@ -630,6 +668,12 @@ body {
 
   .filter-actions .el-button {
     width: 100%;
+  }
+
+  .filter-scope {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 4px;
   }
 
   .mini-grid,

@@ -10,6 +10,7 @@ test.describe('A8 closed loop chains', () => {
     const select = page.locator('.filter-row .el-select').first();
     await select.click();
     await page.locator('.el-select-dropdown:visible .el-select-dropdown__item').nth(1).click();
+    await expect(page.locator('.filter-scope-value')).toContainText('~');
 
     await expect(page.locator('.card-value').first()).toContainText('kWh');
     await expect(page.locator('#overviewChart canvas').first()).toBeVisible();
@@ -45,6 +46,20 @@ test.describe('A8 closed loop chains', () => {
     });
     expect(trendMetaBefore.seriesCount).toBeGreaterThanOrEqual(1);
     expect(Number(trendMetaBefore.zoomEnd)).toBeGreaterThan(Number(trendMetaBefore.zoomStart));
+
+    await page.getByRole('button', { name: '近7天' }).click();
+    await page.waitForTimeout(300);
+    const trendMetaAfterPreset = await page.evaluate(() => {
+      const chart = echarts.getInstanceByDom(document.getElementById('trendChart'));
+      const option = chart?.getOption?.() || {};
+      return {
+        zoomStart: option.dataZoom?.[0]?.startValue,
+        zoomEnd: option.dataZoom?.[0]?.endValue,
+      };
+    });
+    expect(Number(trendMetaAfterPreset.zoomEnd) - Number(trendMetaAfterPreset.zoomStart)).toBeLessThan(
+      Number(trendMetaBefore.zoomEnd) - Number(trendMetaBefore.zoomStart),
+    );
 
     const weatherSwitch = page.locator('.analysis-hero-actions .el-switch');
     if (await weatherSwitch.isEnabled()) {

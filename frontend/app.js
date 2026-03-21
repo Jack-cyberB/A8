@@ -29,6 +29,7 @@ createApp({
       activePage: 'overview',
       buildings: [],
       globalRangeText: '-',
+      globalRange: { startTime: '', endTime: '' },
       filters: { buildingId: '', range: [] },
       analysisMetric: 'electricity',
       analysisOverlayWeather: true,
@@ -197,8 +198,33 @@ createApp({
     currentMetricLabel() {
       return this.analysisMetrics.find((item) => item.value === this.analysisMetric)?.label || '电力';
     },
+    selectedBuildingMeta() {
+      return this.buildings.find((item) => item.id === this.filters.buildingId) || null;
+    },
+    currentValidScope() {
+      const building = this.selectedBuildingMeta();
+      if (building?.startTime && building?.endTime) {
+        return {
+          startTime: building.startTime,
+          endTime: building.endTime,
+          label: `${building.name} 可用时间`,
+        };
+      }
+      if (this.globalRange.startTime && this.globalRange.endTime) {
+        return {
+          startTime: this.globalRange.startTime,
+          endTime: this.globalRange.endTime,
+          label: '全局数据时间',
+        };
+      }
+      return null;
+    },
+    currentValidRangeText() {
+      const scope = this.currentValidScope();
+      return scope ? `${scope.startTime} ~ ${scope.endTime}` : '-';
+    },
     currentAnalysisScopeText() {
-      const building = this.buildings.find((item) => item.id === this.filters.buildingId);
+      const building = this.selectedBuildingMeta();
       const buildingText = building ? `${building.name} (${building.type})` : '全部建筑';
       const rangeText = this.isCompleteRange(this.filters.range) ? `${this.filters.range[0]} ~ ${this.filters.range[1]}` : '全量时间范围';
       return `${this.currentMetricLabel()} | ${buildingText} | ${rangeText}`;
@@ -219,6 +245,63 @@ createApp({
         ...this.getTimeParams(),
         metric_type: this.analysisMetric,
       };
+    },
+    clampRangeToScope(range) {
+      const scope = this.currentValidScope();
+      if (!scope || !this.isCompleteRange(range)) return { range, changed: false };
+      let [start, end] = range;
+      let changed = false;
+      if (start < scope.startTime) {
+        start = scope.startTime;
+        changed = true;
+      }
+      if (end > scope.endTime) {
+        end = scope.endTime;
+        changed = true;
+      }
+      if (start > end) {
+        start = scope.startTime;
+        end = scope.endTime;
+        changed = true;
+      }
+      return { range: [start, end], changed };
+    },
+    ensureRangeWithinScope(options = {}) {
+      const { applyDefaultIfEmpty = false, silent = false } = options;
+      const scope = this.currentValidScope();
+      if (!scope) return false;
+      if (!this.isCompleteRange(this.filters.range)) {
+        if (applyDefaultIfEmpty) {
+          this.filters.range = [scope.startTime, scope.endTime];
+          if (!silent) this.$message.info(`已切换到有效时间范围：${scope.startTime} ~ ${scope.endTime}`);
+          return true;
+        }
+        return false;
+      }
+      const clamped = this.clampRangeToScope(this.filters.range);
+      if (clamped.changed) {
+        this.filters.range = clamped.range;
+        if (!silent) this.$message.warning('所选时间超出当前数据范围，已自动调整');
+        return true;
+      }
+      return false;
+    },
+    applyValidRange() {
+      const scope = this.currentValidScope();
+      if (!scope) return;
+      this.filters.range = [scope.startTime, scope.endTime];
+      this.anomalyQuery.page = 1;
+      this.analysisInsight = null;
+      this.analysisFeedbackLabel = '';
+      this.refreshCurrentPage();
+    },
+    isDateDisabled(date) {
+      const scope = this.currentValidScope();
+      if (!scope) return false;
+      const start = new Date(scope.startTime.replace(' ', 'T')).getTime();
+      const end = new Date(scope.endTime.replace(' ', 'T')).getTime();
+      const value = date.getTime();
+      return value < start || value > end;
     },
     clearAnalysisData() {
       this.analysisSummary = {
@@ -264,6 +347,7 @@ createApp({
       this.anomalyQuery.page = 1;
       this.analysisInsight = null;
       this.analysisFeedbackLabel = '';
+      this.ensureRangeWithinScope({ applyDefaultIfEmpty: true, silent: true });
       this.refreshCurrentPage();
     },
     onAnalysisMetricChange() {
@@ -278,12 +362,27 @@ createApp({
         this.renderTrendChart();
       }
     },
+    setTrendWindow(days) {
+      const chart = this.ensureChart('trend', 'trendChart');
+      if (!chart) return;
+      const { series, bucketHours } = this.buildTrendChartSeries();
+      if (!series.length) return;
+      if (days === 'all') {
+        chart.dispatchAction({ type: 'dataZoom', startValue: 0, endValue: series.length - 1 });
+        return;
+      }
+      const points = Math.max(2, Math.ceil((Number(days) * 24) / Math.max(bucketHours, 1)));
+      const endValue = series.length - 1;
+      const startValue = Math.max(0, endValue - points + 1);
+      chart.dispatchAction({ type: 'dataZoom', startValue, endValue });
+    },
     onDateRangeChange() {
       if (this.refreshTimer) clearTimeout(this.refreshTimer);
       this.refreshTimer = setTimeout(() => {
         this.anomalyQuery.page = 1;
         this.analysisInsight = null;
         this.analysisFeedbackLabel = '';
+        this.ensureRangeWithinScope({ applyDefaultIfEmpty: false, silent: false });
         this.refreshCurrentPage();
       }, 200);
     },
@@ -303,8 +402,19 @@ createApp({
     async loadBuildings() {
       try {
         const data = await this.fetchJson(`${API_BASE}/api/buildings`);
-        this.buildings = (data.items || []).map((x) => ({ id: x.building_id, name: x.building_name, type: x.building_type }));
+        this.buildings = (data.items || []).map((x) => ({
+          id: x.building_id,
+          name: x.building_name,
+          type: x.building_type,
+          startTime: x.start_time,
+          endTime: x.end_time,
+          recordCount: x.record_count,
+        }));
         const range = data.global_range || {};
+        this.globalRange = {
+          startTime: range.start_time || '',
+          endTime: range.end_time || '',
+        };
         this.globalRangeText = range.start_time && range.end_time ? `${range.start_time} ~ ${range.end_time}` : '-';
       } catch (err) {
         console.error(err);
@@ -900,9 +1010,32 @@ createApp({
               },
               {
                 type: 'slider',
-                height: 14,
-                bottom: 16,
+                height: 22,
+                bottom: 12,
                 brushSelect: false,
+                showDetail: true,
+                fillerColor: 'rgba(53, 127, 237, 0.18)',
+                borderColor: 'rgba(110, 138, 182, 0.25)',
+                backgroundColor: 'rgba(232, 239, 249, 0.7)',
+                dataBackground: {
+                  lineStyle: { color: 'rgba(70, 122, 230, 0.45)' },
+                  areaStyle: { color: 'rgba(70, 122, 230, 0.14)' },
+                },
+                selectedDataBackground: {
+                  lineStyle: { color: '#3d79e6' },
+                  areaStyle: { color: 'rgba(61, 121, 230, 0.18)' },
+                },
+                handleSize: 18,
+                moveHandleSize: 10,
+                handleStyle: {
+                  color: '#ffffff',
+                  borderColor: '#3f7ce9',
+                  borderWidth: 2,
+                  shadowBlur: 8,
+                  shadowColor: 'rgba(41, 94, 191, 0.18)',
+                },
+                textStyle: { color: '#60708b', fontSize: 11 },
+                labelFormatter: (value) => String(value || '').slice(0, 10),
                 start: previousZoom?.start,
                 end: previousZoom?.end,
                 startValue: previousZoom?.startValue ?? defaultStartValue,
