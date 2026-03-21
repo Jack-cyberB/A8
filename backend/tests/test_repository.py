@@ -14,6 +14,26 @@ class RepositoryTests(unittest.TestCase):
         data = REPO.query_buildings()
         self.assertGreater(data["count"], 0)
 
+    def test_analysis_interfaces_electricity(self):
+        buildings = REPO.query_buildings()["items"]
+        building_id = buildings[0]["building_id"]
+        summary = REPO.query_analysis_summary(building_id, None, None, "electricity")
+        trend = REPO.query_analysis_trend(building_id, None, None, "electricity")
+        distribution = REPO.query_analysis_distribution(building_id, None, None, "electricity")
+        compare = REPO.query_analysis_compare(building_id, None, None, "electricity")
+
+        self.assertEqual(summary["metric_type"], "electricity")
+        self.assertGreater(summary["total_value"], 0)
+        self.assertGreater(len(trend["series"]), 0)
+        self.assertIn("overlay_available", trend)
+        self.assertEqual(len(distribution["hourly_profile"]), 24)
+        self.assertEqual(len(distribution["weekday_weekend_split"]), 2)
+        self.assertEqual(len(compare["items"]), 2)
+
+    def test_analysis_interfaces_unsupported_metric(self):
+        with self.assertRaises(ValueError):
+            REPO.query_analysis_summary(None, None, None, "water")
+
     def test_anomaly_action_flow(self):
         anomalies = REPO.query_anomalies(None, None, None, None, None, "new", 1, 50, "timestamp_desc")["items"]
         self.assertGreater(len(anomalies), 0)
@@ -80,6 +100,43 @@ class RepositoryTests(unittest.TestCase):
         self.assertEqual(d["provider"], "llm_provider")
         self.assertEqual(d["conclusion"], "LLM结论")
         self.assertEqual(d["causes"][0], "原因A")
+
+    def test_ai_analyze_template_shape(self):
+        buildings = REPO.query_buildings()["items"]
+        result = REPO.analyze(
+            {
+                "provider": "template",
+                "building_id": buildings[0]["building_id"],
+                "metric_type": "electricity",
+            }
+        )
+        analysis = result["analysis"]
+        self.assertIn("summary", analysis)
+        self.assertIn("findings", analysis)
+        self.assertIn("energy_saving_suggestions", analysis)
+        self.assertIn("operations_suggestions", analysis)
+        self.assertIn("trace_id", analysis)
+        self.assertFalse(analysis["fallback_used"])
+
+    def test_ai_analyze_llm_success_mock(self):
+        buildings = REPO.query_buildings()["items"]
+        fake_response = {
+            "choices": [
+                {
+                    "message": {
+                        "content": '{"summary":"LLM分析","findings":["发现1"],"possible_causes":["原因1"],"energy_saving_suggestions":["建议1"],"operations_suggestions":["动作1"],"evidence":["证据1"]}'
+                    }
+                }
+            ]
+        }
+        with mock.patch.dict("os.environ", {"OPENAI_API_KEY": "dummy-key"}, clear=False):
+            with mock.patch("backend.server.LLMDiagnoseProvider._call_chat_completion", return_value=fake_response):
+                result = REPO.analyze({"provider": "llm", "building_id": buildings[0]["building_id"], "metric_type": "electricity"})
+
+        analysis = result["analysis"]
+        self.assertEqual(analysis["provider"], "llm_provider")
+        self.assertEqual(analysis["summary"], "LLM分析")
+        self.assertEqual(analysis["findings"][0], "发现1")
 
     def test_ai_stats_shape(self):
         aid = self._first_anomaly_id()

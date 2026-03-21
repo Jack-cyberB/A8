@@ -1,7 +1,7 @@
 ﻿import { expect, test } from '@playwright/test';
 
 test.describe('A8 closed loop chains', () => {
-  test('building switch keeps cards and chart usable', async ({ page }) => {
+  test('building switch keeps cards and analysis workspace usable', async ({ page }) => {
     await page.goto('/');
     await expect(page.locator('.topbar h1')).toBeVisible();
     await expect(page.getByText('系统:')).toBeVisible();
@@ -9,14 +9,38 @@ test.describe('A8 closed loop chains', () => {
 
     const select = page.locator('.filter-row .el-select').first();
     await select.click();
-    await page.locator('.el-select-dropdown__item').nth(1).click();
+    await page.locator('.el-select-dropdown:visible .el-select-dropdown__item').nth(1).click();
 
     await expect(page.locator('.card-value').first()).toContainText('kWh');
     await expect(page.locator('#overviewChart canvas').first()).toBeVisible();
 
     await page.getByRole('button', { name: '能耗分析' }).click();
+    await expect(page.getByText('电力分析工作台')).toBeVisible();
     await expect(page.locator('#trendChart canvas').first()).toBeVisible();
-    await expect(page.locator('#rankChart canvas').first()).toBeVisible();
+    await expect(page.locator('#patternChart canvas').first()).toBeVisible();
+    await expect(page.locator('#splitChart canvas').first()).toBeVisible();
+  });
+
+  test('analysis workspace supports weather overlay, ai report and unsupported metric placeholder', async ({ page }) => {
+    await page.goto('/');
+    await page.getByRole('button', { name: '能耗分析' }).click();
+
+    await expect(page.getByText('趋势分析与天气联动')).toBeVisible();
+    await expect(page.getByText('分时段与周内结构')).toBeVisible();
+    await expect(page.getByText('当前建筑 vs 同类均值')).toBeVisible();
+
+    await page.locator('.filter-row .el-select').nth(1).click();
+    await page.locator('.el-select-dropdown:visible .el-select-dropdown__item').filter({ hasText: /^水$/ }).first().click();
+    await expect(page.getByText('水暂未接入')).toBeVisible();
+
+    await page.locator('.filter-row .el-select').nth(1).click();
+    await page.locator('.el-select-dropdown:visible .el-select-dropdown__item').filter({ hasText: /^电力$/ }).first().click();
+    await page.waitForTimeout(1200);
+    await expect(page.locator('#trendChart canvas').first()).toBeVisible();
+
+    await page.getByRole('button', { name: 'AI 生成分析结论' }).click();
+    await expect(page.getByRole('button', { name: '智能助手' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: '分析结论' })).toBeVisible();
   });
 
   test('anomaly ack -> detail timeline works', async ({ page }) => {
@@ -38,7 +62,7 @@ test.describe('A8 closed loop chains', () => {
     await page.getByRole('button', { name: '提交' }).click();
     await page.waitForTimeout(1000);
     if (await page.locator('.action-form').isVisible()) {
-      await page.getByRole('button', { name: '取消' }).click();
+      await page.locator('.el-dialog:has(.action-form) .el-dialog__footer .el-button').first().click();
     }
     await expect(page.locator('.action-form')).toBeHidden();
 

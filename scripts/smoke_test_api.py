@@ -45,8 +45,13 @@ try:
     buildings = get_json(f"{SERVER_URL}/api/buildings")
     anomaly = get_json(f"{SERVER_URL}/api/anomaly/list?page=1&page_size=20&sort=severity_desc")
     aid = anomaly["data"]["items"][0]["anomaly_id"]
+    building_id = buildings["data"]["items"][0]["building_id"]
 
     detail = get_json(f"{SERVER_URL}/api/anomaly/detail?anomaly_id={aid}")
+    analysis_summary = get_json(f"{SERVER_URL}/api/analysis/summary?building_id={building_id}&metric_type=electricity")
+    analysis_trend = get_json(f"{SERVER_URL}/api/analysis/trend?building_id={building_id}&metric_type=electricity")
+    analysis_distribution = get_json(f"{SERVER_URL}/api/analysis/distribution?building_id={building_id}&metric_type=electricity")
+    analysis_compare = get_json(f"{SERVER_URL}/api/analysis/compare?building_id={building_id}&metric_type=electricity")
 
     new_list = get_json(f"{SERVER_URL}/api/anomaly/list?status=new&page=1&page_size=5")
     if new_list["data"]["count"] > 0:
@@ -91,6 +96,11 @@ try:
         method="POST",
         payload={"hours": 24},
     )
+    analysis_report = get_json(
+        f"{SERVER_URL}/api/ai/analyze",
+        method="POST",
+        payload={"provider": "template", "building_id": building_id, "metric_type": "electricity"},
+    )
     note = get_json(
         f"{SERVER_URL}/api/anomaly/note",
         method="POST",
@@ -107,6 +117,10 @@ try:
     assert buildings["code"] == 0 and buildings["data"]["count"] > 0
     assert anomaly["code"] == 0 and anomaly["data"]["count"] > 0
     assert detail["code"] == 0 and "processing_summary" in detail["data"]
+    assert analysis_summary["code"] == 0 and analysis_summary["data"]["metric_type"] == "electricity"
+    assert analysis_trend["code"] == 0 and len(analysis_trend["data"]["series"]) > 0
+    assert analysis_distribution["code"] == 0 and len(analysis_distribution["data"]["hourly_profile"]) == 24
+    assert analysis_compare["code"] == 0 and len(analysis_compare["data"]["items"]) == 2
     assert history["code"] == 0 and history["data"]["count"] >= 1
     assert ai_stats["code"] == 0 and "total_calls" in ai_stats["data"]
     assert system_health["code"] == 0 and "recent_regression" in system_health["data"]
@@ -115,6 +129,7 @@ try:
     assert diagnose_fallback["code"] == 0 and diagnose_fallback["data"]["diagnosis"]["fallback_used"]
     assert feedback["code"] == 0 and feedback["data"]["label"] == "useful"
     assert evaluate["code"] == 0 and "llm" in evaluate["data"]
+    assert analysis_report["code"] == 0 and "findings" in analysis_report["data"]["analysis"]
     assert note["code"] == 0 and note["data"]["recurrence_risk"] == "low"
     print("API smoke test passed")
 finally:

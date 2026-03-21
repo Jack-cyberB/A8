@@ -4,14 +4,25 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>A8 建筑能源智能管理系统</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@500;600;700;800&family=Noto+Sans+SC:wght@400;500;700&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="https://unpkg.com/element-plus/dist/index.css" />
   <link rel="stylesheet" href="./style.css" />
 </head>
 <body>
   <div id="app">
     <header class="topbar">
-      <h1>A8 建筑能源智能管理系统</h1>
-      <div class="topbar-sub">V2 交付版 | 复盘沉淀 + AI评估 + 稳定门禁</div>
+      <div class="topbar-brand">
+        <div class="topbar-kicker">A8 / Building Energy Intelligence</div>
+        <h1>A8 建筑能源智能管理系统</h1>
+        <div class="topbar-sub">V2 交付版 | 电力深分析 + 运维闭环 + AI 诊断与分析</div>
+      </div>
+      <div class="topbar-status">
+        <el-tag size="small" effect="dark" :type="health.status === 'ok' ? 'success' : 'warning'">系统: {{ health.status }}</el-tag>
+        <el-tag size="small" effect="dark" :type="health.regression === 'pass' ? 'success' : 'warning'">回归: {{ health.regression }}</el-tag>
+        <div class="range-tip">数据范围：{{ globalRangeText }}</div>
+      </div>
     </header>
 
     <div class="layout">
@@ -23,61 +34,190 @@
 
       <main class="content">
         <section class="filter-row">
-          <el-select v-model="filters.buildingId" placeholder="建筑" style="width: 220px" @change="onBuildingChange">
-            <el-option label="全部建筑" value=""></el-option>
-            <el-option v-for="b in buildings" :key="b.id" :label="`${b.name} (${b.type})`" :value="b.id"></el-option>
-          </el-select>
+          <div class="filter-block">
+            <div class="filter-label">建筑</div>
+            <el-select v-model="filters.buildingId" placeholder="建筑" style="width: 240px" @change="onBuildingChange">
+              <el-option label="全部建筑" value=""></el-option>
+              <el-option v-for="b in buildings" :key="b.id" :label="`${b.name} (${b.type})`" :value="b.id"></el-option>
+            </el-select>
+          </div>
 
-          <el-date-picker
-            v-model="filters.range"
-            type="datetimerange"
-            start-placeholder="开始时间"
-            end-placeholder="结束时间"
-            value-format="YYYY-MM-DD HH:mm:ss"
-            @change="onDateRangeChange"></el-date-picker>
+          <div class="filter-block filter-block--metric">
+            <div class="filter-label">分析类型</div>
+            <el-select v-model="analysisMetric" placeholder="分析类型" style="width: 170px" @change="onAnalysisMetricChange">
+              <el-option v-for="item in analysisMetrics" :key="item.value" :label="item.label" :value="item.value"></el-option>
+            </el-select>
+          </div>
 
-          <el-button type="primary" @click="refreshAll">刷新数据</el-button>
-          <el-tag size="small" :type="health.status === 'ok' ? 'success' : 'warning'">系统: {{ health.status }}</el-tag>
-          <el-tag size="small" :type="health.regression === 'pass' ? 'success' : 'warning'">回归: {{ health.regression }}</el-tag>
-          <span class="range-tip">数据范围：{{ globalRangeText }}</span>
+          <div class="filter-block filter-block--range">
+            <div class="filter-label">时间范围</div>
+            <el-date-picker
+              v-model="filters.range"
+              type="datetimerange"
+              start-placeholder="开始时间"
+              end-placeholder="结束时间"
+              value-format="YYYY-MM-DD HH:mm:ss"
+              @change="onDateRangeChange"></el-date-picker>
+          </div>
+
+          <div class="filter-actions">
+            <el-button type="primary" @click="refreshAll">刷新数据</el-button>
+          </div>
         </section>
 
         <section v-show="activePage === 'overview'" class="page">
-          <div class="cards">
-            <div class="card"><div class="card-title">总用电量</div><div class="card-value">{{ overview.totalKwh }} kWh</div></div>
-            <div class="card"><div class="card-title">平均小时能耗</div><div class="card-value">{{ overview.avgKwh }} kWh</div></div>
-            <div class="card"><div class="card-title">异常总数</div><div class="card-value">{{ overview.anomalyCount }}</div></div>
-            <div class="card"><div class="card-title">节能潜力估算</div><div class="card-value">{{ overview.savingPct }}%</div></div>
-            <div class="card"><div class="card-title">预计减排</div><div class="card-value">{{ overview.carbonKg }} kg</div></div>
+          <div class="cards cards--overview">
+            <div class="card">
+              <div class="card-title">总用电量</div>
+              <div class="card-value">{{ formatNumber(overview.totalKwh, 1) }} kWh</div>
+            </div>
+            <div class="card">
+              <div class="card-title">平均小时能耗</div>
+              <div class="card-value">{{ formatNumber(overview.avgKwh, 1) }} kWh</div>
+            </div>
+            <div class="card">
+              <div class="card-title">异常总数</div>
+              <div class="card-value">{{ overview.anomalyCount }}</div>
+            </div>
+            <div class="card">
+              <div class="card-title">节能潜力估算</div>
+              <div class="card-value">{{ formatNumber(overview.savingPct, 1) }}%</div>
+            </div>
+            <div class="card">
+              <div class="card-title">预计减排</div>
+              <div class="card-value">{{ formatNumber(overview.carbonKg, 1) }} kg</div>
+            </div>
           </div>
           <div class="panel">
-            <div class="panel-title">最近 72 小时用电趋势</div>
+            <div class="panel-head">
+              <div>
+                <div class="panel-eyebrow">Overview</div>
+                <div class="panel-title">最近 72 小时用电趋势</div>
+              </div>
+            </div>
             <div v-if="errors.overview" class="state-error">{{ errors.overview }}</div>
-            <div id="overviewChart" class="chart"></div>
+            <div id="overviewChart" class="chart chart--overview"></div>
           </div>
         </section>
 
-        <section v-show="activePage === 'analysis'" class="page">
-          <div class="panel">
-            <div class="panel-title">能耗趋势分析</div>
-            <div v-if="errors.trend" class="state-error">{{ errors.trend }}</div>
-            <div id="trendChart" class="chart"></div>
+        <section v-show="activePage === 'analysis'" class="page analysis-page">
+          <div class="analysis-hero">
+            <div>
+              <div class="panel-eyebrow">Analysis Workspace</div>
+              <div class="analysis-hero-title">{{ currentMetricLabel() }}分析工作台</div>
+              <div class="analysis-hero-sub">围绕当前建筑和时间范围，查看趋势、结构、天气联动和同类对比，并直接生成 AI 分析结论。</div>
+            </div>
+            <div class="analysis-hero-actions">
+              <el-switch v-model="analysisOverlayWeather" active-text="叠加温度" :disabled="!analysisTrend.overlayAvailable"></el-switch>
+              <el-button @click="runAnalysisAssistant" type="primary" :loading="loading.analysisInsight">AI 生成分析结论</el-button>
+            </div>
           </div>
-          <div class="panel">
-            <div class="panel-title">建筑能耗排名</div>
-            <div v-if="errors.rank" class="state-error">{{ errors.rank }}</div>
-            <div id="rankChart" class="chart"></div>
+
+          <div v-if="analysisUnsupportedMessage" class="state-empty state-empty--unsupported">
+            <div class="state-empty-title">{{ currentMetricLabel() }}暂未接入</div>
+            <div class="state-empty-desc">当前轮只落地真实电力分析。这个位置已经预留接口和页面框架，下一轮可直接接入水、空调或环境类真实数据。</div>
           </div>
+
+          <template v-else>
+            <div class="cards cards--analysis">
+              <div class="card card--metric">
+                <div class="card-title">总量</div>
+                <div class="card-value">{{ formatNumber(analysisSummary.total_value, 1) }} {{ analysisSummary.unit || 'kWh' }}</div>
+                <div class="card-note">当前筛选范围累计</div>
+              </div>
+              <div class="card card--metric">
+                <div class="card-title">均值</div>
+                <div class="card-value">{{ formatNumber(analysisSummary.avg_value, 1) }} {{ analysisSummary.unit || 'kWh' }}</div>
+                <div class="card-note">平均小时负荷</div>
+              </div>
+              <div class="card card--metric">
+                <div class="card-title">峰值</div>
+                <div class="card-value">{{ formatNumber(analysisSummary.peak_value, 1) }} {{ analysisSummary.unit || 'kWh' }}</div>
+                <div class="card-note">峰时压力水平</div>
+              </div>
+              <div class="card card--metric">
+                <div class="card-title">波动率</div>
+                <div class="card-value">{{ formatNumber(analysisSummary.volatility_pct, 1) }}%</div>
+                <div class="card-note">越高越需要关注稳定性</div>
+              </div>
+            </div>
+
+            <div class="analysis-grid">
+              <div class="panel panel--feature">
+                <div class="panel-head">
+                  <div>
+                    <div class="panel-eyebrow">Trend</div>
+                    <div class="panel-title">趋势分析与天气联动</div>
+                  </div>
+                  <div class="panel-meta">窗口变化 {{ formatNumber(analysisTrend.summary.window_change_pct, 1) }}% | 温度相关 {{ formatNumber(analysisTrend.summary.temperature_correlation, 2) }}</div>
+                </div>
+                <div v-if="errors.analysisTrend" class="state-error">{{ errors.analysisTrend }}</div>
+                <div id="trendChart" class="chart chart--trend"></div>
+              </div>
+
+              <div class="panel">
+                <div class="panel-head">
+                  <div>
+                    <div class="panel-eyebrow">Structure</div>
+                    <div class="panel-title">分时段与周内结构</div>
+                  </div>
+                </div>
+                <div v-if="errors.analysisDistribution" class="state-error">{{ errors.analysisDistribution }}</div>
+                <div class="mini-grid">
+                  <div>
+                    <div id="patternChart" class="chart chart--mini"></div>
+                  </div>
+                  <div>
+                    <div id="splitChart" class="chart chart--mini"></div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="panel">
+                <div class="panel-head">
+                  <div>
+                    <div class="panel-eyebrow">Compare</div>
+                    <div class="panel-title">当前建筑 vs 同类均值</div>
+                  </div>
+                  <div class="panel-meta">{{ analysisCompare.message || (analysisCompare.peer_group ? `同类样本 ${analysisCompare.peer_group.peer_count} 栋` : '请选择单体建筑') }}</div>
+                </div>
+                <div v-if="errors.analysisCompare" class="state-error">{{ errors.analysisCompare }}</div>
+                <div class="compare-layout">
+                  <div id="compareChart" class="chart chart--compare"></div>
+                  <div class="peer-list">
+                    <div class="peer-list-title">同类建筑均值排名</div>
+                    <div v-if="!analysisCompare.peer_ranking.length" class="empty-tip">请选择单体建筑后查看同类对比。</div>
+                    <ul v-else>
+                      <li v-for="item in analysisCompare.peer_ranking" :key="item.building_id">
+                        <span>{{ item.building_name }}</span>
+                        <strong>{{ formatNumber(item.avg_value, 1) }} kWh</strong>
+                      </li>
+                    </ul>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </template>
         </section>
 
         <section v-show="activePage === 'anomaly'" class="page">
           <div class="panel">
-            <div class="panel-title">异常类型分布</div>
+            <div class="panel-head">
+              <div>
+                <div class="panel-eyebrow">Anomaly</div>
+                <div class="panel-title">异常类型分布</div>
+              </div>
+            </div>
             <div id="anomalyTypeChart" class="chart"></div>
           </div>
 
           <div class="panel">
-            <div class="panel-title">故障列表（可执行处理闭环）</div>
+            <div class="panel-head">
+              <div>
+                <div class="panel-eyebrow">Operations</div>
+                <div class="panel-title">故障列表与处理闭环</div>
+              </div>
+            </div>
             <div class="anomaly-toolbar">
               <el-select v-model="anomalyQuery.severity" placeholder="严重级别" style="width: 140px" @change="onAnomalyFilterChange">
                 <el-option label="全部级别" value=""></el-option>
@@ -131,8 +271,38 @@
 
         <section v-show="activePage === 'assistant'" class="page">
           <div class="panel">
-            <div class="panel-title">智能助手（Provider 可切换）</div>
+            <div class="panel-head">
+              <div>
+                <div class="panel-eyebrow">Assistant</div>
+                <div class="panel-title">智能助手（诊断 + 当前分析结论）</div>
+              </div>
+            </div>
             <div class="assistant-box">
+              <div class="analysis-brief">
+                <div>
+                  <div class="analysis-brief-title">当前分析上下文</div>
+                  <div class="analysis-brief-sub">{{ currentAnalysisScopeText() }}</div>
+                </div>
+                <el-button type="primary" plain @click="submitAnalysisReport" :loading="loading.analysisInsight">基于当前分析生成结论</el-button>
+              </div>
+
+              <div v-if="analysisInsight" class="diagnosis diagnosis--analysis">
+                <h3>分析结论</h3>
+                <p>Provider: {{ analysisInsight.provider }} | 耗时: {{ analysisInsight.latency_ms }}ms</p>
+                <p v-if="analysisInsight.fallback_used" class="state-error">已降级到模板分析：{{ analysisInsight.degrade_message || 'LLM不可用' }}</p>
+                <p>{{ analysisInsight.summary }}</p>
+                <h4>主要发现</h4><ul><li v-for="item in analysisInsight.findings" :key="item">{{ item }}</li></ul>
+                <h4>可能原因</h4><ul><li v-for="item in analysisInsight.possible_causes" :key="item">{{ item }}</li></ul>
+                <h4>节能建议</h4><ul><li v-for="item in analysisInsight.energy_saving_suggestions" :key="item">{{ item }}</li></ul>
+                <h4>运维建议</h4><ul><li v-for="item in analysisInsight.operations_suggestions" :key="item">{{ item }}</li></ul>
+                <h4>知识证据</h4><ul><li v-for="item in analysisInsight.evidence" :key="item.chunk_id || item.title">{{ item.title }} / {{ item.section }} - {{ item.excerpt }}</li></ul>
+                <div class="assistant-actions">
+                  <span class="template-label">质量标记：</span>
+                  <el-button size="small" :type="analysisFeedbackLabel === 'useful' ? 'success' : 'default'" @click="submitAnalysisFeedback('useful')">useful</el-button>
+                  <el-button size="small" :type="analysisFeedbackLabel === 'not_useful' ? 'danger' : 'default'" @click="submitAnalysisFeedback('not_useful')">not useful</el-button>
+                </div>
+              </div>
+
               <div class="template-row">
                 <span class="template-label">快捷模板：</span>
                 <el-button size="small" @click="applyDiagnosisTemplate('spike')">突增排查</el-button>
@@ -145,31 +315,33 @@
                 </el-select>
               </div>
 
-              <el-input v-model="chatInput" type="textarea" :rows="3" placeholder="例如：B002 今天上午突增的原因是什么？"></el-input>
+              <el-input v-model="chatInput" type="textarea" :rows="3" placeholder="例如：这条突增告警的根因是什么，应该先检查哪里？"></el-input>
               <div class="assistant-actions">
                 <el-button type="primary" @click="submitDiagnosis" :loading="loading.ai">生成诊断</el-button>
                 <el-button @click="copyDiagnosisToActionNote" :disabled="!diagnosis || !selectedAnomaly">写入处理备注草稿</el-button>
               </div>
 
-              <div class="ai-stats">
-                <div class="ai-stats-title">近{{ aiStats.windowHours }}小时 AI 运行统计</div>
-                <div class="ai-stats-grid">
-                  <div>总调用: {{ aiStats.totalCalls }}</div>
-                  <div>LLM调用: {{ aiStats.llmCalls }}</div>
-                  <div>降级次数: {{ aiStats.fallbackCalls }}</div>
-                  <div>降级率: {{ aiStats.fallbackRate }}%</div>
-                  <div>平均耗时: {{ aiStats.avgLatency }} ms</div>
+              <div class="ai-stats-grid-panel">
+                <div class="ai-stats">
+                  <div class="ai-stats-title">近{{ aiStats.windowHours }}小时 AI 运行统计</div>
+                  <div class="ai-stats-grid">
+                    <div>总调用: {{ aiStats.totalCalls }}</div>
+                    <div>LLM调用: {{ aiStats.llmCalls }}</div>
+                    <div>降级次数: {{ aiStats.fallbackCalls }}</div>
+                    <div>降级率: {{ aiStats.fallbackRate }}%</div>
+                    <div>平均耗时: {{ aiStats.avgLatency }} ms</div>
+                  </div>
                 </div>
-              </div>
-              <div class="ai-stats">
-                <div class="ai-stats-title">近{{ aiEvaluate.windowHours }}小时 诊断质量评估</div>
-                <div class="ai-stats-grid">
-                  <div>Template 成功率: {{ aiEvaluate.template.successRate }}%</div>
-                  <div>Template 完整率: {{ aiEvaluate.template.completeRate }}%</div>
-                  <div>LLM 成功率: {{ aiEvaluate.llm.successRate }}%</div>
-                  <div>LLM 降级率: {{ aiEvaluate.llm.fallbackRate }}%</div>
-                  <div>LLM 平均耗时: {{ aiEvaluate.llm.avgLatency }} ms</div>
-                  <div>人工有用率: {{ aiEvaluate.feedback.usefulRate }}%</div>
+                <div class="ai-stats">
+                  <div class="ai-stats-title">近{{ aiEvaluate.windowHours }}小时 诊断质量评估</div>
+                  <div class="ai-stats-grid">
+                    <div>Template 成功率: {{ aiEvaluate.template.successRate }}%</div>
+                    <div>Template 完整率: {{ aiEvaluate.template.completeRate }}%</div>
+                    <div>LLM 成功率: {{ aiEvaluate.llm.successRate }}%</div>
+                    <div>LLM 降级率: {{ aiEvaluate.llm.fallbackRate }}%</div>
+                    <div>LLM 平均耗时: {{ aiEvaluate.llm.avgLatency }} ms</div>
+                    <div>人工有用率: {{ aiEvaluate.feedback.usefulRate }}%</div>
+                  </div>
                 </div>
               </div>
 
@@ -182,8 +354,7 @@
                 <h4>排查步骤</h4><ul><li v-for="item in diagnosis.steps" :key="item">{{ item }}</li></ul>
                 <h4>优先动作</h4><ul><li v-for="item in diagnosis.recommended_actions" :key="item">{{ item }}</li></ul>
                 <h4>预防建议</h4><ul><li v-for="item in diagnosis.prevention" :key="item">{{ item }}</li></ul>
-                <h4>知识证据</h4>
-                <ul><li v-for="item in diagnosis.evidence" :key="item.chunk_id">{{ item.title }} / {{ item.section }} - {{ item.excerpt }}</li></ul>
+                <h4>知识证据</h4><ul><li v-for="item in diagnosis.evidence" :key="item.chunk_id">{{ item.title }} / {{ item.section }} - {{ item.excerpt }}</li></ul>
                 <div class="assistant-actions">
                   <span class="template-label">质量标记：</span>
                   <el-button size="small" :type="diagnosisFeedbackLabel === 'useful' ? 'success' : 'default'" @click="submitDiagnosisFeedback('useful')">useful</el-button>

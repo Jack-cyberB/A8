@@ -20,10 +20,19 @@ createApp({
         { key: 'anomaly', label: '故障监控' },
         { key: 'assistant', label: '智能助手' },
       ],
+      analysisMetrics: [
+        { value: 'electricity', label: '电力' },
+        { value: 'water', label: '水' },
+        { value: 'hvac', label: '空调' },
+        { value: 'environment', label: '环境' },
+      ],
       activePage: 'overview',
       buildings: [],
       globalRangeText: '-',
       filters: { buildingId: '', range: [] },
+      analysisMetric: 'electricity',
+      analysisOverlayWeather: true,
+      analysisUnsupportedMessage: '',
       anomalyQuery: {
         severity: '',
         status: '',
@@ -33,10 +42,38 @@ createApp({
         total: 0,
       },
       trendSeries: [],
-      rankRows: [],
       anomalyRows: [],
       anomalyTypeStats: {},
       overview: { totalKwh: 0, avgKwh: 0, anomalyCount: 0, savingPct: 0, carbonKg: 0 },
+      analysisSummary: {
+        metric_type: 'electricity',
+        unit: 'kWh',
+        total_value: 0,
+        avg_value: 0,
+        peak_value: 0,
+        volatility_pct: 0,
+      },
+      analysisTrend: {
+        metric_type: 'electricity',
+        series: [],
+        weather_series: [],
+        overlayAvailable: false,
+        summary: { window_change_pct: 0, temperature_correlation: 0 },
+      },
+      analysisDistribution: {
+        hourly_profile: [],
+        weekday_weekend_split: [],
+        day_night_split: [],
+      },
+      analysisCompare: {
+        building: null,
+        peer_group: null,
+        items: [],
+        peer_ranking: [],
+        message: '',
+      },
+      analysisInsight: null,
+      analysisFeedbackLabel: '',
       chatInput: '',
       aiProvider: 'template',
       aiStats: {
@@ -53,10 +90,7 @@ createApp({
         llm: { total: 0, successRate: 0, avgLatency: 0, fallbackRate: 0, completeRate: 0 },
         feedback: { total: 0, usefulRate: 0 },
       },
-      health: {
-        status: 'unknown',
-        regression: 'unknown',
-      },
+      health: { status: 'unknown', regression: 'unknown' },
       diagnosis: null,
       diagnosisFeedbackLabel: '',
       selectedAnomaly: null,
@@ -81,14 +115,33 @@ createApp({
       loading: {
         overview: false,
         trend: false,
-        rank: false,
         anomaly: false,
         ai: false,
         detail: false,
         action: false,
+        analysisSummary: false,
+        analysisTrend: false,
+        analysisDistribution: false,
+        analysisCompare: false,
+        analysisInsight: false,
       },
-      errors: { overview: '', trend: '', rank: '', anomaly: '' },
-      charts: { overview: null, trend: null, rank: null, anomalyType: null },
+      errors: {
+        overview: '',
+        trend: '',
+        anomaly: '',
+        analysisSummary: '',
+        analysisTrend: '',
+        analysisDistribution: '',
+        analysisCompare: '',
+      },
+      charts: {
+        overview: null,
+        trend: null,
+        hourlyProfile: null,
+        split: null,
+        compare: null,
+        anomalyType: null,
+      },
       refreshTimer: null,
     };
   },
@@ -103,10 +156,32 @@ createApp({
   methods: {
     async fetchJson(url, options) {
       const res = await fetch(url, options);
-      if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+      if (!res.ok) {
+        let message = `${res.status} ${res.statusText}`;
+        try {
+          const payload = await res.json();
+          if (payload?.message) message = payload.message;
+        } catch (_) {
+          // ignore
+        }
+        throw new Error(message);
+      }
       const json = await res.json();
       if (json.code !== 0) throw new Error(json.message || 'API error');
       return json.data;
+    },
+    formatNumber(value, digits = 1) {
+      const num = Number(value || 0);
+      return Number.isFinite(num) ? num.toFixed(digits) : '0.0';
+    },
+    currentMetricLabel() {
+      return this.analysisMetrics.find((item) => item.value === this.analysisMetric)?.label || '电力';
+    },
+    currentAnalysisScopeText() {
+      const building = this.buildings.find((item) => item.id === this.filters.buildingId);
+      const buildingText = building ? `${building.name} (${building.type})` : '全部建筑';
+      const rangeText = this.isCompleteRange(this.filters.range) ? `${this.filters.range[0]} ~ ${this.filters.range[1]}` : '全量时间范围';
+      return `${this.currentMetricLabel()} | ${buildingText} | ${rangeText}`;
     },
     isCompleteRange(range) {
       return Array.isArray(range) && range.length === 2 && !!range[0] && !!range[1];
@@ -119,6 +194,45 @@ createApp({
         end_time: complete ? this.filters.range[1] : undefined,
       };
     },
+    getAnalysisParams() {
+      return {
+        ...this.getTimeParams(),
+        metric_type: this.analysisMetric,
+      };
+    },
+    clearAnalysisData() {
+      this.analysisSummary = {
+        metric_type: this.analysisMetric,
+        unit: 'kWh',
+        total_value: 0,
+        avg_value: 0,
+        peak_value: 0,
+        volatility_pct: 0,
+      };
+      this.analysisTrend = {
+        metric_type: this.analysisMetric,
+        series: [],
+        weather_series: [],
+        overlayAvailable: false,
+        summary: { window_change_pct: 0, temperature_correlation: 0 },
+      };
+      this.analysisDistribution = {
+        hourly_profile: [],
+        weekday_weekend_split: [],
+        day_night_split: [],
+      };
+      this.analysisCompare = {
+        building: null,
+        peer_group: null,
+        items: [],
+        peer_ranking: [],
+        message: '',
+      };
+    },
+    setAnalysisUnsupported(message) {
+      this.analysisUnsupportedMessage = message || '暂未接入该分析类型';
+      this.clearAnalysisData();
+    },
     async bootstrap() {
       await this.loadBuildings();
       await this.loadSystemHealth();
@@ -128,12 +242,23 @@ createApp({
     },
     onBuildingChange() {
       this.anomalyQuery.page = 1;
+      this.analysisInsight = null;
+      this.analysisFeedbackLabel = '';
       this.refreshCurrentPage();
+    },
+    onAnalysisMetricChange() {
+      this.analysisInsight = null;
+      this.analysisFeedbackLabel = '';
+      if (this.activePage === 'analysis' || this.activePage === 'assistant') {
+        this.refreshCurrentPage();
+      }
     },
     onDateRangeChange() {
       if (this.refreshTimer) clearTimeout(this.refreshTimer);
       this.refreshTimer = setTimeout(() => {
         this.anomalyQuery.page = 1;
+        this.analysisInsight = null;
+        this.analysisFeedbackLabel = '';
         this.refreshCurrentPage();
       }, 200);
     },
@@ -191,18 +316,88 @@ createApp({
         this.loading.trend = false;
       }
     },
-    async loadRank() {
-      this.loading.rank = true;
-      this.errors.rank = '';
+    async loadAnalysisSummary() {
+      this.loading.analysisSummary = true;
+      this.errors.analysisSummary = '';
       try {
-        const data = await this.fetchJson(`${API_BASE}/api/energy/rank`);
-        this.rankRows = data.items || [];
+        const data = await this.fetchJson(`${API_BASE}/api/analysis/summary${buildQuery(this.getAnalysisParams())}`);
+        this.analysisUnsupportedMessage = '';
+        this.analysisSummary = data;
       } catch (err) {
         console.error(err);
-        this.errors.rank = '排名数据加载失败';
+        if (String(err.message || '').includes('暂未接入')) {
+          this.setAnalysisUnsupported(err.message);
+          return;
+        }
+        this.errors.analysisSummary = '分析摘要加载失败';
       } finally {
-        this.loading.rank = false;
+        this.loading.analysisSummary = false;
       }
+    },
+    async loadAnalysisTrend() {
+      this.loading.analysisTrend = true;
+      this.errors.analysisTrend = '';
+      try {
+        const data = await this.fetchJson(`${API_BASE}/api/analysis/trend${buildQuery(this.getAnalysisParams())}`);
+        this.analysisTrend = {
+          ...data,
+          overlayAvailable: !!data.overlay_available,
+          summary: data.summary || { window_change_pct: 0, temperature_correlation: 0 },
+        };
+      } catch (err) {
+        console.error(err);
+        if (String(err.message || '').includes('暂未接入')) {
+          this.setAnalysisUnsupported(err.message);
+          return;
+        }
+        this.errors.analysisTrend = '分析趋势加载失败';
+      } finally {
+        this.loading.analysisTrend = false;
+      }
+    },
+    async loadAnalysisDistribution() {
+      this.loading.analysisDistribution = true;
+      this.errors.analysisDistribution = '';
+      try {
+        const data = await this.fetchJson(`${API_BASE}/api/analysis/distribution${buildQuery(this.getAnalysisParams())}`);
+        this.analysisDistribution = data;
+      } catch (err) {
+        console.error(err);
+        if (String(err.message || '').includes('暂未接入')) {
+          this.setAnalysisUnsupported(err.message);
+          return;
+        }
+        this.errors.analysisDistribution = '结构分析加载失败';
+      } finally {
+        this.loading.analysisDistribution = false;
+      }
+    },
+    async loadAnalysisCompare() {
+      this.loading.analysisCompare = true;
+      this.errors.analysisCompare = '';
+      try {
+        const data = await this.fetchJson(`${API_BASE}/api/analysis/compare${buildQuery(this.getAnalysisParams())}`);
+        this.analysisCompare = data;
+      } catch (err) {
+        console.error(err);
+        if (String(err.message || '').includes('暂未接入')) {
+          this.setAnalysisUnsupported(err.message);
+          return;
+        }
+        this.errors.analysisCompare = '对比分析加载失败';
+      } finally {
+        this.loading.analysisCompare = false;
+      }
+    },
+    async loadAnalysisWorkspace() {
+      this.analysisUnsupportedMessage = '';
+      await this.loadAnalysisSummary();
+      if (this.analysisUnsupportedMessage) {
+        await nextTick();
+        return;
+      }
+      await Promise.all([this.loadAnalysisTrend(), this.loadAnalysisDistribution(), this.loadAnalysisCompare()]);
+      await this.syncVisibleCharts();
     },
     async loadAnomalies() {
       this.loading.anomaly = true;
@@ -289,7 +484,7 @@ createApp({
       window.open(`${API_BASE}/api/anomaly/export${params}`, '_blank');
     },
     async refreshAll() {
-      await Promise.all([this.loadOverviewMetrics(), this.loadTrend(), this.loadRank(), this.loadAnomalies()]);
+      await Promise.all([this.loadOverviewMetrics(), this.loadTrend(), this.loadAnomalies(), this.loadAnalysisWorkspace()]);
       await this.syncVisibleCharts();
     },
     async refreshCurrentPage() {
@@ -299,8 +494,7 @@ createApp({
         return;
       }
       if (this.activePage === 'analysis') {
-        await Promise.all([this.loadOverviewMetrics(), this.loadTrend(), this.loadRank()]);
-        await this.syncVisibleCharts();
+        await this.loadAnalysisWorkspace();
         return;
       }
       if (this.activePage === 'anomaly') {
@@ -308,8 +502,7 @@ createApp({
         await this.syncVisibleCharts();
         return;
       }
-      await Promise.all([this.loadOverviewMetrics(), this.loadAnomalies()]);
-      await this.syncVisibleCharts();
+      await Promise.all([this.loadAiStats(), this.loadAiEvaluate()]);
     },
     async switchPage(key) {
       this.activePage = key;
@@ -498,6 +691,56 @@ createApp({
         this.$message.error(`标记失败：${err.message}`);
       }
     },
+    async submitAnalysisReport() {
+      this.loading.analysisInsight = true;
+      try {
+        const payload = {
+          provider: this.aiProvider,
+          metric_type: this.analysisMetric,
+          building_id: this.filters.buildingId || null,
+          start_time: this.isCompleteRange(this.filters.range) ? this.filters.range[0] : null,
+          end_time: this.isCompleteRange(this.filters.range) ? this.filters.range[1] : null,
+          message: `${this.currentAnalysisScopeText()}，请输出结构化分析结论。`,
+        };
+        const data = await this.fetchJson(`${API_BASE}/api/ai/analyze`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        this.analysisInsight = data.analysis || null;
+        this.analysisFeedbackLabel = '';
+        this.activePage = 'assistant';
+        await this.loadAiStats();
+        await this.loadAiEvaluate();
+      } catch (err) {
+        console.error(err);
+        this.$message.error(`分析结论生成失败：${err.message}`);
+      } finally {
+        this.loading.analysisInsight = false;
+      }
+    },
+    async runAnalysisAssistant() {
+      await this.submitAnalysisReport();
+    },
+    async submitAnalysisFeedback(label) {
+      if (!this.analysisInsight?.trace_id) {
+        this.$message.warning('暂无可标注的分析结论');
+        return;
+      }
+      try {
+        await this.fetchJson(`${API_BASE}/api/ai/feedback`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ trace_id: this.analysisInsight.trace_id, label }),
+        });
+        this.analysisFeedbackLabel = label;
+        await this.loadAiEvaluate();
+        this.$message.success('质量标记已保存');
+      } catch (err) {
+        console.error(err);
+        this.$message.error(`标记失败：${err.message}`);
+      }
+    },
     getChartNode(domId) {
       return document.getElementById(domId);
     },
@@ -508,41 +751,131 @@ createApp({
     ensureChart(key, domId) {
       const node = document.getElementById(domId);
       if (!node || typeof echarts === 'undefined' || !this.canRenderChart(domId)) return null;
-      if (this.charts[key]) return this.charts[key];
+      if (this.charts[key]) {
+        const existingDom = this.charts[key].getDom?.();
+        if (existingDom === node) return this.charts[key];
+        this.charts[key].dispose?.();
+        this.charts[key] = null;
+      }
       this.charts[key] = echarts.init(node);
       return this.charts[key];
+    },
+    chartAxisStyle(name) {
+      return {
+        axisLine: { lineStyle: { color: 'rgba(84, 103, 135, 0.45)' } },
+        axisLabel: { color: '#5a6982' },
+        splitLine: { lineStyle: { color: 'rgba(115, 137, 176, 0.12)' } },
+        name,
+        nameTextStyle: { color: '#5a6982' },
+      };
     },
     renderOverviewChart() {
       const chart = this.ensureChart('overview', 'overviewChart');
       if (!chart) return;
       const data = this.trendSeries.slice(-72);
       chart.setOption({
+        grid: { left: 48, right: 24, top: 26, bottom: 40 },
         tooltip: { trigger: 'axis' },
-        xAxis: { type: 'category', data: data.map((i) => i.timestamp.slice(5, 16)) },
-        yAxis: { type: 'value', name: 'kWh' },
-        series: [{ type: 'line', data: data.map((i) => i.value), smooth: true, areaStyle: {} }],
+        xAxis: { type: 'category', data: data.map((i) => i.timestamp.slice(5, 16)), ...this.chartAxisStyle('') },
+        yAxis: { type: 'value', ...this.chartAxisStyle('kWh') },
+        series: [{ type: 'line', data: data.map((i) => i.value), smooth: true, showSymbol: false, areaStyle: { color: 'rgba(35, 124, 255, 0.18)' }, lineStyle: { width: 3, color: '#1f78ff' } }],
       });
     },
     renderTrendChart() {
       const chart = this.ensureChart('trend', 'trendChart');
       if (!chart) return;
-      const data = this.trendSeries;
-      chart.setOption({
+      const series = this.analysisTrend.series || [];
+      if (!series.length) {
+        chart.clear();
+        return;
+      }
+      const option = {
+        grid: { left: 54, right: 56, top: 36, bottom: 56 },
         tooltip: { trigger: 'axis' },
-        dataZoom: [{ type: 'inside' }, { type: 'slider' }],
-        xAxis: { type: 'category', data: data.map((i) => i.timestamp.slice(0, 16)) },
-        yAxis: { type: 'value', name: 'kWh' },
-        series: [{ name: '用电量', type: 'line', data: data.map((i) => i.value), showSymbol: false, smooth: true }],
+        legend: { top: 0, textStyle: { color: '#52617b' } },
+        dataZoom: [{ type: 'inside' }, { type: 'slider', height: 20, bottom: 8 }],
+        xAxis: { type: 'category', data: series.map((i) => i.timestamp.slice(0, 16)), ...this.chartAxisStyle('') },
+        yAxis: [
+          { type: 'value', ...this.chartAxisStyle(this.analysisSummary.unit || 'kWh') },
+          { type: 'value', ...this.chartAxisStyle('°C') },
+        ],
+        series: [
+          {
+            name: `${this.currentMetricLabel()}负荷`,
+            type: 'line',
+            data: series.map((i) => i.value),
+            showSymbol: false,
+            smooth: true,
+            lineStyle: { width: 3, color: '#1462d9' },
+            areaStyle: { color: 'rgba(20, 98, 217, 0.12)' },
+          },
+        ],
+      };
+      if (this.analysisOverlayWeather && this.analysisTrend.overlayAvailable && this.analysisTrend.weather_series?.length) {
+        option.series.push({
+          name: '气温',
+          type: 'line',
+          yAxisIndex: 1,
+          data: this.analysisTrend.weather_series.map((i) => i.value),
+          showSymbol: false,
+          smooth: true,
+          lineStyle: { width: 2, type: 'dashed', color: '#f08a24' },
+        });
+      }
+      chart.setOption(option);
+    },
+    renderHourlyProfileChart() {
+      const chart = this.ensureChart('hourlyProfile', 'patternChart');
+      if (!chart) return;
+      const items = this.analysisDistribution.hourly_profile || [];
+      chart.setOption({
+        grid: { left: 42, right: 18, top: 24, bottom: 34 },
+        tooltip: { trigger: 'axis' },
+        xAxis: { type: 'category', data: items.map((item) => item.label), axisLabel: { color: '#61718c', interval: 3 } },
+        yAxis: { type: 'value', ...this.chartAxisStyle(this.analysisSummary.unit || 'kWh') },
+        series: [{ type: 'bar', data: items.map((item) => item.avg_value), itemStyle: { color: '#2d82f7', borderRadius: [4, 4, 0, 0] } }],
       });
     },
-    renderRankChart() {
-      const chart = this.ensureChart('rank', 'rankChart');
+    renderSplitChart() {
+      const chart = this.ensureChart('split', 'splitChart');
       if (!chart) return;
       chart.setOption({
+        tooltip: { trigger: 'item' },
+        legend: { bottom: 0, textStyle: { color: '#5d6a81' } },
+        series: [
+          {
+            name: '工作日/周末',
+            type: 'pie',
+            radius: ['48%', '72%'],
+            center: ['50%', '44%'],
+            label: { formatter: '{b}' },
+            data: this.analysisDistribution.weekday_weekend_split || [],
+          },
+          {
+            name: '白天/夜间',
+            type: 'pie',
+            radius: ['20%', '38%'],
+            center: ['50%', '44%'],
+            label: { formatter: '{b}' },
+            data: this.analysisDistribution.day_night_split || [],
+          },
+        ],
+      });
+    },
+    renderCompareChart() {
+      const chart = this.ensureChart('compare', 'compareChart');
+      if (!chart) return;
+      const items = this.analysisCompare.items || [];
+      if (!items.length) {
+        chart.clear();
+        return;
+      }
+      chart.setOption({
+        grid: { left: 48, right: 18, top: 24, bottom: 24 },
         tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
-        xAxis: { type: 'value', name: 'kWh' },
-        yAxis: { type: 'category', data: this.rankRows.map((r) => r.building_name) },
-        series: [{ type: 'bar', data: this.rankRows.map((r) => r.avg_kwh), itemStyle: { color: '#1368ce' } }],
+        xAxis: { type: 'value', ...this.chartAxisStyle(this.analysisSummary.unit || 'kWh') },
+        yAxis: { type: 'category', data: items.map((item) => item.label), axisLabel: { color: '#596982' } },
+        series: [{ type: 'bar', data: items.map((item) => item.value), itemStyle: { color: '#0f6adf', borderRadius: 8 } }],
       });
     },
     renderAnomalyTypeChart(byType) {
@@ -550,16 +883,19 @@ createApp({
       if (!chart) return;
       chart.setOption({
         tooltip: { trigger: 'item' },
-        series: [{ type: 'pie', radius: ['35%', '70%'], data: Object.entries(byType).map(([name, value]) => ({ name, value })) }],
+        legend: { bottom: 0, textStyle: { color: '#5f6c84' } },
+        series: [{ type: 'pie', radius: ['34%', '72%'], data: Object.entries(byType).map(([name, value]) => ({ name, value })) }],
       });
     },
     async syncVisibleCharts() {
       await nextTick();
       if (this.activePage === 'overview') {
         this.renderOverviewChart();
-      } else if (this.activePage === 'analysis') {
+      } else if (this.activePage === 'analysis' && !this.analysisUnsupportedMessage) {
         this.renderTrendChart();
-        this.renderRankChart();
+        this.renderHourlyProfileChart();
+        this.renderSplitChart();
+        this.renderCompareChart();
       } else if (this.activePage === 'anomaly') {
         this.renderAnomalyTypeChart(this.anomalyTypeStats);
       }

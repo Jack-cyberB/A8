@@ -22,6 +22,8 @@ from urllib.request import Request, urlopen
 ROOT = Path(__file__).resolve().parents[1]
 DEMO_DATA_FILE = ROOT / "data" / "energy_dataset.csv"
 NORMALIZED_DATA_FILE = ROOT / "data" / "normalized" / "energy_normalized.csv"
+METADATA_FILE = ROOT / "data" / "raw" / "bdg2" / "data" / "metadata" / "metadata.csv"
+WEATHER_FILE = ROOT / "data" / "raw" / "bdg2" / "data" / "weather" / "weather.csv"
 DICT_FILE = ROOT / "data" / "ai_dictionary.json"
 KNOWLEDGE_FILE = ROOT / "data" / "normalized" / "knowledge_chunks.jsonl"
 RUNTIME_DIR = ROOT / "data" / "runtime"
@@ -34,6 +36,7 @@ FRONTEND_DIR = ROOT / "frontend"
 TIME_FMT = "%Y-%m-%d %H:%M:%S"
 CARBON_FACTOR = 0.785
 SEVERITY_SCORE = {"low": 1, "medium": 2, "high": 3}
+SUPPORTED_ANALYSIS_METRICS = {"electricity"}
 
 STATUS_NEW = "new"
 STATUS_ACK = "acknowledged"
@@ -322,6 +325,8 @@ class EnergyRepository:
         self,
         demo_data_file: Path,
         normalized_data_file: Path,
+        metadata_file: Path,
+        weather_file: Path,
         dict_file: Path,
         knowledge_file: Path,
         action_log_file: Path,
@@ -331,6 +336,8 @@ class EnergyRepository:
     ) -> None:
         self.demo_data_file = demo_data_file
         self.normalized_data_file = normalized_data_file
+        self.metadata_file = metadata_file
+        self.weather_file = weather_file
         self.dict_file = dict_file
         self.knowledge_file = knowledge_file
         self.action_log_file = action_log_file
@@ -339,6 +346,8 @@ class EnergyRepository:
         self.regression_summary_file = regression_summary_file
 
         self.rows = self._load_rows()
+        self.building_site_map = self._load_building_site_map()
+        self.weather_by_site = self._load_weather_by_site()
         self.by_building: dict[str, list[dict[str, Any]]] = {}
         self.stats: dict[str, dict[str, float]] = {}
         self.anomalies: list[dict[str, Any]] = []
@@ -444,6 +453,44 @@ class EnergyRepository:
         with self.dict_file.open("r", encoding="utf-8-sig") as f:
             return json.load(f).get("anomaly_type_dict", {})
 
+    def _load_building_site_map(self) -> dict[str, str]:
+        if not self.metadata_file.exists():
+            return {}
+        mapping: dict[str, str] = {}
+        with self.metadata_file.open("r", encoding="utf-8", newline="") as f:
+            reader = csv.DictReader(f)
+            for raw in reader:
+                building_id = str(raw.get("building_id", "")).strip()
+                site_id = str(raw.get("site_id", "")).strip()
+                if building_id and site_id:
+                    mapping[building_id] = site_id
+        return mapping
+
+    def _load_weather_by_site(self) -> dict[str, dict[dt.datetime, dict[str, float]]]:
+        if not self.weather_file.exists():
+            return {}
+        weather_by_site: dict[str, dict[dt.datetime, dict[str, float]]] = {}
+        with self.weather_file.open("r", encoding="utf-8", newline="") as f:
+            reader = csv.DictReader(f)
+            for raw in reader:
+                site_id = str(raw.get("site_id", "")).strip()
+                timestamp = parse_time(raw.get("timestamp", ""))
+                if not site_id or not timestamp:
+                    continue
+                try:
+                    temperature = float(raw.get("airTemperature", ""))
+                except (TypeError, ValueError):
+                    continue
+                try:
+                    wind_speed = float(raw.get("windSpeed", ""))
+                except (TypeError, ValueError):
+                    wind_speed = 0.0
+                weather_by_site.setdefault(site_id, {})[timestamp] = {
+                    "temperature_c": round(temperature, 2),
+                    "wind_speed": round(wind_speed, 2),
+                }
+        return weather_by_site
+
     def _load_knowledge_chunks(self) -> list[dict[str, Any]]:
         if not self.knowledge_file.exists():
             return []
@@ -479,6 +526,7 @@ class EnergyRepository:
                 "building_id": building_id,
                 "building_name": items[0]["building_name"],
                 "building_type": items[0]["building_type"],
+                "site_id": self.building_site_map.get(building_id),
                 "record_count": len(items),
                 "start_time": items[0]["timestamp"],
                 "end_time": items[-1]["timestamp"],
@@ -707,6 +755,26 @@ class EnergyRepository:
                 if not isinstance(value, list):
                     return False
             elif value in (None, ""):
+                return False
+        return True
+
+    def _required_analysis_fields_complete(self, analysis: dict[str, Any]) -> bool:
+        required = [
+            "summary",
+            "findings",
+            "possible_causes",
+            "energy_saving_suggestions",
+            "operations_suggestions",
+            "evidence",
+        ]
+        for key in required:
+            if key not in analysis:
+                return False
+            value = analysis.get(key)
+            if key == "summary":
+                if value in (None, ""):
+                    return False
+            elif not isinstance(value, list):
                 return False
         return True
 
@@ -1002,6 +1070,100 @@ class EnergyRepository:
             rows = [r for r in rows if r["timestamp"] <= end_time]
         return rows
 
+    def _require_metric_type(self, metric_type: str | None) -> str:
+        chosen = str(metric_type or "electricity").strip().lower() or "electricity"
+        if chosen not in SUPPORTED_ANALYSIS_METRICS:
+            raise ValueError("暂未接入该分析类型")
+        return chosen
+
+    def _summarize_values(self, values: list[float]) -> dict[str, float]:
+        if not values:
+            return {
+                "total": 0.0,
+                "avg": 0.0,
+                "peak": 0.0,
+                "min": 0.0,
+                "std": 0.0,
+                "volatility_pct": 0.0,
+            }
+        total = sum(values)
+        avg = total / len(values)
+        variance = sum((v - avg) ** 2 for v in values) / len(values)
+        std = math.sqrt(variance)
+        return {
+            "total": round(total, 4),
+            "avg": round(avg, 4),
+            "peak": round(max(values), 4),
+            "min": round(min(values), 4),
+            "std": round(std, 4),
+            "volatility_pct": round((std / avg * 100) if avg else 0.0, 2),
+        }
+
+    def _series_with_weather(self, rows: list[dict[str, Any]], building_id: str | None) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        ordered = sorted(rows, key=lambda x: x["timestamp"])
+        if building_id:
+            site_id = self.building_site_map.get(building_id)
+        else:
+            site_id = None
+
+        weather_lookup = self.weather_by_site.get(site_id or "", {})
+        series: list[dict[str, Any]] = []
+        weather_series: list[dict[str, Any]] = []
+
+        if not building_id:
+            buckets: dict[dt.datetime, float] = {}
+            for row in ordered:
+                buckets.setdefault(row["timestamp"], 0.0)
+                buckets[row["timestamp"]] += row["electricity_kwh"]
+            for timestamp, value in sorted(buckets.items(), key=lambda x: x[0]):
+                weather = weather_lookup.get(timestamp, {})
+                point = {
+                    "timestamp": to_iso(timestamp),
+                    "value": round(value, 4),
+                    "temperature_c": weather.get("temperature_c"),
+                }
+                series.append(point)
+                if weather.get("temperature_c") is not None:
+                    weather_series.append({"timestamp": to_iso(timestamp), "value": weather["temperature_c"]})
+            return series, weather_series
+
+        for row in ordered:
+            weather = weather_lookup.get(row["timestamp"], {})
+            point = {
+                "timestamp": to_iso(row["timestamp"]),
+                "value": round(row["electricity_kwh"], 4),
+                "temperature_c": weather.get("temperature_c"),
+            }
+            series.append(point)
+            if weather.get("temperature_c") is not None:
+                weather_series.append({"timestamp": to_iso(row["timestamp"]), "value": weather["temperature_c"]})
+        return series, weather_series
+
+    def _temperature_correlation(self, series: list[dict[str, Any]]) -> float:
+        pairs = [(float(item["value"]), float(item["temperature_c"])) for item in series if item.get("temperature_c") is not None]
+        if len(pairs) < 2:
+            return 0.0
+        xs = [x for x, _ in pairs]
+        ys = [y for _, y in pairs]
+        x_avg = sum(xs) / len(xs)
+        y_avg = sum(ys) / len(ys)
+        numerator = sum((x - x_avg) * (y - y_avg) for x, y in pairs)
+        denominator = math.sqrt(sum((x - x_avg) ** 2 for x in xs) * sum((y - y_avg) ** 2 for y in ys))
+        if not denominator:
+            return 0.0
+        return round(numerator / denominator, 4)
+
+    def _analysis_target_building(self, building_id: str | None, rows: list[dict[str, Any]]) -> tuple[str | None, list[dict[str, Any]]]:
+        if building_id and building_id in self.by_building:
+            return building_id, self._filter_rows(building_id, None, None)
+        if rows:
+            fallback_id = rows[0]["building_id"]
+            return fallback_id, list(self.by_building.get(fallback_id, []))
+        if self.buildings_meta:
+            fallback_id = sorted(self.buildings_meta.keys())[0]
+            return fallback_id, list(self.by_building.get(fallback_id, []))
+        return None, []
+
     def _sort_anomalies(self, rows: list[dict[str, Any]], sort: str) -> list[dict[str, Any]]:
         if sort == "timestamp_asc":
             return sorted(rows, key=lambda x: x["timestamp"])
@@ -1059,27 +1221,226 @@ class EnergyRepository:
             },
         }
 
-    def query_trend(self, building_id: str | None, start_time: dt.datetime | None, end_time: dt.datetime | None) -> dict[str, Any]:
+    def query_analysis_summary(
+        self,
+        building_id: str | None,
+        start_time: dt.datetime | None,
+        end_time: dt.datetime | None,
+        metric_type: str | None = "electricity",
+    ) -> dict[str, Any]:
+        metric = self._require_metric_type(metric_type)
         rows = self._filter_rows(building_id, start_time, end_time)
-        if not building_id:
-            buckets: dict[dt.datetime, float] = {}
-            for r in rows:
-                buckets.setdefault(r["timestamp"], 0.0)
-                buckets[r["timestamp"]] += r["electricity_kwh"]
-            series = [{"timestamp": to_iso(ts), "value": round(v, 4)} for ts, v in sorted(buckets.items(), key=lambda x: x[0])]
-        else:
-            series = [{"timestamp": to_iso(r["timestamp"]), "value": round(r["electricity_kwh"], 4)} for r in sorted(rows, key=lambda x: x["timestamp"])]
+        values = [r["electricity_kwh"] for r in rows]
+        summary = self._summarize_values(values)
+        anomalies = self._filter_anomalies(building_id, start_time, end_time)
+        working_hours = [r["electricity_kwh"] for r in rows if 8 <= r["hour"] <= 20]
+        off_hours = [r["electricity_kwh"] for r in rows if r["hour"] < 8 or r["hour"] > 20]
 
+        return {
+            "metric_type": metric,
+            "metric_label": "电力",
+            "unit": "kWh",
+            "building_id": building_id or "ALL",
+            "point_count": len(rows),
+            "total_value": summary["total"],
+            "avg_value": summary["avg"],
+            "peak_value": summary["peak"],
+            "min_value": summary["min"],
+            "std_value": summary["std"],
+            "volatility_pct": summary["volatility_pct"],
+            "anomaly_count": len(anomalies),
+            "working_hour_avg": round(sum(working_hours) / len(working_hours), 4) if working_hours else 0.0,
+            "off_hour_avg": round(sum(off_hours) / len(off_hours), 4) if off_hours else 0.0,
+            "supported_metric_types": sorted(SUPPORTED_ANALYSIS_METRICS),
+            "method_note": "normalized electricity + anomaly context + weather ready",
+        }
+
+    def query_analysis_trend(
+        self,
+        building_id: str | None,
+        start_time: dt.datetime | None,
+        end_time: dt.datetime | None,
+        metric_type: str | None = "electricity",
+    ) -> dict[str, Any]:
+        metric = self._require_metric_type(metric_type)
+        rows = self._filter_rows(building_id, start_time, end_time)
+        series, weather_series = self._series_with_weather(rows, building_id)
         values = [item["value"] for item in series]
-        total = sum(values)
-        avg = total / len(values) if values else 0
-        peak = max(values) if values else 0
+        summary = self._summarize_values(values)
+
+        if len(values) >= 48:
+            head = values[:24]
+            tail = values[-24:]
+            head_avg = sum(head) / len(head)
+            tail_avg = sum(tail) / len(tail)
+            change_pct = round(((tail_avg - head_avg) / head_avg * 100) if head_avg else 0.0, 2)
+        else:
+            change_pct = 0.0
+
+        return {
+            "metric_type": metric,
+            "metric_label": "电力",
+            "unit": "kWh",
+            "building_id": building_id or "ALL",
+            "series": series,
+            "weather_series": weather_series,
+            "overlay_available": bool(weather_series),
+            "summary": {
+                "total_value": summary["total"],
+                "avg_value": summary["avg"],
+                "peak_value": summary["peak"],
+                "volatility_pct": summary["volatility_pct"],
+                "window_change_pct": change_pct,
+                "temperature_correlation": self._temperature_correlation(series),
+            },
+        }
+
+    def query_analysis_distribution(
+        self,
+        building_id: str | None,
+        start_time: dt.datetime | None,
+        end_time: dt.datetime | None,
+        metric_type: str | None = "electricity",
+    ) -> dict[str, Any]:
+        metric = self._require_metric_type(metric_type)
+        rows = self._filter_rows(building_id, start_time, end_time)
+        hourly: dict[int, list[float]] = {hour: [] for hour in range(24)}
+        weekday_total = 0.0
+        weekend_total = 0.0
+        day_total = 0.0
+        night_total = 0.0
+
+        for row in rows:
+            value = float(row["electricity_kwh"])
+            hourly[row["hour"]].append(value)
+            if row["timestamp"].weekday() < 5:
+                weekday_total += value
+            else:
+                weekend_total += value
+            if 8 <= row["hour"] <= 20:
+                day_total += value
+            else:
+                night_total += value
+
+        hourly_profile = [
+            {
+                "hour": hour,
+                "label": f"{hour:02d}:00",
+                "avg_value": round(sum(values) / len(values), 4) if values else 0.0,
+            }
+            for hour, values in hourly.items()
+        ]
+        total = weekday_total + weekend_total
+        active_total = day_total + night_total
+
+        return {
+            "metric_type": metric,
+            "metric_label": "电力",
+            "unit": "kWh",
+            "building_id": building_id or "ALL",
+            "hourly_profile": hourly_profile,
+            "weekday_weekend_split": [
+                {"label": "工作日", "value": round(weekday_total, 4), "ratio_pct": round((weekday_total / total * 100) if total else 0.0, 2)},
+                {"label": "周末", "value": round(weekend_total, 4), "ratio_pct": round((weekend_total / total * 100) if total else 0.0, 2)},
+            ],
+            "day_night_split": [
+                {"label": "白天", "value": round(day_total, 4), "ratio_pct": round((day_total / active_total * 100) if active_total else 0.0, 2)},
+                {"label": "夜间", "value": round(night_total, 4), "ratio_pct": round((night_total / active_total * 100) if active_total else 0.0, 2)},
+            ],
+        }
+
+    def query_analysis_compare(
+        self,
+        building_id: str | None,
+        start_time: dt.datetime | None,
+        end_time: dt.datetime | None,
+        metric_type: str | None = "electricity",
+    ) -> dict[str, Any]:
+        metric = self._require_metric_type(metric_type)
+        if not building_id:
+            return {
+                "metric_type": metric,
+                "metric_label": "电力",
+                "unit": "kWh",
+                "building": None,
+                "peer_group": None,
+                "items": [],
+                "peer_ranking": [],
+                "message": "请选择单体建筑后查看同类对比。",
+            }
+        scoped_rows = self._filter_rows(building_id, start_time, end_time)
+        target_building_id, _ = self._analysis_target_building(building_id, scoped_rows)
+        if not target_building_id:
+            return {
+                "metric_type": metric,
+                "metric_label": "电力",
+                "unit": "kWh",
+                "building": None,
+                "peer_group": None,
+                "items": [],
+                "peer_ranking": [],
+                "message": "当前筛选范围暂无可对比数据。",
+            }
+
+        target_meta = self.buildings_meta.get(target_building_id, {})
+        target_type = target_meta.get("building_type", "unknown")
+        peer_rows = self._filter_rows(None, start_time, end_time)
+        grouped: dict[str, list[float]] = {}
+        grouped_type: dict[str, str] = {}
+        for row in peer_rows:
+            grouped.setdefault(row["building_id"], []).append(float(row["electricity_kwh"]))
+            grouped_type[row["building_id"]] = str(row["building_type"])
+
+        building_avg = {bid: (sum(vals) / len(vals)) for bid, vals in grouped.items() if vals}
+        peer_candidates = {bid: avg for bid, avg in building_avg.items() if grouped_type.get(bid) == target_type}
+        peer_avg = round(sum(peer_candidates.values()) / len(peer_candidates), 4) if peer_candidates else 0.0
+        target_avg = round(building_avg.get(target_building_id, 0.0), 4)
+        vs_peer_pct = round(((target_avg - peer_avg) / peer_avg * 100) if peer_avg else 0.0, 2)
+
+        ranking = [
+            {
+                "building_id": bid,
+                "building_name": self.buildings_meta.get(bid, {}).get("building_name", bid),
+                "avg_value": round(avg, 4),
+            }
+            for bid, avg in sorted(peer_candidates.items(), key=lambda x: x[1], reverse=True)[:8]
+        ]
+
+        return {
+            "metric_type": metric,
+            "metric_label": "电力",
+            "unit": "kWh",
+            "building": {
+                "building_id": target_building_id,
+                "building_name": target_meta.get("building_name", target_building_id),
+                "building_type": target_type,
+                "avg_value": target_avg,
+            },
+            "peer_group": {
+                "building_type": target_type,
+                "peer_avg_value": peer_avg,
+                "peer_count": len(peer_candidates),
+                "vs_peer_pct": vs_peer_pct,
+            },
+            "items": [
+                {"label": "当前建筑", "value": target_avg},
+                {"label": "同类均值", "value": peer_avg},
+            ],
+            "peer_ranking": ranking,
+        }
+
+    def query_trend(self, building_id: str | None, start_time: dt.datetime | None, end_time: dt.datetime | None) -> dict[str, Any]:
+        data = self.query_analysis_trend(building_id, start_time, end_time, "electricity")
         return {
             "unit": "kWh",
             "building_id": building_id or "ALL",
-            "point_count": len(series),
-            "series": series,
-            "summary": {"total_kwh": round(total, 4), "avg_kwh": round(avg, 4), "peak_kwh": round(peak, 4)},
+            "point_count": len(data["series"]),
+            "series": data["series"],
+            "summary": {
+                "total_kwh": data["summary"]["total_value"],
+                "avg_kwh": data["summary"]["avg_value"],
+                "peak_kwh": data["summary"]["peak_value"],
+            },
         }
 
     def query_rank(self, month: str | None) -> dict[str, Any]:
@@ -1428,6 +1789,237 @@ class EnergyRepository:
             },
         }
 
+    def _build_analysis_context(
+        self,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        metric_type = str(payload.get("metric_type", "electricity")).strip().lower() or "electricity"
+        building_id = str(payload.get("building_id", "")).strip() or None
+        start_time = parse_time(str(payload.get("start_time", "")).strip() or None)
+        end_time = parse_time(str(payload.get("end_time", "")).strip() or None)
+
+        summary = self.query_analysis_summary(building_id, start_time, end_time, metric_type)
+        trend = self.query_analysis_trend(building_id, start_time, end_time, metric_type)
+        distribution = self.query_analysis_distribution(building_id, start_time, end_time, metric_type)
+        compare = self.query_analysis_compare(building_id, start_time, end_time, metric_type)
+        building = compare.get("building") or {}
+
+        return {
+            "building_id": building_id or building.get("building_id"),
+            "building_name": building.get("building_name") or (self.buildings_meta.get(building_id or "", {}) or {}).get("building_name"),
+            "building_type": building.get("building_type") or (self.buildings_meta.get(building_id or "", {}) or {}).get("building_type"),
+            "metric_type": metric_type,
+            "start_time": to_iso(start_time) if start_time else None,
+            "end_time": to_iso(end_time) if end_time else None,
+            "summary": summary,
+            "trend": trend,
+            "distribution": distribution,
+            "compare": compare,
+        }
+
+    def _analyze_by_template(self, payload: dict[str, Any]) -> dict[str, Any]:
+        context = self._build_analysis_context(payload)
+        summary = context["summary"]
+        trend = context["trend"]
+        distribution = context["distribution"]
+        compare = context["compare"]
+        building_name = context.get("building_name") or "当前建筑"
+        metric_label = "电力"
+
+        findings: list[str] = []
+        possible_causes: list[str] = []
+        energy_saving: list[str] = []
+        operations: list[str] = []
+
+        change_pct = float(trend["summary"].get("window_change_pct", 0.0))
+        volatility_pct = float(summary.get("volatility_pct", 0.0))
+        temp_corr = float(trend["summary"].get("temperature_correlation", 0.0))
+        vs_peer_pct = float(compare.get("peer_group", {}).get("vs_peer_pct", 0.0))
+
+        if change_pct >= 10:
+            findings.append(f"近阶段 {metric_label}负荷较前段上升 {round(change_pct, 2)}%，存在近期增载迹象。")
+            possible_causes.append("近期时段内设备启停策略变化或使用强度上升。")
+        elif change_pct <= -10:
+            findings.append(f"近阶段 {metric_label}负荷较前段下降 {round(abs(change_pct), 2)}%，负荷回落明显。")
+            possible_causes.append("近期运行时长下降或局部区域空置。")
+        else:
+            findings.append("近阶段负荷变化整体平稳，没有出现明显阶跃波动。")
+
+        if volatility_pct >= 35:
+            findings.append(f"波动率达到 {round(volatility_pct, 2)}%，曲线稳定性偏弱。")
+            possible_causes.append("存在频繁启停、时段切换不稳定或策略控制震荡。")
+            operations.append("优先核查高峰时段设备启停逻辑，确认是否存在频繁切换。")
+        else:
+            findings.append(f"波动率为 {round(volatility_pct, 2)}%，曲线总体可控。")
+
+        if vs_peer_pct >= 15:
+            findings.append(f"当前建筑较同类平均高出 {round(vs_peer_pct, 2)}%，存在同类对比偏高问题。")
+            energy_saving.append("优先对照同类建筑运行策略，定位高于同类均值的关键时段。")
+        elif vs_peer_pct <= -15:
+            findings.append(f"当前建筑较同类平均低 {round(abs(vs_peer_pct), 2)}%，运行表现优于同类。")
+        else:
+            findings.append("当前建筑与同类均值接近，负荷水平处于正常区间。")
+
+        if temp_corr >= 0.35:
+            findings.append("用电与气温呈明显正相关，受天气热负荷影响较大。")
+            possible_causes.append("外部温度上升带动空调和通风负荷提升。")
+            energy_saving.append("结合温度变化优化空调设定点和分时启停策略。")
+        elif temp_corr <= -0.35:
+            findings.append("用电与气温呈反向相关，可能受采暖或特殊设备运行影响。")
+            possible_causes.append("低温时段带来的采暖或伴热负荷抬升。")
+        else:
+            findings.append("当前时段内气温与用电相关性不强，更多受到内部运行策略影响。")
+
+        weekday = distribution["weekday_weekend_split"][0]
+        weekend = distribution["weekday_weekend_split"][1]
+        if weekday["ratio_pct"] >= 70:
+            energy_saving.append("将节能优化重点放在工作日白天主负荷区间。")
+        if distribution["day_night_split"][1]["ratio_pct"] >= 40:
+            operations.append("夜间负荷占比偏高，建议排查夜间常开设备和待机策略。")
+
+        if not energy_saving:
+            energy_saving.append("保持当前负荷控制策略，重点关注异常波动时段。")
+        if not operations:
+            operations.append("持续跟踪高峰时段与低谷时段的设备运行记录，形成排班对照。")
+        if not possible_causes:
+            possible_causes.append("建议进一步结合设备台账和运行日程补充根因判断。")
+
+        evidence = []
+        message = str(payload.get("message", "")).strip() or f"{building_name} {metric_label} 分析"
+        for item in self._search_knowledge("anomaly_sustained_high_load", message, limit=3):
+            evidence.append(item)
+
+        summary_text = (
+            f"{building_name} 当前{metric_label}分析显示，均值 {summary['avg_value']} kWh，"
+            f"峰值 {summary['peak_value']} kWh，波动率 {summary['volatility_pct']}%。"
+        )
+
+        return {
+            "analysis": {
+                "summary": summary_text,
+                "findings": findings,
+                "possible_causes": possible_causes,
+                "energy_saving_suggestions": energy_saving,
+                "operations_suggestions": operations,
+                "evidence": evidence,
+            },
+            "context": context,
+        }
+
+    def analyze(self, payload: dict[str, Any]) -> dict[str, Any]:
+        preferred = str(payload.get("provider", "template")).strip().lower()
+        if preferred not in {"template", "llm", "auto"}:
+            preferred = "template"
+
+        start = time.perf_counter()
+        fallback_used = False
+        error_message = None
+        trace_id = uuid.uuid4().hex
+        template_result = self._analyze_by_template(payload)
+        result = template_result
+        provider_name = "template_provider"
+
+        try:
+            if preferred in {"llm", "auto"}:
+                llm_provider = self.providers["llm"]
+                api_key = os.getenv("OPENAI_API_KEY", "").strip()
+                if not api_key:
+                    raise RuntimeError("LLM provider not configured")
+
+                base_url = os.getenv("OPENAI_BASE_URL", "https://api.deepseek.com").strip() or "https://api.deepseek.com"
+                model = os.getenv("OPENAI_MODEL", "deepseek-chat").strip() or "deepseek-chat"
+                timeout_sec = float(os.getenv("OPENAI_TIMEOUT_SEC", "20"))
+                context = template_result["context"]
+                system_prompt = (
+                    "你是建筑能源分析助手。必须只输出一个JSON对象，不要输出其他文本。"
+                    "JSON字段必须包含：summary, findings, possible_causes, energy_saving_suggestions, operations_suggestions, evidence。"
+                    "其中 findings/possible_causes/energy_saving_suggestions/operations_suggestions/evidence 必须是数组。"
+                )
+                user_prompt = (
+                    f"分析上下文: {json.dumps(context, ensure_ascii=False)}\n"
+                    f"模板分析: {json.dumps(template_result['analysis'], ensure_ascii=False)}\n"
+                    f"用户补充问题: {str(payload.get('message', '')).strip() or '请给出当前筛选范围的分析结论。'}\n"
+                    "请输出严格JSON。"
+                )
+                response = llm_provider._call_chat_completion(
+                    base_url=base_url,
+                    api_key=api_key,
+                    model=model,
+                    timeout_sec=timeout_sec,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                )
+                content = response.get("choices", [{}])[0].get("message", {}).get("content", "")
+                if isinstance(content, list):
+                    content = "".join(
+                        str(part.get("text", "")) if isinstance(part, dict) else str(part)
+                        for part in content
+                    )
+                llm_obj = llm_provider._extract_json_object(str(content))
+                result = {
+                    "analysis": {
+                        "summary": str(llm_obj.get("summary", "")).strip() or template_result["analysis"]["summary"],
+                        "findings": llm_provider._coerce_list_of_str(llm_obj.get("findings")) or template_result["analysis"]["findings"],
+                        "possible_causes": llm_provider._coerce_list_of_str(llm_obj.get("possible_causes")) or template_result["analysis"]["possible_causes"],
+                        "energy_saving_suggestions": llm_provider._coerce_list_of_str(llm_obj.get("energy_saving_suggestions")) or template_result["analysis"]["energy_saving_suggestions"],
+                        "operations_suggestions": llm_provider._coerce_list_of_str(llm_obj.get("operations_suggestions")) or template_result["analysis"]["operations_suggestions"],
+                        "evidence": llm_obj.get("evidence", template_result["analysis"]["evidence"])
+                        if isinstance(llm_obj.get("evidence", template_result["analysis"]["evidence"]), list)
+                        else template_result["analysis"]["evidence"],
+                    },
+                    "context": context,
+                }
+                provider_name = llm_provider.name
+        except Exception as exc:
+            fallback_used = True
+            error_message = str(exc)
+            result = template_result
+
+        latency_ms = int((time.perf_counter() - start) * 1000)
+        result["analysis"]["provider"] = provider_name
+        result["analysis"]["requested_provider"] = preferred
+        result["analysis"]["latency_ms"] = latency_ms
+        result["analysis"]["fallback_used"] = fallback_used
+        result["analysis"]["trace_id"] = trace_id
+        if error_message:
+            result["analysis"]["degrade_message"] = f"LLM unavailable, fallback to template: {error_message}"
+
+        error_type = ""
+        if fallback_used:
+            msg = (error_message or "").lower()
+            if "http status 429" in msg:
+                error_type = "rate_limit"
+            elif "http status" in msg:
+                error_type = "http_error"
+            elif "network error" in msg:
+                error_type = "network_error"
+            elif "parse error" in msg:
+                error_type = "parse_error"
+            elif "not configured" in msg:
+                error_type = "not_configured"
+            else:
+                error_type = "unknown_error"
+
+        field_complete = self._required_analysis_fields_complete(result.get("analysis", {}))
+        self._append_ai_event(
+            {
+                "timestamp": to_iso(dt.datetime.now()),
+                "trace_id": trace_id,
+                "requested_provider": preferred,
+                "provider": provider_name,
+                "fallback_used": fallback_used,
+                "latency_ms": latency_ms,
+                "error_type": error_type,
+                "building_id": result.get("context", {}).get("building_id"),
+                "event_type": "analysis",
+                "field_complete": field_complete,
+                "result_risk_level": "",
+            }
+        )
+        return result
+
     def diagnose(self, payload: dict[str, Any]) -> dict[str, Any]:
         preferred = str(payload.get("provider", "template")).strip().lower()
         if preferred not in {"template", "llm", "auto"}:
@@ -1487,6 +2079,7 @@ class EnergyRepository:
                 "error_type": error_type,
                 "anomaly_id": result.get("context", {}).get("anomaly_id"),
                 "has_message": bool(str(payload.get("message", "")).strip()),
+                "event_type": "diagnose",
                 "field_complete": field_complete,
                 "result_risk_level": str(result.get("diagnosis", {}).get("risk_level", "")),
             }
@@ -1505,6 +2098,8 @@ class EnergyRepository:
 REPO = EnergyRepository(
     DEMO_DATA_FILE,
     NORMALIZED_DATA_FILE,
+    METADATA_FILE,
+    WEATHER_FILE,
     DICT_FILE,
     KNOWLEDGE_FILE,
     ACTION_LOG_FILE,
@@ -1572,6 +2167,15 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"code": 0, "message": "ok", "data": result})
             return
 
+        if parsed.path == "/api/ai/analyze":
+            try:
+                result = REPO.analyze(payload)
+            except ValueError as exc:
+                self._json({"code": 400, "message": str(exc), "data": None}, HTTPStatus.BAD_REQUEST)
+                return
+            self._json({"code": 0, "message": "ok", "data": result})
+            return
+
         if parsed.path == "/api/anomaly/action":
             try:
                 result = REPO.apply_anomaly_action(payload)
@@ -1624,6 +2228,7 @@ class Handler(BaseHTTPRequestHandler):
         building_id = params.get("building_id", [None])[0]
         start_time = parse_time(params.get("start_time", [None])[0])
         end_time = parse_time(params.get("end_time", [None])[0])
+        metric_type = params.get("metric_type", ["electricity"])[0]
 
         if parsed.path == "/api/buildings":
             self._json({"code": 0, "message": "ok", "data": REPO.query_buildings()})
@@ -1636,6 +2241,42 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/energy/rank":
             month = params.get("month", [None])[0]
             self._json({"code": 0, "message": "ok", "data": REPO.query_rank(month)})
+            return
+
+        if parsed.path == "/api/analysis/summary":
+            try:
+                data = REPO.query_analysis_summary(building_id, start_time, end_time, metric_type)
+            except ValueError as exc:
+                self._json({"code": 400, "message": str(exc), "data": None}, HTTPStatus.BAD_REQUEST)
+                return
+            self._json({"code": 0, "message": "ok", "data": data})
+            return
+
+        if parsed.path == "/api/analysis/trend":
+            try:
+                data = REPO.query_analysis_trend(building_id, start_time, end_time, metric_type)
+            except ValueError as exc:
+                self._json({"code": 400, "message": str(exc), "data": None}, HTTPStatus.BAD_REQUEST)
+                return
+            self._json({"code": 0, "message": "ok", "data": data})
+            return
+
+        if parsed.path == "/api/analysis/distribution":
+            try:
+                data = REPO.query_analysis_distribution(building_id, start_time, end_time, metric_type)
+            except ValueError as exc:
+                self._json({"code": 400, "message": str(exc), "data": None}, HTTPStatus.BAD_REQUEST)
+                return
+            self._json({"code": 0, "message": "ok", "data": data})
+            return
+
+        if parsed.path == "/api/analysis/compare":
+            try:
+                data = REPO.query_analysis_compare(building_id, start_time, end_time, metric_type)
+            except ValueError as exc:
+                self._json({"code": 400, "message": str(exc), "data": None}, HTTPStatus.BAD_REQUEST)
+                return
+            self._json({"code": 0, "message": "ok", "data": data})
             return
 
         if parsed.path == "/api/anomaly/list":

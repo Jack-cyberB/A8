@@ -1,4 +1,4 @@
-﻿# A8 Monorepo (V1 Closed Loop)
+﻿# A8 Monorepo (V2 Analysis Workspace)
 
 A8 建筑能源智能管理系统：
 - 前端：Vue3 + Element Plus + ECharts
@@ -27,6 +27,10 @@ python backend/server.py
 ## 主要 API
 
 - `GET /api/buildings`
+- `GET /api/analysis/summary`
+- `GET /api/analysis/trend`
+- `GET /api/analysis/compare`
+- `GET /api/analysis/distribution`
 - `GET /api/energy/trend`
 - `GET /api/energy/rank`
 - `GET /api/anomaly/list`（支持 `page/page_size/sort/severity/status`）
@@ -41,6 +45,7 @@ python backend/server.py
 - `GET /api/metrics/overview`
 - `GET /api/metrics/saving-potential`
 - `POST /api/ai/diagnose`（provider: `template|llm|auto`，含 `fallback_used`）
+- `POST /api/ai/analyze`（基于当前分析范围生成结构化结论）
 - `GET /api/system/health`
 
 ## 回归命令
@@ -77,11 +82,11 @@ $env:OPENAI_MAX_RETRIES="2"
 
 ## 闭环流程
 
-1. 在故障监控页筛选并定位异常
-2. 点击“确认/忽略/完成”提交处理动作
-3. 在异常详情查看处理时间线
-4. 在智能助手生成诊断并打质量标签
-5. 在异常详情填写复盘记录并导出 CSV
+1. 在“能耗分析”页切换建筑、时间范围、分析类型，查看趋势、结构、天气联动与同类对比
+2. 点击“AI 生成分析结论”，进入智能助手查看结构化分析建议
+3. 在故障监控页筛选并定位异常
+4. 点击“确认/忽略/完成”提交处理动作
+5. 在异常详情查看处理时间线、填写复盘记录并导出 CSV
 
 ## 交付检查清单
 
@@ -90,3 +95,4 @@ $env:OPENAI_MAX_RETRIES="2"
 3. 如配置 Key，`npm run test:llm-live` 返回 `status=pass`。
 4. 异常详情可保存复盘记录，且 `/api/anomaly/export` 可下载 CSV。
 5. 切换 `provider=llm/auto` 失败时仍可降级模板并继续完成处理流程。
+
