@@ -383,7 +383,7 @@ body {
 }
 
 .analysis-main-grid {
-  grid-template-columns: minmax(0, 1.45fr) minmax(360px, 0.8fr);
+  grid-template-columns: minmax(0, 1fr);
   align-items: start;
 }
 
@@ -415,7 +415,8 @@ body {
   margin-bottom: 4px;
 }
 
-.panel--insight {
+.panel--insight,
+.panel--insight-board {
   padding: 18px 18px 16px;
   background:
     radial-gradient(circle at top right, rgba(39, 119, 230, 0.08), transparent 26%),
@@ -474,6 +475,10 @@ body {
   margin-top: 14px;
   display: grid;
   gap: 12px;
+}
+
+.panel--insight-board .insight-groups {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
 .rule-insight-head {

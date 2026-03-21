@@ -8,6 +8,8 @@ from urllib.error import URLError
 from urllib.request import Request, urlopen
 
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 SERVER_URL = "http://127.0.0.1:8012"
 server_cmd = [sys.executable, "-c", "from backend.server import run; run(port=8012)"]
 proc = subprocess.Popen(server_cmd, cwd=str(ROOT), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -25,6 +27,9 @@ def get_json(url: str, method: str = "GET", payload: dict | None = None, timeout
 
 
 try:
+    from backend.server import load_local_env
+
+    load_local_env()
     if not os.getenv("OPENAI_API_KEY"):
         raise RuntimeError("OPENAI_API_KEY is required for live LLM smoke test")
 

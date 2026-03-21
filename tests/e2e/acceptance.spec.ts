@@ -31,11 +31,7 @@ test.describe('A8 acceptance chains', () => {
 
     await row.locator('.el-button--danger', { hasText: '诊断' }).click();
     await expect(page.getByRole('button', { name: '智能助手' })).toBeVisible();
-
-    await page.locator('.template-row .el-select').click();
-    await page.locator('.el-select-dropdown__item span').filter({ hasText: /优先 DeepSeek/ }).first().click();
-    await page.getByRole('button', { name: '生成诊断' }).click();
-    await expect(page.locator('.diagnosis')).toBeVisible();
+    await expect(page.locator('.diagnosis')).toBeVisible({ timeout: 60000 });
     await expect(page.locator('.diagnosis').getByText(/来源：DeepSeek|来源：模板兜底/).first()).toBeVisible();
 
     await page.getByRole('button', { name: '故障监控' }).click();

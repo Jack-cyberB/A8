@@ -238,15 +238,12 @@ createApp({
       return this.humanizeDegradeMessage(result.degrade_message);
     },
     analysisInsightPendingText() {
-      return '点击右上角“AI 生成分析结论”后，系统才会调用 DeepSeek。页面筛选和刷新不会自动消耗额度。';
+      return '请先在能耗分析页确认建筑和时间范围，再点击“AI 分析”进入这里生成完整结论。页面筛选和刷新不会自动消耗额度。';
     },
     aiAvailabilityText() {
       return this.health.aiConfigured
-        ? 'DeepSeek 已就绪。建议在确认当前建筑和时间范围后，再到智能助手中生成完整结论。'
+        ? 'DeepSeek 已就绪。建议先在能耗分析页确认当前建筑和时间范围，再在这里生成完整结论。'
         : '当前环境尚未配置 DeepSeek API Key，点击后会自动使用模板兜底，不会影响主流程。';
-    },
-    analysisPreviewFindings() {
-      return Array.isArray(this.analysisInsight?.findings) ? this.analysisInsight.findings.slice(0, 2) : [];
     },
     humanizeDegradeMessage(message) {
       const raw = String(message || '').trim();
@@ -1071,10 +1068,6 @@ createApp({
       this.activePage = 'assistant';
       await nextTick();
       await this.submitAnalysisReport();
-    },
-    async openAssistantPage() {
-      this.activePage = 'assistant';
-      await this.refreshCurrentPage();
     },
     async submitAnalysisFeedback(label) {
       if (!this.analysisInsight?.trace_id) {

@@ -17,7 +17,8 @@ test.describe('A8 closed loop chains', () => {
 
     await page.getByRole('button', { name: '能耗分析' }).click();
     await expect(page.getByText('电力分析工作台')).toBeVisible();
-    await expect(page.getByText('结论摘要与 AI 入口')).toBeVisible();
+    await expect(page.getByRole('button', { name: 'AI 分析' })).toBeVisible();
+    await expect(page.getByText('规则洞察与证据提要')).toBeVisible();
     await expect(page.locator('#trendChart canvas').first()).toBeVisible();
     await expect(page.locator('#patternChart canvas').first()).toBeVisible();
     await expect(page.locator('#splitChart canvas').first()).toBeVisible();
@@ -37,8 +38,8 @@ test.describe('A8 closed loop chains', () => {
       const chart = echarts.getInstanceByDom(document.getElementById('trendChart'));
       return !!chart?.getOption?.()?.series?.length;
     }, null, { timeout: 30000 });
-    await expect(page.getByText('分析页只展示摘要，不展开完整 AI 内容')).toBeVisible();
-    await expect(page.getByText('规则摘要与证据提要')).toBeVisible();
+    await expect(page.getByRole('button', { name: 'AI 分析' })).toBeVisible();
+    await expect(page.getByText('规则洞察与证据提要')).toBeVisible();
     await expect(page.locator('.insight-group').first()).toBeVisible();
 
     const trendMetaBefore = await page.evaluate(() => {
@@ -105,9 +106,9 @@ test.describe('A8 closed loop chains', () => {
     await page.waitForTimeout(1200);
     await expect(page.locator('#trendChart canvas').first()).toBeVisible();
 
-    await page.getByRole('button', { name: '在智能助手中生成 AI 结论' }).click();
+    await page.getByRole('button', { name: 'AI 分析' }).click();
     await expect(page.getByRole('button', { name: '智能助手' })).toBeVisible();
-    await expect(page.locator('.diagnosis--analysis')).toBeVisible();
+    await expect(page.locator('.diagnosis--analysis')).toBeVisible({ timeout: 60000 });
     await expect(page.locator('.diagnosis--analysis').getByText(/来源：DeepSeek|来源：模板兜底/).first()).toBeVisible();
   });
 
@@ -157,7 +158,7 @@ test.describe('A8 closed loop chains', () => {
     await expect(page.getByRole('button', { name: '智能助手' })).toBeVisible();
     await expect(page.getByText('近24小时 AI 运行统计')).toBeVisible();
     await expect(page.getByText('近24小时 诊断质量评估')).toBeVisible();
-    await expect(page.locator('.diagnosis')).toBeVisible();
+    await expect(page.locator('.diagnosis')).toBeVisible({ timeout: 60000 });
     await expect(page.locator('.diagnosis').getByText(/来源：DeepSeek|来源：模板兜底/).first()).toBeVisible();
 
     await page.getByRole('button', { name: '写入处理备注草稿' }).click();

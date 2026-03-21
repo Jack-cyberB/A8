@@ -20,6 +20,7 @@ from urllib.request import Request, urlopen
 
 
 ROOT = Path(__file__).resolve().parents[1]
+ENV_FILE = ROOT / ".env"
 DEMO_DATA_FILE = ROOT / "data" / "energy_dataset.csv"
 NORMALIZED_DATA_FILE = ROOT / "data" / "normalized" / "energy_normalized.csv"
 METADATA_FILE = ROOT / "data" / "raw" / "bdg2" / "data" / "metadata" / "metadata.csv"
@@ -56,6 +57,26 @@ ALLOWED_TRANSITIONS = {
     STATUS_IGNORED: set(),
     STATUS_RESOLVED: set(),
 }
+
+
+def load_local_env() -> None:
+    if not ENV_FILE.exists():
+        return
+    try:
+        for raw_line in ENV_FILE.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            key = key.strip()
+            value = value.strip().strip("'\"")
+            if key and key not in os.environ:
+                os.environ[key] = value
+    except OSError:
+        return
+
+
+load_local_env()
 
 
 def parse_time(value: str | None) -> dt.datetime | None:
