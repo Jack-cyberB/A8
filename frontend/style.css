@@ -123,10 +123,10 @@ body {
 }
 
 .filter-row {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 14px;
-  align-items: flex-end;
+  display: grid;
+  grid-template-columns: minmax(260px, 1.6fr) minmax(140px, 0.8fr) minmax(360px, 2.4fr) auto;
+  gap: 12px 14px;
+  align-items: end;
   margin-bottom: 18px;
   padding: 16px 18px;
   border: 1px solid var(--line);
@@ -139,6 +139,7 @@ body {
 .filter-block {
   display: grid;
   gap: 6px;
+  min-width: 0;
 }
 
 .filter-block .el-select,
@@ -146,13 +147,16 @@ body {
   width: 100% !important;
 }
 
+.filter-block--building {
+  min-width: 220px;
+}
+
 .filter-block--range {
-  flex: 1;
-  min-width: 300px;
+  min-width: 360px;
 }
 
 .filter-actions {
-  margin-left: auto;
+  justify-self: end;
 }
 
 .filter-label {
@@ -569,6 +573,15 @@ body {
 }
 
 @media (max-width: 1220px) {
+  .filter-row {
+    grid-template-columns: minmax(220px, 1.3fr) minmax(140px, 0.8fr) minmax(300px, 1.8fr);
+  }
+
+  .filter-actions {
+    grid-column: 1 / -1;
+    justify-self: start;
+  }
+
   .cards--analysis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .analysis-grid { grid-template-columns: 1fr; }
   .compare-layout { grid-template-columns: 1fr; }
@@ -603,7 +616,22 @@ body {
     margin-bottom: 0;
   }
 
-  .filter-actions { margin-left: 0; }
+  .filter-row {
+    grid-template-columns: 1fr;
+  }
+
+  .filter-block--range {
+    min-width: 0;
+  }
+
+  .filter-actions {
+    justify-self: stretch;
+  }
+
+  .filter-actions .el-button {
+    width: 100%;
+  }
+
   .mini-grid,
   .ai-stats-grid-panel { grid-template-columns: 1fr; }
   .action-cell .el-button { min-width: 52px; }

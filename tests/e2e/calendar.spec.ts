@@ -28,6 +28,40 @@ test.describe('A8 closed loop chains', () => {
     await expect(page.getByText('趋势分析与天气联动')).toBeVisible();
     await expect(page.getByText('分时段与周内结构')).toBeVisible();
     await expect(page.getByText('当前建筑 vs 同类均值')).toBeVisible();
+    await expect(page.locator('#trendChart canvas').first()).toBeVisible();
+    await page.waitForFunction(() => {
+      const chart = echarts.getInstanceByDom(document.getElementById('trendChart'));
+      return !!chart?.getOption?.()?.series?.length;
+    });
+
+    const trendMetaBefore = await page.evaluate(() => {
+      const chart = echarts.getInstanceByDom(document.getElementById('trendChart'));
+      const option = chart?.getOption?.() || {};
+      return {
+        seriesCount: Array.isArray(option.series) ? option.series.length : 0,
+        zoomStart: option.dataZoom?.[0]?.startValue,
+        zoomEnd: option.dataZoom?.[0]?.endValue,
+      };
+    });
+    expect(trendMetaBefore.seriesCount).toBeGreaterThanOrEqual(1);
+    expect(Number(trendMetaBefore.zoomEnd)).toBeGreaterThan(Number(trendMetaBefore.zoomStart));
+
+    const weatherSwitch = page.locator('.analysis-hero-actions .el-switch');
+    if (await weatherSwitch.isEnabled()) {
+      await weatherSwitch.click();
+      await page.waitForTimeout(400);
+      const trendMetaAfterToggle = await page.evaluate(() => {
+        const chart = echarts.getInstanceByDom(document.getElementById('trendChart'));
+        const option = chart?.getOption?.() || {};
+        return {
+          seriesCount: Array.isArray(option.series) ? option.series.length : 0,
+          zoomStart: option.dataZoom?.[0]?.startValue,
+          zoomEnd: option.dataZoom?.[0]?.endValue,
+        };
+      });
+      expect(trendMetaAfterToggle.seriesCount).toBe(1);
+      expect(Number(trendMetaAfterToggle.zoomEnd)).toBeGreaterThan(Number(trendMetaAfterToggle.zoomStart));
+    }
 
     await page.locator('.filter-row .el-select').nth(1).click();
     await page.locator('.el-select-dropdown:visible .el-select-dropdown__item').filter({ hasText: /^水$/ }).first().click();

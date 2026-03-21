@@ -273,6 +273,11 @@ createApp({
         this.refreshCurrentPage();
       }
     },
+    onAnalysisOverlayChange() {
+      if (this.activePage === 'analysis' && !this.analysisUnsupportedMessage) {
+        this.renderTrendChart();
+      }
+    },
     onDateRangeChange() {
       if (this.refreshTimer) clearTimeout(this.refreshTimer);
       this.refreshTimer = setTimeout(() => {
@@ -859,6 +864,11 @@ createApp({
         chart.clear();
         return;
       }
+      const previousOption = chart.getOption?.() || {};
+      const previousZoom = Array.isArray(previousOption.dataZoom) ? previousOption.dataZoom[0] : null;
+      const visiblePoints = bucketHours >= 24 ? 45 : bucketHours >= 12 ? 56 : bucketHours >= 6 ? 72 : 96;
+      const defaultStartValue = Math.max(0, series.length - Math.min(series.length, visiblePoints));
+      const defaultEndValue = Math.max(0, series.length - 1);
       const timeAxisLabel = this.buildTimeAxisLabels(series.map((item) => item.timestamp));
       const tooltipLabel = bucketHours > 1 ? `平均负荷（${bucketHours}h）` : `${this.currentMetricLabel()}负荷`;
       const option = {
@@ -880,7 +890,25 @@ createApp({
         },
         legend: { top: 0, itemWidth: 14, itemHeight: 8, textStyle: { color: '#52617b', fontSize: 12 } },
         dataZoom: series.length > 120
-          ? [{ type: 'inside' }, { type: 'slider', height: 14, bottom: 16, brushSelect: false }]
+          ? [
+              {
+                type: 'inside',
+                start: previousZoom?.start,
+                end: previousZoom?.end,
+                startValue: previousZoom?.startValue ?? defaultStartValue,
+                endValue: previousZoom?.endValue ?? defaultEndValue,
+              },
+              {
+                type: 'slider',
+                height: 14,
+                bottom: 16,
+                brushSelect: false,
+                start: previousZoom?.start,
+                end: previousZoom?.end,
+                startValue: previousZoom?.startValue ?? defaultStartValue,
+                endValue: previousZoom?.endValue ?? defaultEndValue,
+              },
+            ]
           : [],
         xAxis: {
           type: 'category',

@@ -34,7 +34,7 @@
 
       <main class="content">
         <section class="filter-row">
-          <div class="filter-block">
+          <div class="filter-block filter-block--building">
             <div class="filter-label">建筑</div>
             <el-select v-model="filters.buildingId" placeholder="建筑" style="width: 240px" @change="onBuildingChange">
               <el-option label="全部建筑" value=""></el-option>
@@ -108,7 +108,7 @@
               <div class="analysis-hero-sub">围绕当前建筑和时间范围，查看趋势、结构、天气联动和同类对比，并直接生成 AI 分析结论。</div>
             </div>
             <div class="analysis-hero-actions">
-              <el-switch v-model="analysisOverlayWeather" active-text="叠加温度" :disabled="!analysisTrend.overlayAvailable"></el-switch>
+              <el-switch v-model="analysisOverlayWeather" active-text="叠加温度" :disabled="!analysisTrend.overlayAvailable" @change="onAnalysisOverlayChange"></el-switch>
               <el-button @click="runAnalysisAssistant" type="primary" :loading="loading.analysisInsight">AI 生成分析结论</el-button>
             </div>
           </div>
