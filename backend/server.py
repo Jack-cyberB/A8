@@ -254,9 +254,10 @@ class LLMDiagnoseProvider(DiagnoseProvider):
             prompt_message = "请基于异常上下文给出诊断建议。"
 
         system_prompt = (
-            "你是建筑能源运维诊断助手。必须只输出一个JSON对象，不要输出其他文本。"
+            "你是建筑能源运维诊断助手，面向真实运维排障场景。必须只输出一个JSON对象，不要输出其他文本。"
             "JSON字段必须包含：conclusion, causes, steps, prevention, recommended_actions, evidence, confidence, risk_level。"
             "其中causes/steps/prevention/recommended_actions为字符串数组，evidence为数组。risk_level只能是low/medium/high。"
+            "请使用中文，优先给出可执行的排查步骤和处理动作，不要泛泛而谈。"
         )
         user_prompt = (
             f"异常类型: {anomaly_name}\n"
@@ -264,6 +265,7 @@ class LLMDiagnoseProvider(DiagnoseProvider):
             f"模板诊断摘要: {diag_template.get('conclusion', '')}\n"
             f"知识证据:\n{evidence_text}\n"
             f"用户问题: {prompt_message}\n"
+            "请结合异常发生时间、偏差比例、当前建筑和知识证据，优先输出可执行的排查顺序与风险判断。\n"
             "请输出严格JSON。"
         )
 
@@ -2189,9 +2191,9 @@ class EnergyRepository:
         }
 
     def analyze(self, payload: dict[str, Any]) -> dict[str, Any]:
-        preferred = str(payload.get("provider", "template")).strip().lower()
+        preferred = str(payload.get("provider", "auto")).strip().lower()
         if preferred not in {"template", "llm", "auto"}:
-            preferred = "template"
+            preferred = "auto"
 
         start = time.perf_counter()
         fallback_used = False
@@ -2204,6 +2206,8 @@ class EnergyRepository:
         try:
             if preferred in {"llm", "auto"}:
                 llm_provider = self.providers["llm"]
+                if payload.get("simulate_llm_failure"):
+                    raise RuntimeError("Simulated llm failure")
                 api_key = os.getenv("OPENAI_API_KEY", "").strip()
                 if not api_key:
                     raise RuntimeError("LLM provider not configured")
@@ -2212,15 +2216,22 @@ class EnergyRepository:
                 model = os.getenv("OPENAI_MODEL", "deepseek-chat").strip() or "deepseek-chat"
                 timeout_sec = float(os.getenv("OPENAI_TIMEOUT_SEC", "20"))
                 context = template_result["context"]
+                analysis_seed = template_result["analysis"]
+                user_question = str(payload.get("message", "")).strip() or "请围绕当前筛选范围输出一份可直接用于汇报的分析结论。"
                 system_prompt = (
-                    "你是建筑能源分析助手。必须只输出一个JSON对象，不要输出其他文本。"
+                    "你是建筑能源分析助手，面向楼宇能源管理和运维答辩场景。"
+                    "你必须只输出一个JSON对象，不要输出任何解释、前后缀或Markdown。"
                     "JSON字段必须包含：summary, findings, possible_causes, energy_saving_suggestions, operations_suggestions, evidence。"
-                    "其中 findings/possible_causes/energy_saving_suggestions/operations_suggestions/evidence 必须是数组。"
+                    "findings/possible_causes/energy_saving_suggestions/operations_suggestions/evidence 必须是数组。"
+                    "请使用中文；不要输出空泛套话；结论必须引用给定的时间范围、趋势、同类对比、天气联动或异常窗口。"
+                    "建议动作尽量落到具体时段、运行策略、夜间基线或异常事件。"
                 )
                 user_prompt = (
-                    f"分析上下文: {json.dumps(context, ensure_ascii=False)}\n"
-                    f"模板分析: {json.dumps(template_result['analysis'], ensure_ascii=False)}\n"
-                    f"用户补充问题: {str(payload.get('message', '')).strip() or '请给出当前筛选范围的分析结论。'}\n"
+                    f"当前分析上下文: {json.dumps(context, ensure_ascii=False)}\n"
+                    f"当前结构化分析种子: {json.dumps(analysis_seed, ensure_ascii=False)}\n"
+                    f"用户补充问题: {user_question}\n"
+                    "请基于当前建筑、筛选时间、KPI 摘要、趋势变化、温度关系、同类差距、节能机会和异常窗口生成结果。\n"
+                    "如果证据不足，请明确说明证据不足，但仍要给出最稳妥的建议。\n"
                     "请输出严格JSON。"
                 )
                 response = llm_provider._call_chat_completion(
@@ -2303,9 +2314,9 @@ class EnergyRepository:
         return result
 
     def diagnose(self, payload: dict[str, Any]) -> dict[str, Any]:
-        preferred = str(payload.get("provider", "template")).strip().lower()
+        preferred = str(payload.get("provider", "auto")).strip().lower()
         if preferred not in {"template", "llm", "auto"}:
-            preferred = "template"
+            preferred = "auto"
 
         start = time.perf_counter()
         fallback_used = False

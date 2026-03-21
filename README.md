@@ -72,10 +72,15 @@ $env:OPENAI_TIMEOUT_SEC="20"
 $env:OPENAI_MAX_RETRIES="2"
 ```
 
-`POST /api/ai/diagnose` 的 `provider` 参数行为：
-- `template`：只走模板诊断
-- `llm`：优先走 LLM，失败自动降级模板
-- `auto`：与 `llm` 相同，作为默认推荐模式
+`POST /api/ai/diagnose` / `POST /api/ai/analyze` 的 `provider` 参数行为：
+- `template`：只走模板兜底
+- `llm`：直连 DeepSeek，失败自动降级模板
+- `auto`：优先 DeepSeek，失败自动降级模板；当前前端默认使用这个模式
+
+前端调用策略：
+- 页面刷新、切换建筑、切换时间范围时，不会自动请求在线 LLM
+- 只有点击“AI 生成分析结论”或“生成诊断”时，才会触发在线分析
+- 页面会明确显示本次结果来源是 `DeepSeek` 还是 `模板兜底`
 
 运行态会写入 `data/runtime/ai_calls.jsonl`，用于统计降级率与平均耗时；日志不落盘 API Key。
 `scripts/run_regression.py` 会输出 `data/runtime/regression_summary.json`，供系统健康接口读取。

@@ -191,13 +191,72 @@
               <div class="panel panel--insight">
                 <div class="panel-head">
                   <div>
-                    <div class="panel-eyebrow">Insights</div>
-                    <div class="panel-title">本轮分析结论</div>
+                    <div class="panel-eyebrow">AI Result</div>
+                    <div class="panel-title">DeepSeek 分析结论</div>
                   </div>
-                  <div class="panel-meta">{{ analysisInsights.scope_summary.point_count || 0 }} 个数据点</div>
+                  <div class="panel-meta">仅按钮触发在线分析，避免自动消耗额度</div>
                 </div>
-                <div v-if="errors.analysisInsights" class="state-warn">{{ errors.analysisInsights }}</div>
-                <div v-else class="insight-groups">
+                <div v-if="!analysisInsight && loading.analysisInsight" class="empty-tip">正在生成 DeepSeek 分析，请稍候...</div>
+                <div v-else-if="!analysisInsight" class="empty-tip empty-tip--emphasis">
+                  <div class="empty-tip-title">点击按钮生成 DeepSeek 分析</div>
+                  <div class="empty-tip-desc">{{ analysisInsightPendingText() }}</div>
+                </div>
+                <div v-else class="llm-result-card">
+                  <div class="llm-result-meta">
+                    <el-tag size="small" effect="light" :type="analysisInsight.fallback_used ? 'warning' : 'success'">
+                      来源：{{ resultSourceText(analysisInsight) }}
+                    </el-tag>
+                    <el-tag size="small" effect="plain">策略：{{ resultTriggerText(analysisInsight) }}</el-tag>
+                    <el-tag size="small" effect="plain">耗时：{{ analysisInsight.latency_ms || 0 }} ms</el-tag>
+                  </div>
+                  <div v-if="analysisInsight.fallback_used" class="state-warn">{{ resultFallbackText(analysisInsight) }}</div>
+                  <div class="llm-result-summary">{{ analysisInsight.summary }}</div>
+                  <div class="llm-result-section">
+                    <div class="llm-result-section-title">主要发现</div>
+                    <ul>
+                      <li v-for="item in analysisInsight.findings" :key="`analysis-finding-${item}`">{{ item }}</li>
+                    </ul>
+                  </div>
+                  <div class="llm-result-section">
+                    <div class="llm-result-section-title">可能原因</div>
+                    <ul>
+                      <li v-for="item in analysisInsight.possible_causes" :key="`analysis-cause-${item}`">{{ item }}</li>
+                    </ul>
+                  </div>
+                  <div class="llm-result-section">
+                    <div class="llm-result-section-title">节能建议</div>
+                    <ul>
+                      <li v-for="item in analysisInsight.energy_saving_suggestions" :key="`analysis-energy-${item}`">{{ item }}</li>
+                    </ul>
+                  </div>
+                  <div class="llm-result-section">
+                    <div class="llm-result-section-title">运维建议</div>
+                    <ul>
+                      <li v-for="item in analysisInsight.operations_suggestions" :key="`analysis-ops-${item}`">{{ item }}</li>
+                    </ul>
+                  </div>
+                  <div class="llm-result-section" v-if="analysisInsight.evidence?.length">
+                    <div class="llm-result-section-title">证据来源</div>
+                    <ul>
+                      <li v-for="item in analysisInsight.evidence" :key="item.chunk_id || `${item.title}-${item.section}`">
+                        {{ item.title || '知识片段' }}<span v-if="item.section"> / {{ item.section }}</span> - {{ item.excerpt }}
+                      </li>
+                    </ul>
+                  </div>
+                  <div class="assistant-actions">
+                    <span class="template-label">质量标记：</span>
+                    <el-button size="small" :type="analysisFeedbackLabel === 'useful' ? 'success' : 'default'" @click="submitAnalysisFeedback('useful')">useful</el-button>
+                    <el-button size="small" :type="analysisFeedbackLabel === 'not_useful' ? 'danger' : 'default'" @click="submitAnalysisFeedback('not_useful')">not useful</el-button>
+                  </div>
+                </div>
+
+                <div class="rule-insight-block">
+                  <div class="rule-insight-head">
+                    <div class="rule-insight-title">规则摘要与证据提要</div>
+                    <div class="panel-meta">{{ analysisInsights.scope_summary.point_count || 0 }} 个数据点</div>
+                  </div>
+                  <div v-if="errors.analysisInsights" class="state-warn">{{ errors.analysisInsights }}</div>
+                  <div class="insight-groups">
                   <div class="insight-group">
                     <div class="insight-group-title">趋势结论</div>
                     <div v-if="!analysisInsights.trend_findings.length" class="empty-tip">当前时间范围暂无可解释趋势。</div>
@@ -230,6 +289,7 @@
                       </div>
                     </div>
                   </div>
+                </div>
                 </div>
               </div>
             </div>
@@ -451,8 +511,8 @@
 
               <div v-if="analysisInsight" class="diagnosis diagnosis--analysis">
                 <h3>分析结论</h3>
-                <p>Provider: {{ analysisInsight.provider }} | 耗时: {{ analysisInsight.latency_ms }}ms</p>
-                <p v-if="analysisInsight.fallback_used" class="state-error">已降级到模板分析：{{ analysisInsight.degrade_message || 'LLM不可用' }}</p>
+                <p>来源：{{ resultSourceText(analysisInsight) }} | 策略：{{ resultTriggerText(analysisInsight) }} | 耗时：{{ analysisInsight.latency_ms }}ms</p>
+                <p v-if="analysisInsight.fallback_used" class="state-warn">{{ resultFallbackText(analysisInsight) }}</p>
                 <p>{{ analysisInsight.summary }}</p>
                 <h4>主要发现</h4><ul><li v-for="item in analysisInsight.findings" :key="item">{{ item }}</li></ul>
                 <h4>可能原因</h4><ul><li v-for="item in analysisInsight.possible_causes" :key="item">{{ item }}</li></ul>
@@ -466,17 +526,23 @@
                 </div>
               </div>
 
+              <div v-else class="empty-tip empty-tip--emphasis">
+                <div class="empty-tip-title">尚未生成 AI 分析结论</div>
+                <div class="empty-tip-desc">{{ analysisInsightPendingText() }}</div>
+              </div>
+
               <div class="template-row">
                 <span class="template-label">快捷模板：</span>
                 <el-button size="small" @click="applyDiagnosisTemplate('spike')">突增排查</el-button>
                 <el-button size="small" @click="applyDiagnosisTemplate('offline')">低负荷排查</el-button>
                 <el-button size="small" @click="applyDiagnosisTemplate('highload')">高负荷排查</el-button>
                 <el-select v-model="aiProvider" style="width: 160px">
-                  <el-option label="模板 Provider" value="template"></el-option>
-                  <el-option label="LLM Provider" value="llm"></el-option>
-                  <el-option label="Auto (优先LLM)" value="auto"></el-option>
+                  <el-option label="模板兜底" value="template"></el-option>
+                  <el-option label="DeepSeek" value="llm"></el-option>
+                  <el-option label="优先 DeepSeek（失败降级）" value="auto"></el-option>
                 </el-select>
               </div>
+              <div class="assistant-provider-note">说明：在线分析仅在点击“基于当前分析生成结论”或“生成诊断”时触发，页面刷新不会自动消耗额度。</div>
 
               <el-input v-model="chatInput" type="textarea" :rows="3" placeholder="例如：这条突增告警的根因是什么，应该先检查哪里？"></el-input>
               <div class="assistant-actions">
@@ -512,8 +578,8 @@
 
               <div v-if="diagnosis" class="diagnosis">
                 <h3>{{ diagnosis.anomaly_name }} ({{ diagnosis.risk_level }})</h3>
-                <p>置信度：{{ diagnosis.confidence }} | Provider: {{ diagnosis.provider }} | 耗时: {{ diagnosis.latency_ms }}ms</p>
-                <p v-if="diagnosis.fallback_used" class="state-error">已降级到模板诊断：{{ diagnosis.degrade_message || 'LLM不可用' }}</p>
+                <p>置信度：{{ diagnosis.confidence }} | 来源：{{ resultSourceText(diagnosis) }} | 策略：{{ resultTriggerText(diagnosis) }} | 耗时：{{ diagnosis.latency_ms }}ms</p>
+                <p v-if="diagnosis.fallback_used" class="state-warn">{{ resultFallbackText(diagnosis) }}</p>
                 <p>{{ diagnosis.conclusion }}</p>
                 <h4>可能原因</h4><ul><li v-for="item in diagnosis.causes" :key="item">{{ item }}</li></ul>
                 <h4>排查步骤</h4><ul><li v-for="item in diagnosis.steps" :key="item">{{ item }}</li></ul>

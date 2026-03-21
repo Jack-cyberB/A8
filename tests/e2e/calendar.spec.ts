@@ -17,7 +17,7 @@ test.describe('A8 closed loop chains', () => {
 
     await page.getByRole('button', { name: '能耗分析' }).click();
     await expect(page.getByText('电力分析工作台')).toBeVisible();
-    await expect(page.getByText('本轮分析结论')).toBeVisible();
+    await expect(page.getByText('DeepSeek 分析结论')).toBeVisible();
     await expect(page.locator('#trendChart canvas').first()).toBeVisible();
     await expect(page.locator('#patternChart canvas').first()).toBeVisible();
     await expect(page.locator('#splitChart canvas').first()).toBeVisible();
@@ -37,6 +37,8 @@ test.describe('A8 closed loop chains', () => {
       const chart = echarts.getInstanceByDom(document.getElementById('trendChart'));
       return !!chart?.getOption?.()?.series?.length;
     }, null, { timeout: 30000 });
+    await expect(page.getByText('点击按钮生成 DeepSeek 分析')).toBeVisible();
+    await expect(page.getByText('规则摘要与证据提要')).toBeVisible();
     await expect(page.locator('.insight-group').first()).toBeVisible();
 
     const trendMetaBefore = await page.evaluate(() => {
@@ -104,10 +106,9 @@ test.describe('A8 closed loop chains', () => {
     await expect(page.locator('#trendChart canvas').first()).toBeVisible();
 
     await page.getByRole('button', { name: 'AI 生成分析结论' }).click();
-    await expect(page.getByRole('button', { name: '智能助手' })).toBeVisible();
-    await expect(page.getByRole('heading', { name: '分析结论' })).toBeVisible();
-    await expect(page.locator('.analysis-brief-sub')).toContainText('2016-01-07 16:00:00');
-    await expect(page.getByText('节能建议')).toBeVisible();
+    await expect(page.locator('.llm-result-card').getByText(/来源：DeepSeek|来源：模板兜底/).first()).toBeVisible();
+    await expect(page.locator('.llm-result-card').getByText('主要发现').first()).toBeVisible();
+    await expect(page.locator('.llm-result-card').getByText('节能建议').first()).toBeVisible();
   });
 
   test('anomaly ack -> detail timeline works', async ({ page }) => {
@@ -157,6 +158,7 @@ test.describe('A8 closed loop chains', () => {
     await expect(page.getByText('近24小时 AI 运行统计')).toBeVisible();
     await expect(page.getByText('近24小时 诊断质量评估')).toBeVisible();
     await expect(page.locator('.diagnosis')).toBeVisible();
+    await expect(page.locator('.diagnosis').getByText(/来源：DeepSeek|来源：模板兜底/).first()).toBeVisible();
 
     await page.getByRole('button', { name: '写入处理备注草稿' }).click();
     await expect(page.locator('.action-form')).toBeVisible();

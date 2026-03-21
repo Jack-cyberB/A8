@@ -99,7 +99,7 @@ createApp({
       analysisInsight: null,
       analysisFeedbackLabel: '',
       chatInput: '',
-      aiProvider: 'template',
+      aiProvider: 'auto',
       aiStats: {
         windowHours: 24,
         totalCalls: 0,
@@ -206,6 +206,39 @@ createApp({
     formatCompactDateTime(value) {
       if (!value) return '-';
       return String(value).replace('T', ' ').slice(0, 16);
+    },
+    providerLabel(value) {
+      const map = {
+        template: '模板兜底',
+        llm: 'DeepSeek',
+        auto: '优先 DeepSeek（失败降级）',
+        template_provider: '模板兜底',
+        llm_provider: 'DeepSeek',
+      };
+      return map[value] || value || '-';
+    },
+    requestedProviderLabel(value) {
+      const map = {
+        template: '模板兜底',
+        llm: 'DeepSeek',
+        auto: '优先 DeepSeek（失败降级）',
+      };
+      return map[value] || '优先 DeepSeek（失败降级）';
+    },
+    resultSourceText(result) {
+      if (!result) return '-';
+      return this.providerLabel(result.provider);
+    },
+    resultTriggerText(result) {
+      if (!result) return this.requestedProviderLabel(this.aiProvider);
+      return this.requestedProviderLabel(result.requested_provider || this.aiProvider);
+    },
+    resultFallbackText(result) {
+      if (!result?.fallback_used) return '';
+      return result.degrade_message || '在线模型不可用，已自动降级为模板兜底。';
+    },
+    analysisInsightPendingText() {
+      return '点击右上角“AI 生成分析结论”后，系统才会调用 DeepSeek。页面筛选和刷新不会自动消耗额度。';
     },
     severityLabel(value) {
       const map = { high: '高', medium: '中', low: '低' };
@@ -657,7 +690,7 @@ createApp({
           return;
         }
         this.analysisInsights = this.buildFallbackInsights();
-        this.errors.analysisInsights = '分析结论使用本地兜底生成';
+        this.errors.analysisInsights = '规则摘要加载失败，已切换到本地规则摘要';
       } finally {
         if (this.isActiveAnalysisRequest(requestId)) this.loading.analysisInsights = false;
       }
@@ -1000,9 +1033,9 @@ createApp({
         });
         this.analysisInsight = data.analysis || null;
         this.analysisFeedbackLabel = '';
-        this.activePage = 'assistant';
         await this.loadAiStats();
         await this.loadAiEvaluate();
+        this.$message.success(this.analysisInsight?.fallback_used ? 'DeepSeek 不可用，已切换为模板兜底' : '分析结论已生成');
       } catch (err) {
         console.error(err);
         this.$message.error(`分析结论生成失败：${err.message}`);

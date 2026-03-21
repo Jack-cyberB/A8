@@ -120,6 +120,26 @@ class RepositoryTests(unittest.TestCase):
         self.assertEqual(d["conclusion"], "LLM结论")
         self.assertEqual(d["causes"][0], "原因A")
 
+    def test_diagnose_default_provider_prefers_llm(self):
+        aid = self._first_anomaly_id()
+        fake_response = {
+            "choices": [
+                {
+                    "message": {
+                        "content": '{"conclusion":"默认LLM结论","causes":["原因A"],"steps":["步骤1"],"prevention":["预防1"],"recommended_actions":["动作1"],"evidence":["证据1"],"confidence":0.76,"risk_level":"medium"}'
+                    }
+                }
+            ]
+        }
+        with mock.patch.dict("os.environ", {"OPENAI_API_KEY": "dummy-key"}, clear=False):
+            with mock.patch("backend.server.LLMDiagnoseProvider._call_chat_completion", return_value=fake_response):
+                result = REPO.diagnose({"message": "请分析异常", "anomaly_id": aid})
+
+        d = result["diagnosis"]
+        self.assertEqual(d["requested_provider"], "auto")
+        self.assertEqual(d["provider"], "llm_provider")
+        self.assertFalse(d["fallback_used"])
+
     def test_ai_analyze_template_shape(self):
         buildings = REPO.query_buildings()["items"]
         result = REPO.analyze(
@@ -156,6 +176,40 @@ class RepositoryTests(unittest.TestCase):
         self.assertEqual(analysis["provider"], "llm_provider")
         self.assertEqual(analysis["summary"], "LLM分析")
         self.assertEqual(analysis["findings"][0], "发现1")
+
+    def test_ai_analyze_llm_fallback(self):
+        buildings = REPO.query_buildings()["items"]
+        result = REPO.analyze(
+            {
+                "provider": "llm",
+                "building_id": buildings[0]["building_id"],
+                "metric_type": "electricity",
+                "simulate_llm_failure": True,
+            }
+        )
+        analysis = result["analysis"]
+        self.assertTrue(analysis["fallback_used"])
+        self.assertEqual(analysis["provider"], "template_provider")
+
+    def test_ai_analyze_default_provider_prefers_llm(self):
+        buildings = REPO.query_buildings()["items"]
+        fake_response = {
+            "choices": [
+                {
+                    "message": {
+                        "content": '{"summary":"默认LLM分析","findings":["发现1"],"possible_causes":["原因1"],"energy_saving_suggestions":["建议1"],"operations_suggestions":["动作1"],"evidence":["证据1"]}'
+                    }
+                }
+            ]
+        }
+        with mock.patch.dict("os.environ", {"OPENAI_API_KEY": "dummy-key"}, clear=False):
+            with mock.patch("backend.server.LLMDiagnoseProvider._call_chat_completion", return_value=fake_response):
+                result = REPO.analyze({"building_id": buildings[0]["building_id"], "metric_type": "electricity"})
+
+        analysis = result["analysis"]
+        self.assertEqual(analysis["requested_provider"], "auto")
+        self.assertEqual(analysis["provider"], "llm_provider")
+        self.assertFalse(analysis["fallback_used"])
 
     def test_ai_stats_shape(self):
         aid = self._first_anomaly_id()
