@@ -1,0 +1,4 @@
+interface:
+  display_name: "Design Energy Dashboard"
+  short_description: "Design sharper energy and O&M dashboards."
+  default_prompt: "Use $design-energy-dashboard to refine this Vue energy dashboard for stronger hierarchy, clearer KPIs, and demo-ready layout."

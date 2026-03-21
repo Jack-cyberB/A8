@@ -1,0 +1,4 @@
+interface:
+  display_name: "Polish Dashboard States"
+  short_description: "Polish dashboard loading, empty, and filter states."
+  default_prompt: "Use $polish-dashboard-states to improve this analytics page with better loading, empty, error, filter, and dense-table behavior."

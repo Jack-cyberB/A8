@@ -1,0 +1,4 @@
+interface:
+  display_name: "Tune ECharts Readability"
+  short_description: "Tune ECharts for clearer analytic charts."
+  default_prompt: "Use $tune-echarts-readability to improve these ECharts options for stronger readability, anomaly emphasis, and cleaner units."
