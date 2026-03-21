@@ -4,6 +4,8 @@ test.describe('A8 closed loop chains', () => {
   test('building switch keeps cards and chart usable', async ({ page }) => {
     await page.goto('/');
     await expect(page.locator('.topbar h1')).toBeVisible();
+    await expect(page.getByText('系统:')).toBeVisible();
+    await expect(page.getByText('回归:')).toBeVisible();
 
     const select = page.locator('.filter-row .el-select').first();
     await select.click();
@@ -11,6 +13,10 @@ test.describe('A8 closed loop chains', () => {
 
     await expect(page.locator('.card-value').first()).toContainText('kWh');
     await expect(page.locator('#overviewChart canvas').first()).toBeVisible();
+
+    await page.getByRole('button', { name: '能耗分析' }).click();
+    await expect(page.locator('#trendChart canvas').first()).toBeVisible();
+    await expect(page.locator('#rankChart canvas').first()).toBeVisible();
   });
 
   test('anomaly ack -> detail timeline works', async ({ page }) => {
@@ -30,6 +36,10 @@ test.describe('A8 closed loop chains', () => {
     await page.locator('.action-form input').first().fill('playwright');
     await page.locator('.action-form textarea').first().fill('ack by e2e');
     await page.getByRole('button', { name: '提交' }).click();
+    await page.waitForTimeout(1000);
+    if (await page.locator('.action-form').isVisible()) {
+      await page.getByRole('button', { name: '取消' }).click();
+    }
     await expect(page.locator('.action-form')).toBeHidden();
 
     // switch to acknowledged and inspect first detail history
@@ -54,6 +64,7 @@ test.describe('A8 closed loop chains', () => {
 
     await expect(page.getByRole('button', { name: '智能助手' })).toBeVisible();
     await expect(page.getByText('近24小时 AI 运行统计')).toBeVisible();
+    await expect(page.getByText('近24小时 诊断质量评估')).toBeVisible();
     await expect(page.locator('.diagnosis')).toBeVisible();
 
     await page.getByRole('button', { name: '写入处理备注草稿' }).click();

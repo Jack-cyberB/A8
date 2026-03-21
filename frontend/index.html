@@ -11,7 +11,7 @@
   <div id="app">
     <header class="topbar">
       <h1>A8 建筑能源智能管理系统</h1>
-      <div class="topbar-sub">V1 闭环版 | 预警处理 + AI诊断 + 回归保障</div>
+      <div class="topbar-sub">V2 交付版 | 复盘沉淀 + AI评估 + 稳定门禁</div>
     </header>
 
     <div class="layout">
@@ -37,6 +37,8 @@
             @change="onDateRangeChange"></el-date-picker>
 
           <el-button type="primary" @click="refreshAll">刷新数据</el-button>
+          <el-tag size="small" :type="health.status === 'ok' ? 'success' : 'warning'">系统: {{ health.status }}</el-tag>
+          <el-tag size="small" :type="health.regression === 'pass' ? 'success' : 'warning'">回归: {{ health.regression }}</el-tag>
           <span class="range-tip">数据范围：{{ globalRangeText }}</span>
         </section>
 
@@ -98,6 +100,7 @@
                 <el-option label="偏差最大优先" value="deviation_desc"></el-option>
                 <el-option label="严重级别优先" value="severity_desc"></el-option>
               </el-select>
+              <el-button @click="exportAnomalies">导出CSV</el-button>
             </div>
 
             <div v-if="errors.anomaly" class="state-error">{{ errors.anomaly }}</div>
@@ -158,6 +161,17 @@
                   <div>平均耗时: {{ aiStats.avgLatency }} ms</div>
                 </div>
               </div>
+              <div class="ai-stats">
+                <div class="ai-stats-title">近{{ aiEvaluate.windowHours }}小时 诊断质量评估</div>
+                <div class="ai-stats-grid">
+                  <div>Template 成功率: {{ aiEvaluate.template.successRate }}%</div>
+                  <div>Template 完整率: {{ aiEvaluate.template.completeRate }}%</div>
+                  <div>LLM 成功率: {{ aiEvaluate.llm.successRate }}%</div>
+                  <div>LLM 降级率: {{ aiEvaluate.llm.fallbackRate }}%</div>
+                  <div>LLM 平均耗时: {{ aiEvaluate.llm.avgLatency }} ms</div>
+                  <div>人工有用率: {{ aiEvaluate.feedback.usefulRate }}%</div>
+                </div>
+              </div>
 
               <div v-if="diagnosis" class="diagnosis">
                 <h3>{{ diagnosis.anomaly_name }} ({{ diagnosis.risk_level }})</h3>
@@ -170,6 +184,11 @@
                 <h4>预防建议</h4><ul><li v-for="item in diagnosis.prevention" :key="item">{{ item }}</li></ul>
                 <h4>知识证据</h4>
                 <ul><li v-for="item in diagnosis.evidence" :key="item.chunk_id">{{ item.title }} / {{ item.section }} - {{ item.excerpt }}</li></ul>
+                <div class="assistant-actions">
+                  <span class="template-label">质量标记：</span>
+                  <el-button size="small" :type="diagnosisFeedbackLabel === 'useful' ? 'success' : 'default'" @click="submitDiagnosisFeedback('useful')">useful</el-button>
+                  <el-button size="small" :type="diagnosisFeedbackLabel === 'not_useful' ? 'danger' : 'default'" @click="submitDiagnosisFeedback('not_useful')">not useful</el-button>
+                </div>
               </div>
 
               <div v-else class="empty-tip">暂无诊断结果，请先输入问题或从故障列表点击“诊断”。</div>
@@ -193,6 +212,24 @@
         <ul class="history-list">
           <li v-for="h in anomalyHistory" :key="`${h.created_at}-${h.action}`">{{ h.created_at }} | {{ h.action }} -> {{ h.status }} | {{ h.assignee || '未指派' }} | {{ h.note || '-' }}</li>
         </ul>
+        <h4>复盘记录</h4>
+        <div class="postmortem-form">
+          <el-input v-model="postmortemForm.causeConfirmed" type="textarea" :rows="2" placeholder="原因确认"></el-input>
+          <el-input v-model="postmortemForm.actionTaken" type="textarea" :rows="2" placeholder="处理动作"></el-input>
+          <el-input v-model="postmortemForm.resultSummary" type="textarea" :rows="2" placeholder="结果总结"></el-input>
+          <div class="template-row">
+            <el-select v-model="postmortemForm.recurrenceRisk" style="width: 160px">
+              <el-option label="低风险" value="low"></el-option>
+              <el-option label="中风险" value="medium"></el-option>
+              <el-option label="高风险" value="high"></el-option>
+            </el-select>
+            <el-input v-model="postmortemForm.reviewer" placeholder="复盘人"></el-input>
+          </div>
+          <div class="assistant-actions">
+            <el-button @click="fillPostmortemFromDiagnosis">用AI建议填充</el-button>
+            <el-button type="primary" @click="submitPostmortemNote">保存复盘</el-button>
+          </div>
+        </div>
       </div>
       <template #footer>
         <el-button @click="anomalyDetailVisible = false">关闭</el-button>

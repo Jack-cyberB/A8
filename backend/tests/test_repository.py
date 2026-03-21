@@ -50,6 +50,7 @@ class RepositoryTests(unittest.TestCase):
         self.assertIn("causes", d)
         self.assertIn("provider", d)
         self.assertIn("latency_ms", d)
+        self.assertIn("trace_id", d)
         self.assertFalse(d["fallback_used"])
 
     def test_diagnose_llm_fallback(self):
@@ -87,6 +88,40 @@ class RepositoryTests(unittest.TestCase):
         self.assertIn("total_calls", stats)
         self.assertIn("fallback_rate_pct", stats)
         self.assertGreaterEqual(stats["total_calls"], 1)
+
+    def test_anomaly_note_upsert_and_detail(self):
+        aid = self._first_anomaly_id()
+        saved = REPO.upsert_anomaly_note(
+            {
+                "anomaly_id": aid,
+                "cause_confirmed": "传感器抖动",
+                "action_taken": "复位并巡检",
+                "result_summary": "负荷恢复稳定",
+                "recurrence_risk": "low",
+                "reviewer": "qa",
+            }
+        )
+        self.assertEqual(saved["anomaly_id"], aid)
+        self.assertEqual(saved["recurrence_risk"], "low")
+        detail = REPO.query_anomaly_detail(aid)
+        self.assertEqual(detail["postmortem_note"]["result_summary"], "负荷恢复稳定")
+
+    def test_export_csv_and_health(self):
+        csv_text = REPO.export_anomalies_csv(None, None, None, None, None, None)
+        self.assertIn("anomaly_id,building_id,building_name", csv_text)
+        health = REPO.query_system_health()
+        self.assertIn("status", health)
+        self.assertIn("recent_regression", health)
+
+    def test_ai_evaluate_and_feedback(self):
+        aid = self._first_anomaly_id()
+        diagnosed = REPO.diagnose({"message": "请分析异常", "anomaly_id": aid, "provider": "template"})
+        trace_id = diagnosed["diagnosis"]["trace_id"]
+        feedback = REPO.save_ai_feedback({"trace_id": trace_id, "label": "useful"})
+        self.assertEqual(feedback["label"], "useful")
+        evaluate = REPO.query_ai_evaluate(24)
+        self.assertIn("template", evaluate)
+        self.assertIn("feedback", evaluate)
 
 
 if __name__ == "__main__":

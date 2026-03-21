@@ -2,12 +2,14 @@
 
 import csv
 import datetime as dt
+import io
 import json
 import math
 import os
 import re
 import socket
 import time
+import uuid
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -25,6 +27,8 @@ KNOWLEDGE_FILE = ROOT / "data" / "normalized" / "knowledge_chunks.jsonl"
 RUNTIME_DIR = ROOT / "data" / "runtime"
 ACTION_LOG_FILE = RUNTIME_DIR / "anomaly_actions.jsonl"
 AI_CALL_LOG_FILE = RUNTIME_DIR / "ai_calls.jsonl"
+NOTE_LOG_FILE = RUNTIME_DIR / "anomaly_notes.jsonl"
+REGRESSION_SUMMARY_FILE = RUNTIME_DIR / "regression_summary.json"
 FRONTEND_DIR = ROOT / "frontend"
 
 TIME_FMT = "%Y-%m-%d %H:%M:%S"
@@ -322,6 +326,8 @@ class EnergyRepository:
         knowledge_file: Path,
         action_log_file: Path,
         ai_call_log_file: Path,
+        note_log_file: Path,
+        regression_summary_file: Path,
     ) -> None:
         self.demo_data_file = demo_data_file
         self.normalized_data_file = normalized_data_file
@@ -329,6 +335,8 @@ class EnergyRepository:
         self.knowledge_file = knowledge_file
         self.action_log_file = action_log_file
         self.ai_call_log_file = ai_call_log_file
+        self.note_log_file = note_log_file
+        self.regression_summary_file = regression_summary_file
 
         self.rows = self._load_rows()
         self.by_building: dict[str, list[dict[str, Any]]] = {}
@@ -345,11 +353,14 @@ class EnergyRepository:
         self.action_events: list[dict[str, Any]] = []
         self.action_index: dict[int, dict[str, Any]] = {}
         self.ai_events: list[dict[str, Any]] = []
+        self.note_events: list[dict[str, Any]] = []
+        self.note_index: dict[int, dict[str, Any]] = {}
 
         self._prepare_indexes()
         self._ensure_runtime_storage()
         self._load_actions()
         self._load_ai_events()
+        self._load_notes()
 
     def _ensure_runtime_storage(self) -> None:
         self.action_log_file.parent.mkdir(parents=True, exist_ok=True)
@@ -357,6 +368,22 @@ class EnergyRepository:
             self.action_log_file.write_text("", encoding="utf-8")
         if not self.ai_call_log_file.exists():
             self.ai_call_log_file.write_text("", encoding="utf-8")
+        if not self.note_log_file.exists():
+            self.note_log_file.write_text("", encoding="utf-8")
+        if not self.regression_summary_file.exists():
+            self.regression_summary_file.write_text(
+                json.dumps(
+                    {
+                        "updated_at": None,
+                        "all_ok": False,
+                        "status": "unknown",
+                        "steps": [],
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
 
     def _load_rows(self) -> list[dict[str, Any]]:
         if self.normalized_data_file.exists():
@@ -573,6 +600,46 @@ class EnergyRepository:
         self.action_events.append(event)
         self._rebuild_action_index()
 
+    def _load_notes(self) -> None:
+        self.note_events = []
+        with self.note_log_file.open("r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(event, dict):
+                    continue
+                try:
+                    event["anomaly_id"] = int(event.get("anomaly_id"))
+                except (ValueError, TypeError):
+                    continue
+                event["updated_at"] = str(event.get("updated_at", ""))
+                self.note_events.append(event)
+        self._rebuild_note_index()
+
+    def _rebuild_note_index(self) -> None:
+        self.note_index = {}
+        for e in sorted(self.note_events, key=lambda x: x.get("updated_at", "")):
+            self.note_index[int(e["anomaly_id"])] = {
+                "anomaly_id": int(e["anomaly_id"]),
+                "cause_confirmed": str(e.get("cause_confirmed", "")),
+                "action_taken": str(e.get("action_taken", "")),
+                "result_summary": str(e.get("result_summary", "")),
+                "recurrence_risk": str(e.get("recurrence_risk", "")),
+                "reviewer": str(e.get("reviewer", "")),
+                "updated_at": str(e.get("updated_at", "")),
+            }
+
+    def _append_note_event(self, event: dict[str, Any]) -> None:
+        with self.note_log_file.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(event, ensure_ascii=False) + "\n")
+        self.note_events.append(event)
+        self._rebuild_note_index()
+
     def _load_ai_events(self) -> None:
         self.ai_events = []
         with self.ai_call_log_file.open("r", encoding="utf-8") as f:
@@ -628,6 +695,230 @@ class EnergyRepository:
             "by_provider": by_provider,
             "error_types": error_types,
             "updated_at": to_iso(now),
+        }
+
+    def _required_diag_fields_complete(self, diagnosis: dict[str, Any]) -> bool:
+        required = ["conclusion", "causes", "steps", "prevention", "evidence", "confidence", "risk_level"]
+        for key in required:
+            if key not in diagnosis:
+                return False
+            value = diagnosis.get(key)
+            if key in {"causes", "steps", "prevention", "evidence"}:
+                if not isinstance(value, list):
+                    return False
+            elif value in (None, ""):
+                return False
+        return True
+
+    def upsert_anomaly_note(self, payload: dict[str, Any]) -> dict[str, Any]:
+        anomaly_id_raw = payload.get("anomaly_id")
+        if anomaly_id_raw is None:
+            raise ValueError("anomaly_id required")
+        try:
+            anomaly_id = int(anomaly_id_raw)
+        except (TypeError, ValueError):
+            raise ValueError("invalid anomaly_id")
+
+        if not any(a["anomaly_id"] == anomaly_id for a in self.anomalies):
+            raise LookupError("anomaly not found")
+
+        cause_confirmed = str(payload.get("cause_confirmed", "")).strip()
+        action_taken = str(payload.get("action_taken", "")).strip()
+        result_summary = str(payload.get("result_summary", "")).strip()
+        recurrence_risk = str(payload.get("recurrence_risk", "")).strip().lower()
+        reviewer = str(payload.get("reviewer", "")).strip()
+
+        if not cause_confirmed or not action_taken or not result_summary:
+            raise ValueError("cause_confirmed/action_taken/result_summary required")
+        if recurrence_risk not in {"low", "medium", "high"}:
+            recurrence_risk = "medium"
+
+        event = {
+            "anomaly_id": anomaly_id,
+            "cause_confirmed": cause_confirmed,
+            "action_taken": action_taken,
+            "result_summary": result_summary,
+            "recurrence_risk": recurrence_risk,
+            "reviewer": reviewer,
+            "updated_at": to_iso(dt.datetime.now()),
+        }
+        self._append_note_event(event)
+        return dict(self.note_index.get(anomaly_id, event))
+
+    def query_anomaly_note(self, anomaly_id: int) -> dict[str, Any]:
+        note = self.note_index.get(anomaly_id)
+        if note:
+            return dict(note)
+        return {
+            "anomaly_id": anomaly_id,
+            "cause_confirmed": "",
+            "action_taken": "",
+            "result_summary": "",
+            "recurrence_risk": "medium",
+            "reviewer": "",
+            "updated_at": "",
+        }
+
+    def _compute_processing_duration_hours(self, anomaly_id: int) -> float:
+        state = self.action_index.get(anomaly_id)
+        if not state or not state.get("history"):
+            return 0.0
+        history = state["history"]
+        first_ts = parse_time(str(history[0].get("created_at", "")))
+        resolved_ts = None
+        for h in history:
+            if str(h.get("status")) == STATUS_RESOLVED:
+                resolved_ts = parse_time(str(h.get("created_at", "")))
+                break
+        end_ts = resolved_ts or parse_time(str(history[-1].get("created_at", "")))
+        if not first_ts or not end_ts:
+            return 0.0
+        return round(max((end_ts - first_ts).total_seconds(), 0.0) / 3600.0, 2)
+
+    def export_anomalies_csv(
+        self,
+        building_id: str | None,
+        start_time: dt.datetime | None,
+        end_time: dt.datetime | None,
+        anomaly_type: str | None,
+        severity: str | None,
+        status: str | None,
+        sort: str = "timestamp_desc",
+    ) -> str:
+        rows = self._sort_anomalies(self._filter_anomalies(building_id, start_time, end_time, anomaly_type, severity, status), sort)
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow(
+            [
+                "anomaly_id",
+                "building_id",
+                "building_name",
+                "anomaly_type",
+                "severity",
+                "status",
+                "assignee",
+                "timestamp",
+                "deviation_pct",
+                "estimated_loss_kwh",
+                "processing_duration_hours",
+                "final_conclusion",
+            ]
+        )
+        for item in rows:
+            aid = int(item["anomaly_id"])
+            action_state = self._action_state(aid)
+            estimated_loss = round(max(float(item.get("electricity_kwh", 0)) - float(item.get("mean_kwh", 0)), 0.0), 4)
+            note = self.note_index.get(aid, {})
+            conclusion = str(note.get("result_summary", "")).strip() or str(item.get("anomaly_type", ""))
+            writer.writerow(
+                [
+                    aid,
+                    item["building_id"],
+                    item["building_name"],
+                    item["anomaly_type"],
+                    item["severity"],
+                    action_state["status"],
+                    action_state["assignee"],
+                    to_iso(item["timestamp"]),
+                    item["deviation_pct"],
+                    estimated_loss,
+                    self._compute_processing_duration_hours(aid),
+                    conclusion,
+                ]
+            )
+        return output.getvalue()
+
+    def query_ai_evaluate(self, hours: int = 24) -> dict[str, Any]:
+        safe_hours = min(max(hours, 1), 168)
+        now = dt.datetime.now()
+        start = now - dt.timedelta(hours=safe_hours)
+        events = []
+        for ev in self.ai_events:
+            ts = parse_time(str(ev.get("timestamp", "")))
+            if ts and ts >= start:
+                events.append(ev)
+
+        def provider_metrics(requested: str) -> dict[str, Any]:
+            subset = [ev for ev in events if str(ev.get("requested_provider", "")).lower() == requested]
+            total = len(subset)
+            if total == 0:
+                return {"total": 0, "success_rate_pct": 0.0, "avg_latency_ms": 0.0, "fallback_rate_pct": 0.0, "field_completeness_pct": 0.0}
+            success = sum(1 for ev in subset if not str(ev.get("error_type", "")).strip())
+            fallback = sum(1 for ev in subset if bool(ev.get("fallback_used", False)))
+            complete = sum(1 for ev in subset if bool(ev.get("field_complete", False)))
+            latencies = [int(ev.get("latency_ms", 0)) for ev in subset if str(ev.get("latency_ms", "")).isdigit()]
+            avg_latency = round(sum(latencies) / len(latencies), 2) if latencies else 0.0
+            return {
+                "total": total,
+                "success_rate_pct": round((success / total) * 100, 2),
+                "avg_latency_ms": avg_latency,
+                "fallback_rate_pct": round((fallback / total) * 100, 2),
+                "field_completeness_pct": round((complete / total) * 100, 2),
+            }
+
+        template_metrics = provider_metrics("template")
+        llm_metrics = provider_metrics("llm")
+        auto_metrics = provider_metrics("auto")
+        feedback_subset = [ev for ev in events if str(ev.get("feedback_label", "")).strip()]
+        useful = sum(1 for ev in feedback_subset if str(ev.get("feedback_label")) == "useful")
+
+        return {
+            "window_hours": safe_hours,
+            "template": template_metrics,
+            "llm": llm_metrics,
+            "auto": auto_metrics,
+            "feedback": {
+                "total_labeled": len(feedback_subset),
+                "useful_rate_pct": round((useful / len(feedback_subset)) * 100, 2) if feedback_subset else 0.0,
+            },
+            "updated_at": to_iso(now),
+        }
+
+    def save_ai_feedback(self, payload: dict[str, Any]) -> dict[str, Any]:
+        trace_id = str(payload.get("trace_id", "")).strip()
+        label = str(payload.get("label", "")).strip().lower()
+        if not trace_id:
+            raise ValueError("trace_id required")
+        if label not in {"useful", "not_useful"}:
+            raise ValueError("label must be useful/not_useful")
+        for ev in reversed(self.ai_events):
+            if str(ev.get("trace_id", "")) == trace_id:
+                ev["feedback_label"] = label
+                with self.ai_call_log_file.open("w", encoding="utf-8") as f:
+                    for row in self.ai_events:
+                        f.write(json.dumps(row, ensure_ascii=False) + "\n")
+                return {"trace_id": trace_id, "label": label}
+        raise LookupError("trace_id not found")
+
+    def query_system_health(self) -> dict[str, Any]:
+        regression = {
+            "status": "unknown",
+            "updated_at": None,
+            "all_ok": False,
+            "steps": [],
+        }
+        if self.regression_summary_file.exists():
+            try:
+                regression = json.loads(self.regression_summary_file.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                pass
+
+        data_source = {
+            "normalized_energy": self.normalized_data_file.exists(),
+            "dictionary": self.dict_file.exists(),
+            "knowledge": self.knowledge_file.exists(),
+        }
+        ai_status = {
+            "configured": bool(os.getenv("OPENAI_API_KEY", "").strip()),
+            "base_url": bool(os.getenv("OPENAI_BASE_URL", "").strip()),
+            "model": bool(os.getenv("OPENAI_MODEL", "").strip()),
+        }
+        return {
+            "status": "ok" if all(data_source.values()) else "degraded",
+            "data_source": data_source,
+            "ai_provider": ai_status,
+            "recent_regression": regression,
+            "updated_at": to_iso(dt.datetime.now()),
         }
 
     def _action_state(self, anomaly_id: int) -> dict[str, Any]:
@@ -970,6 +1261,7 @@ class EnergyRepository:
 
         knowledge = self.dict_data.get(context["anomaly_type"], {})
         action_state = self._action_state(anomaly_id)
+        note = self.query_anomaly_note(anomaly_id)
 
         return {
             "anomaly": {
@@ -1008,6 +1300,7 @@ class EnergyRepository:
                 "assignee": action_state["assignee"],
                 "last_action_at": action_state["last_action_at"],
             },
+            "postmortem_note": note,
         }
 
     def _search_knowledge(self, anomaly_type: str, message: str, limit: int = 3) -> list[dict[str, str]]:
@@ -1143,6 +1436,7 @@ class EnergyRepository:
         start = time.perf_counter()
         fallback_used = False
         error_message = None
+        trace_id = uuid.uuid4().hex
 
         try:
             if preferred in {"llm", "auto"}:
@@ -1162,6 +1456,7 @@ class EnergyRepository:
         result["diagnosis"]["requested_provider"] = preferred
         result["diagnosis"]["latency_ms"] = latency_ms
         result["diagnosis"]["fallback_used"] = fallback_used
+        result["diagnosis"]["trace_id"] = trace_id
         if error_message:
             result["diagnosis"]["degrade_message"] = f"LLM unavailable, fallback to template: {error_message}"
 
@@ -1180,9 +1475,11 @@ class EnergyRepository:
                 error_type = "not_configured"
             else:
                 error_type = "unknown_error"
+        field_complete = self._required_diag_fields_complete(result.get("diagnosis", {}))
         self._append_ai_event(
             {
                 "timestamp": to_iso(dt.datetime.now()),
+                "trace_id": trace_id,
                 "requested_provider": preferred,
                 "provider": provider_name,
                 "fallback_used": fallback_used,
@@ -1190,6 +1487,8 @@ class EnergyRepository:
                 "error_type": error_type,
                 "anomaly_id": result.get("context", {}).get("anomaly_id"),
                 "has_message": bool(str(payload.get("message", "")).strip()),
+                "field_complete": field_complete,
+                "result_risk_level": str(result.get("diagnosis", {}).get("risk_level", "")),
             }
         )
         return result
@@ -1210,6 +1509,8 @@ REPO = EnergyRepository(
     KNOWLEDGE_FILE,
     ACTION_LOG_FILE,
     AI_CALL_LOG_FILE,
+    NOTE_LOG_FILE,
+    REGRESSION_SUMMARY_FILE,
 )
 
 
@@ -1237,6 +1538,14 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(payload)
         except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
             return
+
+    def _csv(self, text: str, filename: str) -> None:
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "text/csv; charset=utf-8")
+        self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+        self.wfile.write(text.encode("utf-8-sig"))
 
     def do_OPTIONS(self) -> None:
         self._set_json_headers(HTTPStatus.NO_CONTENT)
@@ -1266,6 +1575,39 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/anomaly/action":
             try:
                 result = REPO.apply_anomaly_action(payload)
+            except ValueError as exc:
+                self._json({"code": 400, "message": str(exc), "data": None}, HTTPStatus.BAD_REQUEST)
+                return
+            except LookupError as exc:
+                self._json({"code": 404, "message": str(exc), "data": None}, HTTPStatus.NOT_FOUND)
+                return
+            self._json({"code": 0, "message": "ok", "data": result})
+            return
+
+        if parsed.path == "/api/anomaly/note":
+            try:
+                result = REPO.upsert_anomaly_note(payload)
+            except ValueError as exc:
+                self._json({"code": 400, "message": str(exc), "data": None}, HTTPStatus.BAD_REQUEST)
+                return
+            except LookupError as exc:
+                self._json({"code": 404, "message": str(exc), "data": None}, HTTPStatus.NOT_FOUND)
+                return
+            self._json({"code": 0, "message": "ok", "data": result})
+            return
+
+        if parsed.path == "/api/ai/evaluate":
+            hours_raw = payload.get("hours", 24)
+            try:
+                hours = int(hours_raw)
+            except (TypeError, ValueError):
+                hours = 24
+            self._json({"code": 0, "message": "ok", "data": REPO.query_ai_evaluate(hours)})
+            return
+
+        if parsed.path == "/api/ai/feedback":
+            try:
+                result = REPO.save_ai_feedback(payload)
             except ValueError as exc:
                 self._json({"code": 400, "message": str(exc), "data": None}, HTTPStatus.BAD_REQUEST)
                 return
@@ -1333,12 +1675,26 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"code": 0, "message": "ok", "data": data})
             return
 
+        if parsed.path == "/api/anomaly/export":
+            anomaly_type = params.get("anomaly_type", [None])[0]
+            severity = params.get("severity", [None])[0]
+            status = params.get("status", [None])[0]
+            sort = params.get("sort", ["timestamp_desc"])[0]
+            content = REPO.export_anomalies_csv(building_id, start_time, end_time, anomaly_type, severity, status, sort)
+            ts = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+            self._csv(content, f"a8_anomaly_export_{ts}.csv")
+            return
+
         if parsed.path == "/api/ai/stats":
             try:
                 hours = int(params.get("hours", ["24"])[0])
             except ValueError:
                 hours = 24
             self._json({"code": 0, "message": "ok", "data": REPO.query_ai_stats(hours)})
+            return
+
+        if parsed.path == "/api/system/health":
+            self._json({"code": 0, "message": "ok", "data": REPO.query_system_health()})
             return
 
         if parsed.path == "/api/metrics/overview":

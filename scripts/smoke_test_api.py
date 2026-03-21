@@ -23,6 +23,12 @@ def get_json(url: str, method: str = "GET", payload: dict | None = None, timeout
         return json.loads(r.read().decode("utf-8"))
 
 
+def get_text(url: str, timeout: int = 20) -> str:
+    req = Request(url, method="GET")
+    with urlopen(req, timeout=timeout) as r:
+        return r.read().decode("utf-8-sig")
+
+
 try:
     ready = False
     for _ in range(30):
@@ -56,6 +62,8 @@ try:
 
     history = get_json(f"{SERVER_URL}/api/anomaly/history?anomaly_id={target_id}")
     ai_stats = get_json(f"{SERVER_URL}/api/ai/stats?hours=24")
+    system_health = get_json(f"{SERVER_URL}/api/system/health")
+    exported = get_text(f"{SERVER_URL}/api/anomaly/export?status=acknowledged")
 
     diagnose_template = get_json(
         f"{SERVER_URL}/api/ai/diagnose",
@@ -72,14 +80,42 @@ try:
             "simulate_llm_failure": True,
         },
     )
+    trace_id = diagnose_template["data"]["diagnosis"]["trace_id"]
+    feedback = get_json(
+        f"{SERVER_URL}/api/ai/feedback",
+        method="POST",
+        payload={"trace_id": trace_id, "label": "useful"},
+    )
+    evaluate = get_json(
+        f"{SERVER_URL}/api/ai/evaluate",
+        method="POST",
+        payload={"hours": 24},
+    )
+    note = get_json(
+        f"{SERVER_URL}/api/anomaly/note",
+        method="POST",
+        payload={
+            "anomaly_id": aid,
+            "cause_confirmed": "烟测",
+            "action_taken": "巡检",
+            "result_summary": "恢复",
+            "recurrence_risk": "low",
+            "reviewer": "smoke",
+        },
+    )
 
     assert buildings["code"] == 0 and buildings["data"]["count"] > 0
     assert anomaly["code"] == 0 and anomaly["data"]["count"] > 0
     assert detail["code"] == 0 and "processing_summary" in detail["data"]
     assert history["code"] == 0 and history["data"]["count"] >= 1
     assert ai_stats["code"] == 0 and "total_calls" in ai_stats["data"]
+    assert system_health["code"] == 0 and "recent_regression" in system_health["data"]
+    assert "anomaly_id,building_id,building_name" in exported
     assert diagnose_template["code"] == 0 and not diagnose_template["data"]["diagnosis"]["fallback_used"]
     assert diagnose_fallback["code"] == 0 and diagnose_fallback["data"]["diagnosis"]["fallback_used"]
+    assert feedback["code"] == 0 and feedback["data"]["label"] == "useful"
+    assert evaluate["code"] == 0 and "llm" in evaluate["data"]
+    assert note["code"] == 0 and note["data"]["recurrence_risk"] == "low"
     print("API smoke test passed")
 finally:
     proc.terminate()

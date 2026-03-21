@@ -3,7 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
+    "test:backend": "python scripts/run_backend_tests.py",
     "test:e2e": "playwright test",
+    "test:acceptance": "playwright test tests/e2e/acceptance.spec.ts",
     "test:all": "python scripts/run_regression.py",
     "test:llm-live": "python scripts/smoke_test_llm_live.py"
   },

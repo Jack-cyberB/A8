@@ -33,17 +33,23 @@ python backend/server.py
 - `GET /api/anomaly/detail`
 - `GET /api/anomaly/history`
 - `POST /api/anomaly/action`（`ack|ignore|resolve`）
+- `POST /api/anomaly/note`（结构化复盘记录）
+- `GET /api/anomaly/export`（筛选导出 CSV）
 - `GET /api/ai/stats`（默认近24小时调用统计）
+- `POST /api/ai/evaluate`（模板/LLM 对比评估）
+- `POST /api/ai/feedback`（诊断质量人工标记）
 - `GET /api/metrics/overview`
 - `GET /api/metrics/saving-potential`
 - `POST /api/ai/diagnose`（provider: `template|llm|auto`，含 `fallback_used`）
+- `GET /api/system/health`
 
 ## 回归命令
 
 ```powershell
-python -m unittest backend.tests.test_repository -v
+python scripts/run_backend_tests.py
 python scripts/smoke_test_api.py
 npm run test:e2e
+npm run test:acceptance
 npm run test:all
 # 可选：真实 DeepSeek 连通性探测（需先设置 OPENAI_API_KEY）
 npm run test:llm-live
@@ -67,10 +73,20 @@ $env:OPENAI_MAX_RETRIES="2"
 - `auto`：与 `llm` 相同，作为默认推荐模式
 
 运行态会写入 `data/runtime/ai_calls.jsonl`，用于统计降级率与平均耗时；日志不落盘 API Key。
+`scripts/run_regression.py` 会输出 `data/runtime/regression_summary.json`，供系统健康接口读取。
 
 ## 闭环流程
 
 1. 在故障监控页筛选并定位异常
 2. 点击“确认/忽略/完成”提交处理动作
 3. 在异常详情查看处理时间线
-4. 在智能助手生成诊断并写入备注草稿
+4. 在智能助手生成诊断并打质量标签
+5. 在异常详情填写复盘记录并导出 CSV
+
+## 交付检查清单
+
+1. `python backend/server.py` 启动成功，首页可见系统与回归状态标签。
+2. `npm run test:all` 全绿；`npm run test:acceptance` 全绿。
+3. 如配置 Key，`npm run test:llm-live` 返回 `status=pass`。
+4. 异常详情可保存复盘记录，且 `/api/anomaly/export` 可下载 CSV。
+5. 切换 `provider=llm/auto` 失败时仍可降级模板并继续完成处理流程。

@@ -2,9 +2,13 @@
 
 import subprocess
 import sys
+import json
+import datetime as dt
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+RUNTIME_DIR = ROOT / "data" / "runtime"
+REGRESSION_SUMMARY_FILE = RUNTIME_DIR / "regression_summary.json"
 
 
 def npm_cmd() -> str:
@@ -32,7 +36,7 @@ def main() -> int:
     py = sys.executable
     steps = [
         ("data quality", [py, "scripts/validate_data_quality.py"]),
-        ("backend unit tests", [py, "-m", "unittest", "backend.tests.test_repository", "-v"]),
+        ("backend unit tests", [py, "scripts/run_backend_tests.py"]),
         ("api smoke", [py, "scripts/smoke_test_api.py"]),
         ("playwright e2e", [npm_cmd(), "run", "test:e2e"]),
     ]
@@ -42,6 +46,15 @@ def main() -> int:
     print("=== Regression Summary ===")
     for ok, name in results:
         print(f"- {name}: {'PASS' if ok else 'FAIL'}")
+
+    RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+    summary = {
+        "updated_at": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "all_ok": all_ok,
+        "status": "pass" if all_ok else "fail",
+        "steps": [{"name": name, "ok": ok} for ok, name in results],
+    }
+    REGRESSION_SUMMARY_FILE.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
 
     return 0 if all_ok else 1
 
