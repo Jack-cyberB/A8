@@ -2277,7 +2277,7 @@ class EnergyRepository:
         result["analysis"]["fallback_used"] = fallback_used
         result["analysis"]["trace_id"] = trace_id
         if error_message:
-            result["analysis"]["degrade_message"] = f"LLM unavailable, fallback to template: {error_message}"
+            result["analysis"]["degrade_message"] = self._friendly_degrade_message(error_message)
 
         error_type = ""
         if fallback_used:
@@ -2343,7 +2343,7 @@ class EnergyRepository:
         result["diagnosis"]["fallback_used"] = fallback_used
         result["diagnosis"]["trace_id"] = trace_id
         if error_message:
-            result["diagnosis"]["degrade_message"] = f"LLM unavailable, fallback to template: {error_message}"
+            result["diagnosis"]["degrade_message"] = self._friendly_degrade_message(error_message)
 
         error_type = ""
         if fallback_used:
@@ -2386,6 +2386,23 @@ class EnergyRepository:
             if any(k.lower() in lowered for k in keywords):
                 return anomaly_type
         return "anomaly_spike"
+
+    def _friendly_degrade_message(self, error_message: str | None) -> str:
+        raw = str(error_message or "").strip()
+        lowered = raw.lower()
+        if "not configured" in lowered:
+            return "当前环境未配置 DeepSeek API Key，本次使用模板兜底。"
+        if "network error" in lowered:
+            return "DeepSeek 网络请求失败，本次使用模板兜底。"
+        if "http status 429" in lowered:
+            return "DeepSeek 当前触发限流，本次使用模板兜底。"
+        if "http status" in lowered:
+            return "DeepSeek 服务响应异常，本次使用模板兜底。"
+        if "parse error" in lowered:
+            return "DeepSeek 返回格式异常，本次使用模板兜底。"
+        if "simulated llm failure" in lowered:
+            return "当前为模拟失败场景，本次使用模板兜底。"
+        return "在线模型暂时不可用，系统已切换到模板兜底。"
 
 
 REPO = EnergyRepository(

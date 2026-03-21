@@ -116,7 +116,7 @@ createApp({
         llm: { total: 0, successRate: 0, avgLatency: 0, fallbackRate: 0, completeRate: 0 },
         feedback: { total: 0, usefulRate: 0 },
       },
-      health: { status: 'unknown', regression: 'unknown' },
+      health: { status: 'unknown', regression: 'unknown', aiConfigured: false, aiModelReady: false },
       diagnosis: null,
       diagnosisFeedbackLabel: '',
       selectedAnomaly: null,
@@ -235,10 +235,30 @@ createApp({
     },
     resultFallbackText(result) {
       if (!result?.fallback_used) return '';
-      return result.degrade_message || '在线模型不可用，已自动降级为模板兜底。';
+      return this.humanizeDegradeMessage(result.degrade_message);
     },
     analysisInsightPendingText() {
       return '点击右上角“AI 生成分析结论”后，系统才会调用 DeepSeek。页面筛选和刷新不会自动消耗额度。';
+    },
+    aiAvailabilityText() {
+      return this.health.aiConfigured
+        ? 'DeepSeek 已就绪。建议在确认当前建筑和时间范围后，再到智能助手中生成完整结论。'
+        : '当前环境尚未配置 DeepSeek API Key，点击后会自动使用模板兜底，不会影响主流程。';
+    },
+    analysisPreviewFindings() {
+      return Array.isArray(this.analysisInsight?.findings) ? this.analysisInsight.findings.slice(0, 2) : [];
+    },
+    humanizeDegradeMessage(message) {
+      const raw = String(message || '').trim();
+      const lower = raw.toLowerCase();
+      if (!raw) return '在线模型暂时不可用，系统已切换到模板兜底。';
+      if (lower.includes('not configured')) return '当前环境未配置 DeepSeek API Key，本次使用模板兜底。';
+      if (lower.includes('network error')) return 'DeepSeek 网络请求失败，本次使用模板兜底。';
+      if (lower.includes('http status 429')) return 'DeepSeek 当前触发限流，本次使用模板兜底。';
+      if (lower.includes('http status')) return 'DeepSeek 服务响应异常，本次使用模板兜底。';
+      if (lower.includes('parse error')) return 'DeepSeek 返回格式异常，本次使用模板兜底。';
+      if (lower.includes('simulated llm failure')) return '当前为模拟失败场景，本次使用模板兜底。';
+      return raw;
     },
     severityLabel(value) {
       const map = { high: '高', medium: '中', low: '低' };
@@ -784,10 +804,14 @@ createApp({
         const data = await this.fetchJson(`${API_BASE}/api/system/health`);
         this.health.status = data.status || 'unknown';
         this.health.regression = data.recent_regression?.status || 'unknown';
+        this.health.aiConfigured = !!data.ai_provider?.configured;
+        this.health.aiModelReady = !!data.ai_provider?.model;
       } catch (err) {
         console.error(err);
         this.health.status = 'unknown';
         this.health.regression = 'unknown';
+        this.health.aiConfigured = false;
+        this.health.aiModelReady = false;
       }
     },
     async exportAnomalies() {
@@ -1044,7 +1068,13 @@ createApp({
       }
     },
     async runAnalysisAssistant() {
+      this.activePage = 'assistant';
+      await nextTick();
       await this.submitAnalysisReport();
+    },
+    async openAssistantPage() {
+      this.activePage = 'assistant';
+      await this.refreshCurrentPage();
     },
     async submitAnalysisFeedback(label) {
       if (!this.analysisInsight?.trace_id) {

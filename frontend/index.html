@@ -112,11 +112,11 @@
             <div>
               <div class="panel-eyebrow">Analysis Workspace</div>
               <div class="analysis-hero-title">{{ currentMetricLabel() }}分析工作台</div>
-              <div class="analysis-hero-sub">围绕当前建筑和时间范围，查看趋势、结构、天气联动和同类对比，并直接生成 AI 分析结论。</div>
+              <div class="analysis-hero-sub">围绕当前建筑和时间范围，先看趋势、结构、天气联动和同类对比，再进入智能助手生成完整 AI 结论。</div>
             </div>
             <div class="analysis-hero-actions">
               <el-switch v-model="analysisOverlayWeather" active-text="叠加温度" :disabled="!analysisTrend.overlayAvailable" @change="onAnalysisOverlayChange"></el-switch>
-              <el-button @click="runAnalysisAssistant" type="primary" :loading="loading.analysisInsight">AI 生成分析结论</el-button>
+              <el-button @click="runAnalysisAssistant" type="primary" :loading="loading.analysisInsight">在智能助手中生成 AI 结论</el-button>
             </div>
           </div>
 
@@ -191,107 +191,91 @@
               <div class="panel panel--insight">
                 <div class="panel-head">
                   <div>
-                    <div class="panel-eyebrow">AI Result</div>
-                    <div class="panel-title">DeepSeek 分析结论</div>
+                    <div class="panel-eyebrow">Summary</div>
+                    <div class="panel-title">结论摘要与 AI 入口</div>
                   </div>
-                  <div class="panel-meta">仅按钮触发在线分析，避免自动消耗额度</div>
+                  <div class="panel-meta">分析页只保留摘要，完整 AI 结论在智能助手页展开</div>
                 </div>
-                <div v-if="!analysisInsight && loading.analysisInsight" class="empty-tip">正在生成 DeepSeek 分析，请稍候...</div>
-                <div v-else-if="!analysisInsight" class="empty-tip empty-tip--emphasis">
-                  <div class="empty-tip-title">点击按钮生成 DeepSeek 分析</div>
-                  <div class="empty-tip-desc">{{ analysisInsightPendingText() }}</div>
-                </div>
-                <div v-else class="llm-result-card">
-                  <div class="llm-result-meta">
-                    <el-tag size="small" effect="light" :type="analysisInsight.fallback_used ? 'warning' : 'success'">
-                      来源：{{ resultSourceText(analysisInsight) }}
-                    </el-tag>
-                    <el-tag size="small" effect="plain">策略：{{ resultTriggerText(analysisInsight) }}</el-tag>
-                    <el-tag size="small" effect="plain">耗时：{{ analysisInsight.latency_ms || 0 }} ms</el-tag>
+                <div class="analysis-side-stack">
+                  <div class="ai-entry-card">
+                    <div class="ai-entry-head">
+                      <div class="ai-entry-title">AI 分析入口</div>
+                      <el-tag size="small" effect="light" :type="health.aiConfigured ? 'success' : 'warning'">
+                        {{ health.aiConfigured ? 'DeepSeek 已配置' : 'DeepSeek 未配置' }}
+                      </el-tag>
+                    </div>
+                    <div v-if="loading.analysisInsight" class="empty-tip">正在准备智能助手结论，请稍候...</div>
+                    <template v-else-if="analysisInsight">
+                      <div class="ai-entry-meta">
+                        <el-tag size="small" effect="light" :type="analysisInsight.fallback_used ? 'warning' : 'success'">
+                          来源：{{ resultSourceText(analysisInsight) }}
+                        </el-tag>
+                        <el-tag size="small" effect="plain">耗时：{{ analysisInsight.latency_ms || 0 }} ms</el-tag>
+                      </div>
+                      <div v-if="analysisInsight.fallback_used" class="state-warn">{{ resultFallbackText(analysisInsight) }}</div>
+                      <div class="ai-entry-summary">{{ analysisInsight.summary }}</div>
+                      <ul v-if="analysisPreviewFindings().length" class="ai-entry-list">
+                        <li v-for="item in analysisPreviewFindings()" :key="`preview-${item}`">{{ item }}</li>
+                      </ul>
+                      <div class="assistant-actions">
+                        <el-button type="primary" plain @click="openAssistantPage">在智能助手中查看完整结论</el-button>
+                      </div>
+                    </template>
+                    <template v-else>
+                      <div class="empty-tip empty-tip--emphasis">
+                        <div class="empty-tip-title">分析页只展示摘要，不展开完整 AI 内容</div>
+                        <div class="empty-tip-desc">{{ aiAvailabilityText() }}</div>
+                      </div>
+                      <div class="assistant-actions">
+                        <el-button type="primary" plain @click="runAnalysisAssistant">前往智能助手生成结论</el-button>
+                      </div>
+                    </template>
                   </div>
-                  <div v-if="analysisInsight.fallback_used" class="state-warn">{{ resultFallbackText(analysisInsight) }}</div>
-                  <div class="llm-result-summary">{{ analysisInsight.summary }}</div>
-                  <div class="llm-result-section">
-                    <div class="llm-result-section-title">主要发现</div>
-                    <ul>
-                      <li v-for="item in analysisInsight.findings" :key="`analysis-finding-${item}`">{{ item }}</li>
-                    </ul>
-                  </div>
-                  <div class="llm-result-section">
-                    <div class="llm-result-section-title">可能原因</div>
-                    <ul>
-                      <li v-for="item in analysisInsight.possible_causes" :key="`analysis-cause-${item}`">{{ item }}</li>
-                    </ul>
-                  </div>
-                  <div class="llm-result-section">
-                    <div class="llm-result-section-title">节能建议</div>
-                    <ul>
-                      <li v-for="item in analysisInsight.energy_saving_suggestions" :key="`analysis-energy-${item}`">{{ item }}</li>
-                    </ul>
-                  </div>
-                  <div class="llm-result-section">
-                    <div class="llm-result-section-title">运维建议</div>
-                    <ul>
-                      <li v-for="item in analysisInsight.operations_suggestions" :key="`analysis-ops-${item}`">{{ item }}</li>
-                    </ul>
-                  </div>
-                  <div class="llm-result-section" v-if="analysisInsight.evidence?.length">
-                    <div class="llm-result-section-title">证据来源</div>
-                    <ul>
-                      <li v-for="item in analysisInsight.evidence" :key="item.chunk_id || `${item.title}-${item.section}`">
-                        {{ item.title || '知识片段' }}<span v-if="item.section"> / {{ item.section }}</span> - {{ item.excerpt }}
-                      </li>
-                    </ul>
-                  </div>
-                  <div class="assistant-actions">
-                    <span class="template-label">质量标记：</span>
-                    <el-button size="small" :type="analysisFeedbackLabel === 'useful' ? 'success' : 'default'" @click="submitAnalysisFeedback('useful')">useful</el-button>
-                    <el-button size="small" :type="analysisFeedbackLabel === 'not_useful' ? 'danger' : 'default'" @click="submitAnalysisFeedback('not_useful')">not useful</el-button>
-                  </div>
-                </div>
 
-                <div class="rule-insight-block">
+                  <div class="rule-insight-block">
                   <div class="rule-insight-head">
                     <div class="rule-insight-title">规则摘要与证据提要</div>
                     <div class="panel-meta">{{ analysisInsights.scope_summary.point_count || 0 }} 个数据点</div>
                   </div>
                   <div v-if="errors.analysisInsights" class="state-warn">{{ errors.analysisInsights }}</div>
                   <div class="insight-groups">
-                  <div class="insight-group">
-                    <div class="insight-group-title">趋势结论</div>
-                    <div v-if="!analysisInsights.trend_findings.length" class="empty-tip">当前时间范围暂无可解释趋势。</div>
-                    <div v-else class="insight-list">
-                      <div v-for="item in analysisInsights.trend_findings" :key="`trend-${item.title}`" class="insight-item" :class="insightToneClass(item.severity)">
-                        <div class="insight-item-title">{{ item.title }}</div>
-                        <div class="insight-item-detail">{{ item.detail }}</div>
+                    <div class="insight-group">
+                      <div class="insight-group-title">趋势结论</div>
+                      <div v-if="!analysisInsights.trend_findings.length" class="empty-tip">当前时间范围暂无可解释趋势。</div>
+                      <div v-else class="insight-list">
+                        <div v-for="item in analysisInsights.trend_findings" :key="`trend-${item.title}`" class="insight-item" :class="insightToneClass(item.severity)">
+                          <div class="insight-item-title">{{ item.title }}</div>
+                          <div class="insight-item-detail">{{ item.detail }}</div>
+                        </div>
                       </div>
                     </div>
-                  </div>
 
-                  <div class="insight-group">
-                    <div class="insight-group-title">天气联动</div>
-                    <div v-if="!analysisInsights.weather_findings.length" class="empty-tip">当前没有温度联动结论。</div>
-                    <div v-else class="insight-list">
-                      <div v-for="item in analysisInsights.weather_findings" :key="`weather-${item.title}`" class="insight-item" :class="insightToneClass(item.severity)">
-                        <div class="insight-item-title">{{ item.title }}</div>
-                        <div class="insight-item-detail">{{ item.detail }}</div>
+                    <div class="insight-group">
+                      <div class="insight-group-title">天气联动</div>
+                      <div v-if="!analysisInsights.weather_findings.length" class="empty-tip">当前没有温度联动结论。</div>
+                      <div v-else class="insight-list">
+                        <div v-for="item in analysisInsights.weather_findings" :key="`weather-${item.title}`" class="insight-item" :class="insightToneClass(item.severity)">
+                          <div class="insight-item-title">{{ item.title }}</div>
+                          <div class="insight-item-detail">{{ item.detail }}</div>
+                        </div>
                       </div>
                     </div>
-                  </div>
 
-                  <div class="insight-group">
-                    <div class="insight-group-title">同类对比</div>
-                    <div v-if="!analysisInsights.compare_findings.length" class="empty-tip">选择单体建筑后，这里会给出同类位置和差距解释。</div>
-                    <div v-else class="insight-list">
-                      <div v-for="item in analysisInsights.compare_findings" :key="`compare-${item.title}`" class="insight-item" :class="insightToneClass(item.severity)">
-                        <div class="insight-item-title">{{ item.title }}</div>
-                        <div class="insight-item-detail">{{ item.detail }}</div>
+                    <div class="insight-group">
+                      <div class="insight-group-title">同类对比</div>
+                      <div v-if="!analysisInsights.compare_findings.length" class="empty-tip">选择单体建筑后，这里会给出同类位置和差距解释。</div>
+                      <div v-else class="insight-list">
+                        <div v-for="item in analysisInsights.compare_findings" :key="`compare-${item.title}`" class="insight-item" :class="insightToneClass(item.severity)">
+                          <div class="insight-item-title">{{ item.title }}</div>
+                          <div class="insight-item-detail">{{ item.detail }}</div>
+                        </div>
                       </div>
                     </div>
                   </div>
                 </div>
                 </div>
               </div>
+            </div>
             </div>
 
             <div class="analysis-secondary-grid">
@@ -507,6 +491,9 @@
                   <div class="analysis-brief-sub">{{ currentAnalysisScopeText() }}</div>
                 </div>
                 <el-button type="primary" plain @click="submitAnalysisReport" :loading="loading.analysisInsight">基于当前分析生成结论</el-button>
+              </div>
+              <div class="assistant-provider-note">
+                <span>{{ aiAvailabilityText() }}</span>
               </div>
 
               <div v-if="analysisInsight" class="diagnosis diagnosis--analysis">
