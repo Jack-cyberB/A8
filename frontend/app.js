@@ -104,6 +104,8 @@ createApp({
         windowHours: 24,
         totalCalls: 0,
         llmCalls: 0,
+        realLlmCalls: 0,
+        templateCalls: 0,
         fallbackCalls: 0,
         fallbackRate: 0,
         avgLatency: 0,
@@ -169,6 +171,7 @@ createApp({
         anomalyType: null,
       },
       refreshTimer: null,
+      analysisRequestSeq: 0,
     };
   },
   mounted() {
@@ -384,6 +387,13 @@ createApp({
       this.analysisUnsupportedMessage = message || '暂未接入该分析类型';
       this.clearAnalysisData();
     },
+    nextAnalysisRequestId() {
+      this.analysisRequestSeq += 1;
+      return this.analysisRequestSeq;
+    },
+    isActiveAnalysisRequest(requestId) {
+      return requestId === this.analysisRequestSeq;
+    },
     async bootstrap() {
       await this.loadBuildings();
       await this.loadSystemHealth();
@@ -485,29 +495,98 @@ createApp({
         this.loading.trend = false;
       }
     },
-    async loadAnalysisSummary() {
+    buildFallbackInsights() {
+      const meta = this.selectedBuildingMeta();
+      const peer = this.analysisCompare.peer_group || {};
+      const summary = this.analysisSummary || {};
+      const trendSummary = this.analysisTrend.summary || {};
+      const distribution = this.analysisDistribution || {};
+      const selectedStart = this.isCompleteRange(this.filters.range) ? this.filters.range[0] : (meta?.startTime || this.globalRange.startTime || null);
+      const selectedEnd = this.isCompleteRange(this.filters.range) ? this.filters.range[1] : (meta?.endTime || this.globalRange.endTime || null);
+      const weekdayPeakHours = distribution.weekday_peak_hours || [];
+      const opportunities = [];
+      if (weekdayPeakHours.length) {
+        opportunities.push({
+          title: '工作日峰段优化',
+          detail: `高负荷集中在 ${weekdayPeakHours[0].label} 左右，可优先检查错峰、排程与设定点。`,
+          priority: 'medium',
+          estimated_loss_kwh: Number(summary.peak_value || 0),
+        });
+      }
+      if ((distribution.night_base_load?.ratio_vs_avg_pct || 0) > 45) {
+        opportunities.push({
+          title: '夜间基线偏高',
+          detail: `夜间基线约为平均负荷的 ${this.formatNumber(distribution.night_base_load.ratio_vs_avg_pct, 1)}%，建议核查非工作时段设备待机与常开策略。`,
+          priority: 'high',
+          estimated_loss_kwh: Number(distribution.night_base_load?.avg_value || 0),
+        });
+      }
+      return {
+        scope_summary: {
+          building_id: this.filters.buildingId || 'ALL',
+          building_name: meta?.name || '全部建筑',
+          building_type: meta?.type || 'portfolio',
+          selected_start_time: selectedStart,
+          selected_end_time: selectedEnd,
+          data_start_time: selectedStart,
+          data_end_time: selectedEnd,
+          point_count: Array.isArray(this.analysisTrend.series) ? this.analysisTrend.series.length : 0,
+          granularity: 'filtered',
+          anomaly_count: Array.isArray(this.analysisTrend.markers) ? this.analysisTrend.markers.length : 0,
+          metric_label: this.currentMetricLabel(),
+          unit: summary.unit || 'kWh',
+        },
+        trend_findings: [
+          {
+            title: '负荷波动概况',
+            detail: `当前时间范围均值 ${this.formatNumber(summary.avg_value, 1)} ${summary.unit || 'kWh'}，峰值 ${this.formatNumber(summary.peak_value, 1)} ${summary.unit || 'kWh'}，窗口变化 ${this.formatNumber(trendSummary.window_change_pct, 1)}%。`,
+            severity: Number(summary.volatility_pct || 0) > 30 ? 'warning' : 'info',
+          },
+        ],
+        weather_findings: [
+          {
+            title: '温度相关性',
+            detail: `当前温度相关系数约 ${this.formatNumber(trendSummary.temperature_correlation, 2)}，可结合季节变化判断温控负荷影响。`,
+            severity: Math.abs(Number(trendSummary.temperature_correlation || 0)) > 0.45 ? 'info' : 'success',
+          },
+        ],
+        compare_findings: peer.peer_count ? [
+          {
+            title: '同类位置',
+            detail: `当前建筑与同类均值差异 ${this.formatNumber(peer.gap_pct, 1)}%，同类百分位 ${this.formatNumber(peer.peer_percentile, 1)}。`,
+            severity: Number(peer.gap_pct || 0) > 10 ? 'warning' : 'info',
+          },
+        ] : [],
+        saving_opportunities: opportunities,
+        anomaly_windows: [],
+      };
+    },
+    async loadAnalysisSummary(requestId = this.analysisRequestSeq) {
       this.loading.analysisSummary = true;
-      this.errors.analysisSummary = '';
+      if (this.isActiveAnalysisRequest(requestId)) this.errors.analysisSummary = '';
       try {
         const data = await this.fetchJson(`${API_BASE}/api/analysis/summary${buildQuery(this.getAnalysisParams())}`);
+        if (!this.isActiveAnalysisRequest(requestId)) return;
         this.analysisUnsupportedMessage = '';
         this.analysisSummary = data;
       } catch (err) {
         console.error(err);
+        if (!this.isActiveAnalysisRequest(requestId)) return;
         if (String(err.message || '').includes('暂未接入')) {
           this.setAnalysisUnsupported(err.message);
           return;
         }
         this.errors.analysisSummary = '分析摘要加载失败';
       } finally {
-        this.loading.analysisSummary = false;
+        if (this.isActiveAnalysisRequest(requestId)) this.loading.analysisSummary = false;
       }
     },
-    async loadAnalysisTrend() {
+    async loadAnalysisTrend(requestId = this.analysisRequestSeq) {
       this.loading.analysisTrend = true;
-      this.errors.analysisTrend = '';
+      if (this.isActiveAnalysisRequest(requestId)) this.errors.analysisTrend = '';
       try {
         const data = await this.fetchJson(`${API_BASE}/api/analysis/trend${buildQuery(this.getAnalysisParams())}`);
+        if (!this.isActiveAnalysisRequest(requestId)) return;
         this.analysisTrend = {
           ...data,
           overlayAvailable: !!data.overlay_available,
@@ -515,74 +594,90 @@ createApp({
         };
       } catch (err) {
         console.error(err);
+        if (!this.isActiveAnalysisRequest(requestId)) return;
         if (String(err.message || '').includes('暂未接入')) {
           this.setAnalysisUnsupported(err.message);
           return;
         }
         this.errors.analysisTrend = '分析趋势加载失败';
       } finally {
-        this.loading.analysisTrend = false;
+        if (this.isActiveAnalysisRequest(requestId)) this.loading.analysisTrend = false;
       }
     },
-    async loadAnalysisDistribution() {
+    async loadAnalysisDistribution(requestId = this.analysisRequestSeq) {
       this.loading.analysisDistribution = true;
-      this.errors.analysisDistribution = '';
+      if (this.isActiveAnalysisRequest(requestId)) this.errors.analysisDistribution = '';
       try {
         const data = await this.fetchJson(`${API_BASE}/api/analysis/distribution${buildQuery(this.getAnalysisParams())}`);
+        if (!this.isActiveAnalysisRequest(requestId)) return;
         this.analysisDistribution = data;
       } catch (err) {
         console.error(err);
+        if (!this.isActiveAnalysisRequest(requestId)) return;
         if (String(err.message || '').includes('暂未接入')) {
           this.setAnalysisUnsupported(err.message);
           return;
         }
         this.errors.analysisDistribution = '结构分析加载失败';
       } finally {
-        this.loading.analysisDistribution = false;
+        if (this.isActiveAnalysisRequest(requestId)) this.loading.analysisDistribution = false;
       }
     },
-    async loadAnalysisCompare() {
+    async loadAnalysisCompare(requestId = this.analysisRequestSeq) {
       this.loading.analysisCompare = true;
-      this.errors.analysisCompare = '';
+      if (this.isActiveAnalysisRequest(requestId)) this.errors.analysisCompare = '';
       try {
         const data = await this.fetchJson(`${API_BASE}/api/analysis/compare${buildQuery(this.getAnalysisParams())}`);
+        if (!this.isActiveAnalysisRequest(requestId)) return;
         this.analysisCompare = data;
       } catch (err) {
         console.error(err);
+        if (!this.isActiveAnalysisRequest(requestId)) return;
         if (String(err.message || '').includes('暂未接入')) {
           this.setAnalysisUnsupported(err.message);
           return;
         }
         this.errors.analysisCompare = '对比分析加载失败';
       } finally {
-        this.loading.analysisCompare = false;
+        if (this.isActiveAnalysisRequest(requestId)) this.loading.analysisCompare = false;
       }
     },
-    async loadAnalysisInsights() {
+    async loadAnalysisInsights(requestId = this.analysisRequestSeq) {
       this.loading.analysisInsights = true;
-      this.errors.analysisInsights = '';
+      if (this.isActiveAnalysisRequest(requestId)) this.errors.analysisInsights = '';
       try {
         const data = await this.fetchJson(`${API_BASE}/api/analysis/insights${buildQuery(this.getAnalysisParams())}`);
+        if (!this.isActiveAnalysisRequest(requestId)) return;
         this.analysisInsights = data;
       } catch (err) {
         console.error(err);
+        if (!this.isActiveAnalysisRequest(requestId)) return;
         if (String(err.message || '').includes('暂未接入')) {
           this.setAnalysisUnsupported(err.message);
           return;
         }
-        this.errors.analysisInsights = '分析结论加载失败';
+        this.analysisInsights = this.buildFallbackInsights();
+        this.errors.analysisInsights = '分析结论使用本地兜底生成';
       } finally {
-        this.loading.analysisInsights = false;
+        if (this.isActiveAnalysisRequest(requestId)) this.loading.analysisInsights = false;
       }
     },
     async loadAnalysisWorkspace() {
+      const requestId = this.nextAnalysisRequestId();
       this.analysisUnsupportedMessage = '';
-      await this.loadAnalysisSummary();
-      if (this.analysisUnsupportedMessage) {
+      this.clearAnalysisData();
+      await this.loadAnalysisSummary(requestId);
+      if (!this.isActiveAnalysisRequest(requestId) || this.analysisUnsupportedMessage) {
         await nextTick();
         return;
       }
-      await Promise.all([this.loadAnalysisTrend(), this.loadAnalysisDistribution(), this.loadAnalysisCompare(), this.loadAnalysisInsights()]);
+      await Promise.all([
+        this.loadAnalysisTrend(requestId),
+        this.loadAnalysisDistribution(requestId),
+        this.loadAnalysisCompare(requestId),
+        this.loadAnalysisInsights(requestId),
+      ]);
+      if (!this.isActiveAnalysisRequest(requestId)) return;
       await this.syncVisibleCharts();
     },
     async loadAnomalies() {
@@ -615,6 +710,8 @@ createApp({
         this.aiStats.fallbackCalls = data.fallback_calls ?? 0;
         this.aiStats.fallbackRate = data.fallback_rate_pct ?? 0;
         this.aiStats.avgLatency = data.avg_latency_ms ?? 0;
+        this.aiStats.realLlmCalls = data.by_provider?.llm_provider ?? 0;
+        this.aiStats.templateCalls = data.by_provider?.template_provider ?? 0;
       } catch (err) {
         console.error(err);
       }

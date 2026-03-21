@@ -801,6 +801,16 @@ body {
   font-size: 13px;
 }
 
+.state-warn {
+  margin-bottom: 10px;
+  color: #8b5c12;
+  background: #fff8e9;
+  border: 1px solid #ffe0a6;
+  border-radius: 12px;
+  padding: 10px 12px;
+  font-size: 13px;
+}
+
 .history-list {
   margin: 8px 0;
   padding-left: 18px;

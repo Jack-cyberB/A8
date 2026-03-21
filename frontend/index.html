@@ -196,7 +196,7 @@
                   </div>
                   <div class="panel-meta">{{ analysisInsights.scope_summary.point_count || 0 }} 个数据点</div>
                 </div>
-                <div v-if="errors.analysisInsights" class="state-error">{{ errors.analysisInsights }}</div>
+                <div v-if="errors.analysisInsights" class="state-warn">{{ errors.analysisInsights }}</div>
                 <div v-else class="insight-groups">
                   <div class="insight-group">
                     <div class="insight-group-title">趋势结论</div>
@@ -488,8 +488,10 @@
                 <div class="ai-stats">
                   <div class="ai-stats-title">近{{ aiStats.windowHours }}小时 AI 运行统计</div>
                   <div class="ai-stats-grid">
-                    <div>总调用: {{ aiStats.totalCalls }}</div>
-                    <div>LLM调用: {{ aiStats.llmCalls }}</div>
+                    <div>系统内分析事件: {{ aiStats.totalCalls }}</div>
+                    <div>真实外部LLM调用: {{ aiStats.realLlmCalls }}</div>
+                    <div>请求LLM策略次数: {{ aiStats.llmCalls }}</div>
+                    <div>模板/本地结果次数: {{ aiStats.templateCalls }}</div>
                     <div>降级次数: {{ aiStats.fallbackCalls }}</div>
                     <div>降级率: {{ aiStats.fallbackRate }}%</div>
                     <div>平均耗时: {{ aiStats.avgLatency }} ms</div>
