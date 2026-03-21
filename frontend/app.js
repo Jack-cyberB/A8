@@ -362,20 +362,6 @@ createApp({
         this.renderTrendChart();
       }
     },
-    setTrendWindow(days) {
-      const chart = this.ensureChart('trend', 'trendChart');
-      if (!chart) return;
-      const { series, bucketHours } = this.buildTrendChartSeries();
-      if (!series.length) return;
-      if (days === 'all') {
-        chart.dispatchAction({ type: 'dataZoom', startValue: 0, endValue: series.length - 1 });
-        return;
-      }
-      const points = Math.max(2, Math.ceil((Number(days) * 24) / Math.max(bucketHours, 1)));
-      const endValue = series.length - 1;
-      const startValue = Math.max(0, endValue - points + 1);
-      chart.dispatchAction({ type: 'dataZoom', startValue, endValue });
-    },
     onDateRangeChange() {
       if (this.refreshTimer) clearTimeout(this.refreshTimer);
       this.refreshTimer = setTimeout(() => {
@@ -923,17 +909,6 @@ createApp({
         },
       };
     },
-    formatTrendZoomLabel(value, valueStr, series) {
-      const directLabel = String(valueStr || '');
-      if (directLabel && directLabel.includes('-')) {
-        return directLabel.slice(0, 10);
-      }
-      const index = Number(value);
-      if (Number.isFinite(index) && Array.isArray(series) && series[index]) {
-        return String(series[index].timestamp || '').slice(0, 10);
-      }
-      return '';
-    },
     bucketAnalysisSeries(series, bucketHours) {
       if (!Array.isArray(series) || !series.length || !bucketHours || bucketHours <= 1) {
         return series || [];
@@ -989,21 +964,10 @@ createApp({
         chart.clear();
         return;
       }
-      const previousOption = chart.getOption?.() || {};
-      const previousZoom = Array.isArray(previousOption.dataZoom) ? previousOption.dataZoom[0] : null;
-      const visiblePoints = bucketHours >= 24 ? 45 : bucketHours >= 12 ? 56 : bucketHours >= 6 ? 72 : 96;
-      const defaultStartValue = Math.max(0, series.length - Math.min(series.length, visiblePoints));
-      const defaultEndValue = Math.max(0, series.length - 1);
       const timeAxisLabel = this.buildTimeAxisLabels(series.map((item) => item.timestamp));
       const tooltipLabel = bucketHours > 1 ? `平均负荷（${bucketHours}h）` : `${this.currentMetricLabel()}负荷`;
-      const shouldShowZoom = series.length > 14;
-      const normalizedStartValue = Number.isFinite(Number(previousZoom?.startValue)) ? Number(previousZoom.startValue) : defaultStartValue;
-      const normalizedEndValue = Number.isFinite(Number(previousZoom?.endValue)) ? Number(previousZoom.endValue) : defaultEndValue;
-      const zoomStartValue = Math.max(0, Math.min(series.length - 1, normalizedStartValue));
-      const zoomEndValue = Math.max(zoomStartValue, Math.min(series.length - 1, normalizedEndValue));
-      const zoomLabelFormatter = (value, valueStr) => this.formatTrendZoomLabel(value, valueStr, series);
       const option = {
-        grid: { left: 60, right: 62, top: 52, bottom: 72 },
+        grid: { left: 60, right: 62, top: 52, bottom: 46 },
         tooltip: {
           trigger: 'axis',
           backgroundColor: 'rgba(15, 25, 43, 0.92)',
@@ -1020,54 +984,6 @@ createApp({
           },
         },
         legend: { top: 0, itemWidth: 14, itemHeight: 8, textStyle: { color: '#52617b', fontSize: 12 } },
-        dataZoom: shouldShowZoom
-          ? [
-              {
-                type: 'inside',
-                filterMode: 'filter',
-                throttle: 50,
-                start: previousZoom?.start,
-                end: previousZoom?.end,
-                startValue: zoomStartValue,
-                endValue: zoomEndValue,
-              },
-              {
-                type: 'slider',
-                height: 22,
-                bottom: 12,
-                brushSelect: false,
-                showDetail: true,
-                realtime: true,
-                filterMode: 'filter',
-                fillerColor: 'rgba(53, 127, 237, 0.18)',
-                borderColor: 'rgba(110, 138, 182, 0.25)',
-                backgroundColor: 'rgba(232, 239, 249, 0.7)',
-                dataBackground: {
-                  lineStyle: { color: 'rgba(70, 122, 230, 0.45)' },
-                  areaStyle: { color: 'rgba(70, 122, 230, 0.14)' },
-                },
-                selectedDataBackground: {
-                  lineStyle: { color: '#3d79e6' },
-                  areaStyle: { color: 'rgba(61, 121, 230, 0.18)' },
-                },
-                handleSize: 18,
-                moveHandleSize: 10,
-                handleStyle: {
-                  color: '#ffffff',
-                  borderColor: '#3f7ce9',
-                  borderWidth: 2,
-                  shadowBlur: 8,
-                  shadowColor: 'rgba(41, 94, 191, 0.18)',
-                },
-                textStyle: { color: '#60708b', fontSize: 11 },
-                labelFormatter: zoomLabelFormatter,
-                start: previousZoom?.start,
-                end: previousZoom?.end,
-                startValue: zoomStartValue,
-                endValue: zoomEndValue,
-              },
-            ]
-          : [],
         xAxis: {
           type: 'category',
           data: series.map((i) => i.timestamp),

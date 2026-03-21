@@ -38,33 +38,41 @@ test.describe('A8 closed loop chains', () => {
     const trendMetaBefore = await page.evaluate(() => {
       const chart = echarts.getInstanceByDom(document.getElementById('trendChart'));
       const option = chart?.getOption?.() || {};
-      const raw = chart?.getModel?.()?.option || {};
       return {
         seriesCount: Array.isArray(option.series) ? option.series.length : 0,
-        zoomStart: option.dataZoom?.[0]?.startValue,
-        zoomEnd: option.dataZoom?.[0]?.endValue,
-        zoomLabel: typeof raw.dataZoom?.[1]?.labelFormatter === 'function'
-          ? raw.dataZoom[1].labelFormatter(option.dataZoom?.[0]?.startValue, '')
-          : '',
+        hasZoom: Array.isArray(option.dataZoom) && option.dataZoom.length > 0,
+        firstLabel: option.xAxis?.[0]?.data?.[0] || '',
+        lastLabel: option.xAxis?.[0]?.data?.[(option.xAxis?.[0]?.data?.length || 1) - 1] || '',
       };
     });
     expect(trendMetaBefore.seriesCount).toBeGreaterThanOrEqual(1);
-    expect(Number(trendMetaBefore.zoomEnd)).toBeGreaterThan(Number(trendMetaBefore.zoomStart));
-    expect(trendMetaBefore.zoomLabel).toMatch(/\d{4}-\d{2}-\d{2}/);
+    expect(trendMetaBefore.hasZoom).toBeFalsy();
+    expect(trendMetaBefore.firstLabel).toMatch(/\d{4}-\d{2}-\d{2}/);
+    expect(trendMetaBefore.lastLabel).toMatch(/\d{4}-\d{2}-\d{2}/);
+    await expect(page.getByText('图表范围跟随顶部“时间范围”筛选')).toBeVisible();
 
-    await page.getByRole('button', { name: '近7天' }).click();
-    await page.waitForTimeout(300);
-    const trendMetaAfterPreset = await page.evaluate(() => {
+    await page.getByRole('combobox', { name: '开始时间' }).fill('2016-01-07 16:00:00');
+    await page.getByRole('combobox', { name: '结束时间' }).fill('2016-12-13 23:00:00');
+    await page.getByRole('button', { name: '刷新数据' }).click();
+    await page.waitForFunction(() => {
       const chart = echarts.getInstanceByDom(document.getElementById('trendChart'));
       const option = chart?.getOption?.() || {};
+      const data = option.xAxis?.[0]?.data || [];
+      return String(data[0] || '').startsWith('2016-01-07') && String(data[data.length - 1] || '').startsWith('2016-12-13');
+    });
+    const trendMetaAfterRange = await page.evaluate(() => {
+      const chart = echarts.getInstanceByDom(document.getElementById('trendChart'));
+      const option = chart?.getOption?.() || {};
+      const data = option.xAxis?.[0]?.data || [];
       return {
-        zoomStart: option.dataZoom?.[0]?.startValue,
-        zoomEnd: option.dataZoom?.[0]?.endValue,
+        firstLabel: data[0] || '',
+        lastLabel: data[data.length - 1] || '',
+        hasZoom: Array.isArray(option.dataZoom) && option.dataZoom.length > 0,
       };
     });
-    expect(Number(trendMetaAfterPreset.zoomEnd) - Number(trendMetaAfterPreset.zoomStart)).toBeLessThan(
-      Number(trendMetaBefore.zoomEnd) - Number(trendMetaBefore.zoomStart),
-    );
+    expect(trendMetaAfterRange.firstLabel.startsWith('2016-01-07')).toBeTruthy();
+    expect(trendMetaAfterRange.lastLabel.startsWith('2016-12-13')).toBeTruthy();
+    expect(trendMetaAfterRange.hasZoom).toBeFalsy();
 
     const weatherSwitch = page.locator('.analysis-hero-actions .el-switch');
     if (await weatherSwitch.isEnabled()) {
@@ -75,12 +83,11 @@ test.describe('A8 closed loop chains', () => {
         const option = chart?.getOption?.() || {};
         return {
           seriesCount: Array.isArray(option.series) ? option.series.length : 0,
-          zoomStart: option.dataZoom?.[0]?.startValue,
-          zoomEnd: option.dataZoom?.[0]?.endValue,
+          hasZoom: Array.isArray(option.dataZoom) && option.dataZoom.length > 0,
         };
       });
       expect(trendMetaAfterToggle.seriesCount).toBe(1);
-      expect(Number(trendMetaAfterToggle.zoomEnd)).toBeGreaterThan(Number(trendMetaAfterToggle.zoomStart));
+      expect(trendMetaAfterToggle.hasZoom).toBeFalsy();
     }
 
     await page.locator('.filter-row .el-select').nth(1).click();

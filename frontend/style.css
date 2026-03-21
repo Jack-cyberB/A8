@@ -292,13 +292,6 @@ body {
   gap: 8px;
 }
 
-.trend-window-actions {
-  display: flex;
-  gap: 8px;
-  flex-wrap: wrap;
-  justify-content: flex-end;
-}
-
 .chart { height: 320px; }
 .chart--overview { height: 320px; }
 .chart--trend { height: 400px; }

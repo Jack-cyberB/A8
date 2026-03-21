@@ -157,12 +157,7 @@
                     <div class="panel-title">趋势分析与天气联动</div>
                   </div>
                   <div class="trend-tools">
-                    <div class="trend-window-actions">
-                      <el-button size="small" @click="setTrendWindow(7)">近7天</el-button>
-                      <el-button size="small" @click="setTrendWindow(30)">近30天</el-button>
-                      <el-button size="small" @click="setTrendWindow(90)">近90天</el-button>
-                      <el-button size="small" @click="setTrendWindow('all')">全部</el-button>
-                    </div>
+                    <div class="panel-meta">图表范围跟随顶部“时间范围”筛选</div>
                     <div class="panel-meta">窗口变化 {{ formatNumber(analysisTrend.summary.window_change_pct, 1) }}% | 温度相关 {{ formatNumber(analysisTrend.summary.temperature_correlation, 2) }}</div>
                   </div>
                 </div>
