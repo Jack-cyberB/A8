@@ -455,14 +455,15 @@
 
               <div v-if="analysisInsight" class="diagnosis diagnosis--analysis">
                 <h3>分析结论</h3>
-                <p>来源：{{ resultSourceText(analysisInsight) }} | 策略：{{ resultTriggerText(analysisInsight) }} | 耗时：{{ analysisInsight.latency_ms }}ms</p>
+                <p>来源：{{ resultSourceText(analysisInsight) }} | 策略：{{ resultTriggerText(analysisInsight) }} | 知识来源：{{ knowledgeSourceLabel(analysisInsight.knowledge_source) }} | 命中：{{ analysisInsight.retrieval_hit_count || 0 }} 条 | 耗时：{{ analysisInsight.latency_ms }}ms</p>
                 <p v-if="analysisInsight.fallback_used" class="state-warn">{{ resultFallbackText(analysisInsight) }}</p>
+                <p v-if="analysisInsight.retrieval_error_type && analysisInsight.knowledge_source !== 'ragflow'" class="panel-meta">RAGFlow 当前未返回可用证据，系统已切换到本地知识兜底。</p>
                 <p>{{ analysisInsight.summary }}</p>
                 <h4>主要发现</h4><ul><li v-for="item in analysisInsight.findings" :key="item">{{ item }}</li></ul>
                 <h4>可能原因</h4><ul><li v-for="item in analysisInsight.possible_causes" :key="item">{{ item }}</li></ul>
                 <h4>节能建议</h4><ul><li v-for="item in analysisInsight.energy_saving_suggestions" :key="item">{{ item }}</li></ul>
                 <h4>运维建议</h4><ul><li v-for="item in analysisInsight.operations_suggestions" :key="item">{{ item }}</li></ul>
-                <h4>知识证据</h4><ul><li v-for="item in analysisInsight.evidence" :key="item.chunk_id || item.title">{{ item.title }} / {{ item.section }} - {{ item.excerpt }}</li></ul>
+                <h4>知识证据</h4><ul><li v-for="item in analysisInsight.evidence" :key="item.chunk_id || item.title">[{{ knowledgeSourceLabel(item.source_type) }}] {{ item.title }} / {{ item.section }} - {{ item.excerpt }}</li></ul>
                 <div class="assistant-actions">
                   <span class="template-label">质量标记：</span>
                   <el-button size="small" :type="analysisFeedbackLabel === 'useful' ? 'success' : 'default'" @click="submitAnalysisFeedback('useful')">useful</el-button>
@@ -522,14 +523,15 @@
 
               <div v-if="diagnosis" class="diagnosis">
                 <h3>{{ diagnosis.anomaly_name }} ({{ diagnosis.risk_level }})</h3>
-                <p>置信度：{{ diagnosis.confidence }} | 来源：{{ resultSourceText(diagnosis) }} | 策略：{{ resultTriggerText(diagnosis) }} | 耗时：{{ diagnosis.latency_ms }}ms</p>
+                <p>置信度：{{ diagnosis.confidence }} | 来源：{{ resultSourceText(diagnosis) }} | 策略：{{ resultTriggerText(diagnosis) }} | 知识来源：{{ knowledgeSourceLabel(diagnosis.knowledge_source) }} | 命中：{{ diagnosis.retrieval_hit_count || 0 }} 条 | 耗时：{{ diagnosis.latency_ms }}ms</p>
                 <p v-if="diagnosis.fallback_used" class="state-warn">{{ resultFallbackText(diagnosis) }}</p>
+                <p v-if="diagnosis.retrieval_error_type && diagnosis.knowledge_source !== 'ragflow'" class="panel-meta">RAGFlow 当前未返回可用证据，系统已切换到本地知识兜底。</p>
                 <p>{{ diagnosis.conclusion }}</p>
                 <h4>可能原因</h4><ul><li v-for="item in diagnosis.causes" :key="item">{{ item }}</li></ul>
                 <h4>排查步骤</h4><ul><li v-for="item in diagnosis.steps" :key="item">{{ item }}</li></ul>
                 <h4>优先动作</h4><ul><li v-for="item in diagnosis.recommended_actions" :key="item">{{ item }}</li></ul>
                 <h4>预防建议</h4><ul><li v-for="item in diagnosis.prevention" :key="item">{{ item }}</li></ul>
-                <h4>知识证据</h4><ul><li v-for="item in diagnosis.evidence" :key="item.chunk_id">{{ item.title }} / {{ item.section }} - {{ item.excerpt }}</li></ul>
+                <h4>知识证据</h4><ul><li v-for="item in diagnosis.evidence" :key="item.chunk_id">[{{ knowledgeSourceLabel(item.source_type) }}] {{ item.title }} / {{ item.section }} - {{ item.excerpt }}</li></ul>
                 <div class="assistant-actions">
                   <span class="template-label">质量标记：</span>
                   <el-button size="small" :type="diagnosisFeedbackLabel === 'useful' ? 'success' : 'default'" @click="submitDiagnosisFeedback('useful')">useful</el-button>

@@ -124,12 +124,16 @@ try:
     assert history["code"] == 0 and history["data"]["count"] >= 1
     assert ai_stats["code"] == 0 and "total_calls" in ai_stats["data"]
     assert system_health["code"] == 0 and "recent_regression" in system_health["data"]
+    assert "ragflow" in system_health["data"]
     assert "anomaly_id,building_id,building_name" in exported
     assert diagnose_template["code"] == 0 and not diagnose_template["data"]["diagnosis"]["fallback_used"]
+    assert diagnose_template["data"]["diagnosis"]["knowledge_source"] in {"ragflow", "local", "none"}
+    assert all("source_type" in item for item in diagnose_template["data"]["diagnosis"]["evidence"])
     assert diagnose_fallback["code"] == 0 and diagnose_fallback["data"]["diagnosis"]["fallback_used"]
     assert feedback["code"] == 0 and feedback["data"]["label"] == "useful"
     assert evaluate["code"] == 0 and "llm" in evaluate["data"]
     assert analysis_report["code"] == 0 and "findings" in analysis_report["data"]["analysis"]
+    assert analysis_report["data"]["analysis"]["knowledge_source"] in {"ragflow", "local", "none"}
     assert note["code"] == 0 and note["data"]["recurrence_risk"] == "low"
     print("API smoke test passed")
 finally:

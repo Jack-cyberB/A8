@@ -211,12 +211,70 @@ class RepositoryTests(unittest.TestCase):
         self.assertEqual(analysis["provider"], "llm_provider")
         self.assertFalse(analysis["fallback_used"])
 
+    def test_ragflow_success_used_for_analysis_evidence(self):
+        buildings = REPO.query_buildings()["items"]
+        ragflow_items = [
+            {
+                "chunk_id": "rag-1",
+                "title": "03-校园与教育建筑运维场景.md",
+                "section": "相似度 0.88",
+                "excerpt": "教学楼在高温时段应优先核查通风与空调排程。",
+                "source_type": "ragflow",
+            }
+        ]
+        with mock.patch.object(
+            REPO,
+            "_retrieve_ragflow_knowledge",
+            return_value={
+                "items": ragflow_items,
+                "knowledge_source": "ragflow",
+                "retrieval_hit_count": 1,
+                "retrieval_error_type": "",
+            },
+        ):
+            result = REPO.analyze({"provider": "template", "building_id": buildings[0]["building_id"], "metric_type": "electricity"})
+
+        analysis = result["analysis"]
+        self.assertEqual(analysis["knowledge_source"], "ragflow")
+        self.assertEqual(analysis["retrieval_hit_count"], 1)
+        self.assertEqual(analysis["evidence"][0]["source_type"], "ragflow")
+
+    def test_ragflow_empty_falls_back_to_local_knowledge(self):
+        aid = self._first_anomaly_id()
+        local_items = [
+            {
+                "chunk_id": "local-1",
+                "title": "local",
+                "section": "chunk-1",
+                "excerpt": "夜间基线偏高通常与常开设备相关。",
+                "source_type": "local_knowledge",
+            }
+        ]
+        with mock.patch.object(
+            REPO,
+            "_retrieve_ragflow_knowledge",
+            return_value={
+                "items": [],
+                "knowledge_source": "none",
+                "retrieval_hit_count": 0,
+                "retrieval_error_type": "empty_result",
+            },
+        ):
+            with mock.patch.object(REPO, "_search_local_knowledge", return_value=local_items):
+                result = REPO.diagnose({"message": "请分析异常", "anomaly_id": aid, "provider": "template"})
+
+        diagnosis = result["diagnosis"]
+        self.assertEqual(diagnosis["knowledge_source"], "local")
+        self.assertEqual(diagnosis["retrieval_error_type"], "empty_result")
+        self.assertEqual(diagnosis["evidence"][0]["source_type"], "local_knowledge")
+
     def test_ai_stats_shape(self):
         aid = self._first_anomaly_id()
         _ = REPO.diagnose({"message": "请分析异常", "anomaly_id": aid, "provider": "template"})
         stats = REPO.query_ai_stats(24)
         self.assertIn("total_calls", stats)
         self.assertIn("fallback_rate_pct", stats)
+        self.assertIn("knowledge_sources", stats)
         self.assertGreaterEqual(stats["total_calls"], 1)
 
     def test_anomaly_note_upsert_and_detail(self):
@@ -239,9 +297,21 @@ class RepositoryTests(unittest.TestCase):
     def test_export_csv_and_health(self):
         csv_text = REPO.export_anomalies_csv(None, None, None, None, None, None)
         self.assertIn("anomaly_id,building_id,building_name", csv_text)
-        health = REPO.query_system_health()
+        with mock.patch.dict(
+            "os.environ",
+            {
+                "RAGFLOW_BASE_URL": "http://127.0.0.1:8080/api/v1",
+                "RAGFLOW_DATASET_IDS": "dataset-a,dataset-b",
+                "RAGFLOW_API_KEY": "rag-key",
+            },
+            clear=False,
+        ):
+            health = REPO.query_system_health()
         self.assertIn("status", health)
         self.assertIn("recent_regression", health)
+        self.assertIn("ragflow", health)
+        self.assertTrue(health["ragflow"]["configured"])
+        self.assertEqual(health["ragflow"]["dataset_count"], 2)
 
     def test_ai_evaluate_and_feedback(self):
         aid = self._first_anomaly_id()

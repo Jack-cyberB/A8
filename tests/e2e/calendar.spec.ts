@@ -110,6 +110,7 @@ test.describe('A8 closed loop chains', () => {
     await expect(page.getByRole('button', { name: '智能助手' })).toBeVisible();
     await expect(page.locator('.diagnosis--analysis')).toBeVisible({ timeout: 60000 });
     await expect(page.locator('.diagnosis--analysis').getByText(/来源：DeepSeek|来源：模板兜底/).first()).toBeVisible();
+    await expect(page.locator('.diagnosis--analysis').getByText(/知识来源：RAGFlow|知识来源：本地知识兜底|知识来源：未命中知识/).first()).toBeVisible();
   });
 
   test('anomaly ack -> detail timeline works', async ({ page }) => {
@@ -160,6 +161,7 @@ test.describe('A8 closed loop chains', () => {
     await expect(page.getByText('近24小时 诊断质量评估')).toBeVisible();
     await expect(page.locator('.diagnosis')).toBeVisible({ timeout: 60000 });
     await expect(page.locator('.diagnosis').getByText(/来源：DeepSeek|来源：模板兜底/).first()).toBeVisible();
+    await expect(page.locator('.diagnosis').getByText(/知识来源：RAGFlow|知识来源：本地知识兜底|知识来源：未命中知识/).first()).toBeVisible();
 
     await page.getByRole('button', { name: '写入处理备注草稿' }).click();
     await expect(page.locator('.action-form')).toBeVisible();

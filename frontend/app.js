@@ -116,7 +116,7 @@ createApp({
         llm: { total: 0, successRate: 0, avgLatency: 0, fallbackRate: 0, completeRate: 0 },
         feedback: { total: 0, usefulRate: 0 },
       },
-      health: { status: 'unknown', regression: 'unknown', aiConfigured: false, aiModelReady: false },
+      health: { status: 'unknown', regression: 'unknown', aiConfigured: false, aiModelReady: false, ragflowConfigured: false, ragflowEnabled: false, ragflowDatasetCount: 0 },
       diagnosis: null,
       diagnosisFeedbackLabel: '',
       selectedAnomaly: null,
@@ -237,13 +237,27 @@ createApp({
       if (!result?.fallback_used) return '';
       return this.humanizeDegradeMessage(result.degrade_message);
     },
+    knowledgeSourceLabel(value) {
+      const map = {
+        ragflow: 'RAGFlow',
+        local: '本地知识兜底',
+        local_knowledge: '本地知识兜底',
+        none: '未命中知识',
+        llm_generated: 'LLM生成',
+      };
+      return map[value] || value || '未命中知识';
+    },
     analysisInsightPendingText() {
       return '请先在能耗分析页确认建筑和时间范围，再点击“AI 分析”进入这里生成完整结论。页面筛选和刷新不会自动消耗额度。';
     },
     aiAvailabilityText() {
-      return this.health.aiConfigured
-        ? 'DeepSeek 已就绪。建议先在能耗分析页确认当前建筑和时间范围，再在这里生成完整结论。'
-        : '当前环境尚未配置 DeepSeek API Key，点击后会自动使用模板兜底，不会影响主流程。';
+      if (this.health.aiConfigured && this.health.ragflowConfigured) {
+        return `DeepSeek 与 RAGFlow 已就绪。当前接入 ${this.health.ragflowDatasetCount || 0} 个知识库数据集，生成时会优先引用检索证据。`;
+      }
+      if (this.health.aiConfigured) {
+        return 'DeepSeek 已就绪。当前知识检索未完全接入 RAGFlow 时，会自动回退到本地知识兜底。';
+      }
+      return '当前环境尚未配置 DeepSeek API Key，点击后会自动使用模板兜底，不会影响主流程。';
     },
     humanizeDegradeMessage(message) {
       const raw = String(message || '').trim();
@@ -803,12 +817,18 @@ createApp({
         this.health.regression = data.recent_regression?.status || 'unknown';
         this.health.aiConfigured = !!data.ai_provider?.configured;
         this.health.aiModelReady = !!data.ai_provider?.model;
+        this.health.ragflowConfigured = !!data.ragflow?.configured;
+        this.health.ragflowEnabled = !!data.ragflow?.enabled;
+        this.health.ragflowDatasetCount = data.ragflow?.dataset_count ?? 0;
       } catch (err) {
         console.error(err);
         this.health.status = 'unknown';
         this.health.regression = 'unknown';
         this.health.aiConfigured = false;
         this.health.aiModelReady = false;
+        this.health.ragflowConfigured = false;
+        this.health.ragflowEnabled = false;
+        this.health.ragflowDatasetCount = 0;
       }
     },
     async exportAnomalies() {

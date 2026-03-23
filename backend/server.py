@@ -38,6 +38,12 @@ TIME_FMT = "%Y-%m-%d %H:%M:%S"
 CARBON_FACTOR = 0.785
 SEVERITY_SCORE = {"low": 1, "medium": 2, "high": 3}
 SUPPORTED_ANALYSIS_METRICS = {"electricity"}
+RAGFLOW_DEFAULT_BASE_URL = "http://127.0.0.1:8080/api/v1"
+RAGFLOW_DEFAULT_DATASET_IDS = "ba5f2eac252511f1964d92819ecc816d"
+RAGFLOW_DEFAULT_TOP_K = 6
+RAGFLOW_DEFAULT_SIMILARITY_THRESHOLD = 0.2
+RAGFLOW_DEFAULT_VECTOR_SIMILARITY_WEIGHT = 0.3
+RAGFLOW_DEFAULT_TIMEOUT_SEC = 12.0
 
 STATUS_NEW = "new"
 STATUS_ACK = "acknowledged"
@@ -188,6 +194,7 @@ class LLMDiagnoseProvider(DiagnoseProvider):
                             "title": str(item.get("title", "LLM")),
                             "section": str(item.get("section", "")),
                             "excerpt": str(item.get("excerpt", "")).strip(),
+                            "source_type": str(item.get("source_type", "llm_generated")),
                         }
                     )
                 else:
@@ -199,6 +206,7 @@ class LLMDiagnoseProvider(DiagnoseProvider):
                                 "title": "LLM",
                                 "section": "",
                                 "excerpt": txt,
+                                "source_type": "llm_generated",
                             }
                         )
 
@@ -318,10 +326,11 @@ class LLMDiagnoseProvider(DiagnoseProvider):
                 llm_diag = self._sanitize_llm_result(llm_obj)
 
                 merged = dict(diag_template)
-                for key in ("conclusion", "causes", "steps", "prevention", "recommended_actions", "evidence", "confidence", "risk_level"):
+                for key in ("conclusion", "causes", "steps", "prevention", "recommended_actions", "confidence", "risk_level"):
                     if llm_diag.get(key):
                         merged[key] = llm_diag[key]
                 merged["possible_causes"] = merged.get("causes", [])
+                merged["evidence"] = diag_template.get("evidence", [])
                 return {"diagnosis": merged, "context": context}
             except HTTPError as exc:
                 retryable = exc.code == 429 or 500 <= exc.code < 600
@@ -528,6 +537,211 @@ class EnergyRepository:
                 except json.JSONDecodeError:
                     continue
         return chunks
+
+    def _ragflow_settings(self) -> dict[str, Any]:
+        base_url = (os.getenv("RAGFLOW_BASE_URL", RAGFLOW_DEFAULT_BASE_URL).strip() or RAGFLOW_DEFAULT_BASE_URL).rstrip("/")
+        dataset_ids_raw = os.getenv("RAGFLOW_DATASET_IDS", RAGFLOW_DEFAULT_DATASET_IDS).strip() or RAGFLOW_DEFAULT_DATASET_IDS
+        dataset_ids = [item.strip() for item in dataset_ids_raw.split(",") if item.strip()]
+        api_key = os.getenv("RAGFLOW_API_KEY", "").strip()
+        try:
+            top_k = max(1, int(os.getenv("RAGFLOW_TOP_K", str(RAGFLOW_DEFAULT_TOP_K))))
+        except ValueError:
+            top_k = RAGFLOW_DEFAULT_TOP_K
+        try:
+            similarity_threshold = float(os.getenv("RAGFLOW_SIMILARITY_THRESHOLD", str(RAGFLOW_DEFAULT_SIMILARITY_THRESHOLD)))
+        except ValueError:
+            similarity_threshold = RAGFLOW_DEFAULT_SIMILARITY_THRESHOLD
+        try:
+            vector_similarity_weight = float(os.getenv("RAGFLOW_VECTOR_SIMILARITY_WEIGHT", str(RAGFLOW_DEFAULT_VECTOR_SIMILARITY_WEIGHT)))
+        except ValueError:
+            vector_similarity_weight = RAGFLOW_DEFAULT_VECTOR_SIMILARITY_WEIGHT
+        try:
+            timeout_sec = float(os.getenv("RAGFLOW_TIMEOUT_SEC", str(RAGFLOW_DEFAULT_TIMEOUT_SEC)))
+        except ValueError:
+            timeout_sec = RAGFLOW_DEFAULT_TIMEOUT_SEC
+
+        enabled = bool(base_url and dataset_ids)
+        configured = bool(enabled and api_key)
+        return {
+            "base_url": base_url,
+            "dataset_ids": dataset_ids,
+            "dataset_count": len(dataset_ids),
+            "api_key": api_key,
+            "top_k": top_k,
+            "similarity_threshold": similarity_threshold,
+            "vector_similarity_weight": vector_similarity_weight,
+            "timeout_sec": timeout_sec,
+            "enabled": enabled,
+            "configured": configured,
+        }
+
+    def _sanitize_excerpt(self, value: Any, limit: int = 220) -> str:
+        text = str(value or "")
+        text = re.sub(r"</?em>", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"<[^>]+>", " ", text)
+        text = text.replace("\r", " ").replace("\n", " ")
+        text = re.sub(r"\s{2,}", " ", text).strip()
+        if len(text) <= limit:
+            return text
+        return f"{text[:limit].rstrip()}..."
+
+    def _normalize_evidence_item(
+        self,
+        *,
+        chunk_id: Any,
+        title: Any,
+        section: Any,
+        excerpt: Any,
+        source_type: str,
+    ) -> dict[str, str]:
+        return {
+            "chunk_id": str(chunk_id or "").strip() or f"{source_type}-chunk",
+            "title": str(title or "").strip() or ("RAGFlow" if source_type == "ragflow" else "本地知识"),
+            "section": str(section or "").strip(),
+            "excerpt": self._sanitize_excerpt(excerpt),
+            "source_type": source_type,
+        }
+
+    def _retrieve_ragflow_knowledge(self, query_text: str, limit: int = 3) -> dict[str, Any]:
+        settings = self._ragflow_settings()
+        if not settings["configured"]:
+            return {
+                "items": [],
+                "knowledge_source": "none",
+                "retrieval_hit_count": 0,
+                "retrieval_error_type": "not_configured",
+            }
+
+        body = json.dumps(
+            {
+                "dataset_ids": settings["dataset_ids"],
+                "question": query_text,
+                "top_k": max(limit, settings["top_k"]),
+                "similarity_threshold": settings["similarity_threshold"],
+                "vector_similarity_weight": settings["vector_similarity_weight"],
+                "highlight": False,
+            }
+        ).encode("utf-8")
+        req = Request(
+            f"{settings['base_url']}/retrieval",
+            data=body,
+            method="POST",
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {settings['api_key']}",
+            },
+        )
+        try:
+            with urlopen(req, timeout=settings["timeout_sec"]) as resp:
+                payload = json.loads(resp.read().decode("utf-8"))
+        except HTTPError as exc:
+            return {
+                "items": [],
+                "knowledge_source": "none",
+                "retrieval_hit_count": 0,
+                "retrieval_error_type": "http_error",
+            }
+        except (URLError, TimeoutError, socket.timeout):
+            return {
+                "items": [],
+                "knowledge_source": "none",
+                "retrieval_hit_count": 0,
+                "retrieval_error_type": "timeout",
+            }
+        except json.JSONDecodeError:
+            return {
+                "items": [],
+                "knowledge_source": "none",
+                "retrieval_hit_count": 0,
+                "retrieval_error_type": "parse_error",
+            }
+
+        if not isinstance(payload, dict) or payload.get("code") not in (0, None):
+            return {
+                "items": [],
+                "knowledge_source": "none",
+                "retrieval_hit_count": 0,
+                "retrieval_error_type": "http_error",
+            }
+
+        data = payload.get("data") or {}
+        chunks = data.get("chunks", []) if isinstance(data, dict) else []
+        items: list[dict[str, str]] = []
+        for idx, chunk in enumerate(chunks[:limit], start=1):
+            if not isinstance(chunk, dict):
+                continue
+            similarity = chunk.get("similarity")
+            section = chunk.get("section") or chunk.get("important_keywords") or ""
+            if not section and similarity is not None:
+                try:
+                    section = f"相似度 {float(similarity):.2f}"
+                except (TypeError, ValueError):
+                    section = ""
+            items.append(
+                self._normalize_evidence_item(
+                    chunk_id=chunk.get("id") or chunk.get("chunk_id") or f"ragflow-{idx}",
+                    title=chunk.get("document_name") or chunk.get("docnm_kwd") or chunk.get("document_id") or "RAGFlow 片段",
+                    section=section or chunk.get("dataset_id") or "",
+                    excerpt=chunk.get("content_with_weight") or chunk.get("content") or chunk.get("text") or "",
+                    source_type="ragflow",
+                )
+            )
+
+        if items:
+            return {
+                "items": items,
+                "knowledge_source": "ragflow",
+                "retrieval_hit_count": len(items),
+                "retrieval_error_type": "",
+            }
+        return {
+            "items": [],
+            "knowledge_source": "none",
+            "retrieval_hit_count": 0,
+            "retrieval_error_type": "empty_result",
+        }
+
+    def _build_diagnose_knowledge_query(
+        self,
+        anomaly_name: str,
+        message: str,
+        context: dict[str, Any] | None,
+    ) -> str:
+        context = context or {}
+        parts = [
+            f"异常类型：{anomaly_name}",
+            f"建筑类型：{context.get('building_type') or ''}",
+            f"建筑名称：{context.get('building_name') or ''}",
+            f"发生时间：{to_iso(context['timestamp']) if context.get('timestamp') else ''}",
+            f"偏差比例：{context.get('deviation_pct') or ''}",
+            f"用户问题：{message or '请给出诊断与运维建议'}",
+        ]
+        return "\n".join([part for part in parts if str(part).strip()])
+
+    def _build_analysis_knowledge_query(self, payload: dict[str, Any], context: dict[str, Any], insights: dict[str, Any]) -> str:
+        summary = context.get("summary") or {}
+        peer_group = (context.get("compare") or {}).get("peer_group") or {}
+        insight_lines = []
+        for item in (insights.get("trend_findings") or [])[:2]:
+            if isinstance(item, dict):
+                insight_lines.append(f"{item.get('title', '')}：{item.get('detail', '')}")
+        for item in (insights.get("weather_findings") or [])[:2]:
+            if isinstance(item, dict):
+                insight_lines.append(f"{item.get('title', '')}：{item.get('detail', '')}")
+        user_question = str(payload.get("message", "")).strip() or "请围绕当前建筑能耗分析给出节能与运维建议。"
+        parts = [
+            f"建筑名称：{context.get('building_name') or ''}",
+            f"建筑类型：{context.get('building_type') or ''}",
+            f"分析指标：{context.get('metric_type') or 'electricity'}",
+            f"时间范围：{context.get('start_time') or ''} ~ {context.get('end_time') or ''}",
+            f"均值：{summary.get('avg_value', 0)} {summary.get('unit', 'kWh')}",
+            f"峰值：{summary.get('peak_value', 0)} {summary.get('unit', 'kWh')}",
+            f"波动率：{summary.get('volatility_pct', 0)}%",
+            f"同类差距：{peer_group.get('gap_pct', 0)}%",
+            f"关键发现：{'；'.join(insight_lines)}",
+            f"用户问题：{user_question}",
+        ]
+        return "\n".join([part for part in parts if str(part).strip()])
 
     def _prepare_indexes(self) -> None:
         for row in self.rows:
@@ -748,12 +962,15 @@ class EnergyRepository:
 
         by_provider: dict[str, int] = {}
         error_types: dict[str, int] = {}
+        knowledge_sources: dict[str, int] = {}
         for ev in window_events:
             provider = str(ev.get("provider", "unknown"))
             by_provider[provider] = by_provider.get(provider, 0) + 1
             err = str(ev.get("error_type", "")).strip()
             if err:
                 error_types[err] = error_types.get(err, 0) + 1
+            knowledge = str(ev.get("knowledge_source", "")).strip() or "none"
+            knowledge_sources[knowledge] = knowledge_sources.get(knowledge, 0) + 1
 
         fallback_rate = round((fallback_calls / total) * 100, 2) if total else 0.0
         return {
@@ -764,6 +981,7 @@ class EnergyRepository:
             "fallback_rate_pct": fallback_rate,
             "avg_latency_ms": avg_latency,
             "by_provider": by_provider,
+            "knowledge_sources": knowledge_sources,
             "error_types": error_types,
             "updated_at": to_iso(now),
         }
@@ -999,6 +1217,7 @@ class EnergyRepository:
             "dictionary": self.dict_file.exists(),
             "knowledge": self.knowledge_file.exists(),
         }
+        ragflow = self._ragflow_settings()
         ai_status = {
             "configured": bool(os.getenv("OPENAI_API_KEY", "").strip()),
             "base_url": bool(os.getenv("OPENAI_BASE_URL", "").strip()),
@@ -1008,6 +1227,12 @@ class EnergyRepository:
             "status": "ok" if all(data_source.values()) else "degraded",
             "data_source": data_source,
             "ai_provider": ai_status,
+            "ragflow": {
+                "configured": ragflow["configured"],
+                "base_url": ragflow["base_url"],
+                "dataset_count": ragflow["dataset_count"],
+                "enabled": ragflow["enabled"],
+            },
             "recent_regression": regression,
             "updated_at": to_iso(dt.datetime.now()),
         }
@@ -1986,7 +2211,7 @@ class EnergyRepository:
             "postmortem_note": note,
         }
 
-    def _search_knowledge(self, anomaly_type: str, message: str, limit: int = 3) -> list[dict[str, str]]:
+    def _search_local_knowledge(self, anomaly_type: str, message: str, limit: int = 3) -> list[dict[str, str]]:
         if not self.knowledge_chunks:
             return []
         keywords = [k.lower() for k in self.dict_data.get(anomaly_type, {}).get("keywords", [])]
@@ -2007,16 +2232,44 @@ class EnergyRepository:
         scored.sort(key=lambda x: (-x[0], x[1]))
         picked = []
         for _, _, chunk in scored[:limit]:
-            text = str(chunk.get("text", "")).replace("\n", " ")
             picked.append(
-                {
-                    "chunk_id": str(chunk.get("chunk_id", "")),
-                    "title": str(chunk.get("title", "")),
-                    "section": str(chunk.get("chunk_id", "")),
-                    "excerpt": text[:220],
-                }
+                self._normalize_evidence_item(
+                    chunk_id=chunk.get("chunk_id", ""),
+                    title=chunk.get("title", ""),
+                    section=chunk.get("chunk_id", ""),
+                    excerpt=chunk.get("text", ""),
+                    source_type="local_knowledge",
+                )
             )
         return picked
+
+    def _search_knowledge(
+        self,
+        anomaly_type: str,
+        message: str,
+        limit: int = 3,
+        *,
+        query_text: str | None = None,
+    ) -> dict[str, Any]:
+        search_query = str(query_text or message or anomaly_type).strip()
+        ragflow_result = self._retrieve_ragflow_knowledge(search_query, limit=limit)
+        if ragflow_result["items"]:
+            return ragflow_result
+
+        local_items = self._search_local_knowledge(anomaly_type, message, limit=limit)
+        if local_items:
+            return {
+                "items": local_items,
+                "knowledge_source": "local",
+                "retrieval_hit_count": len(local_items),
+                "retrieval_error_type": ragflow_result.get("retrieval_error_type", ""),
+            }
+        return {
+            "items": [],
+            "knowledge_source": "none",
+            "retrieval_hit_count": 0,
+            "retrieval_error_type": ragflow_result.get("retrieval_error_type", ""),
+        }
 
     def _resolve_context(self, payload: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None]:
         anomaly_id = payload.get("anomaly_id")
@@ -2064,7 +2317,13 @@ class EnergyRepository:
         causes = knowledge.get("possible_causes", [])
         steps = knowledge.get("steps", [])
         prevention = knowledge.get("prevention", [])
-        evidence = self._search_knowledge(chosen_type, message)
+        retrieval = self._search_knowledge(
+            chosen_type,
+            message,
+            limit=3,
+            query_text=self._build_diagnose_knowledge_query(anomaly_name, message, context),
+        )
+        evidence = retrieval["items"]
 
         if context:
             conclusion = (
@@ -2103,6 +2362,9 @@ class EnergyRepository:
                 "evidence": evidence,
                 "confidence": round(confidence, 2),
                 "risk_level": risk_level,
+                "knowledge_source": retrieval["knowledge_source"],
+                "retrieval_hit_count": retrieval["retrieval_hit_count"],
+                "retrieval_error_type": retrieval["retrieval_error_type"],
             },
             "context": {
                 "anomaly_id": context["anomaly_id"] if context else None,
@@ -2320,10 +2582,14 @@ class EnergyRepository:
         if not operations:
             operations.append("继续跟踪高峰时段与夜间基线，形成设备运行排班对照。")
 
-        evidence = []
         message = str(payload.get("message", "")).strip() or f"{building_name} {metric_label} 分析"
-        for item in self._search_knowledge("anomaly_sustained_high_load", message, limit=3):
-            evidence.append(item)
+        retrieval = self._search_knowledge(
+            "anomaly_sustained_high_load",
+            message,
+            limit=3,
+            query_text=self._build_analysis_knowledge_query(payload, context, insights),
+        )
+        evidence = retrieval["items"]
 
         scope = insights.get("scope_summary") or {}
         summary_text = (
@@ -2340,6 +2606,9 @@ class EnergyRepository:
                 "energy_saving_suggestions": energy_saving,
                 "operations_suggestions": operations,
                 "evidence": evidence,
+                "knowledge_source": retrieval["knowledge_source"],
+                "retrieval_hit_count": retrieval["retrieval_hit_count"],
+                "retrieval_error_type": retrieval["retrieval_error_type"],
             },
             "context": context,
         }
@@ -2413,9 +2682,10 @@ class EnergyRepository:
                         "possible_causes": llm_provider._coerce_list_of_str(llm_obj.get("possible_causes")) or template_result["analysis"]["possible_causes"],
                         "energy_saving_suggestions": llm_provider._coerce_list_of_str(llm_obj.get("energy_saving_suggestions")) or template_result["analysis"]["energy_saving_suggestions"],
                         "operations_suggestions": llm_provider._coerce_list_of_str(llm_obj.get("operations_suggestions")) or template_result["analysis"]["operations_suggestions"],
-                        "evidence": llm_obj.get("evidence", template_result["analysis"]["evidence"])
-                        if isinstance(llm_obj.get("evidence", template_result["analysis"]["evidence"]), list)
-                        else template_result["analysis"]["evidence"],
+                        "evidence": template_result["analysis"]["evidence"],
+                        "knowledge_source": template_result["analysis"].get("knowledge_source", "none"),
+                        "retrieval_hit_count": template_result["analysis"].get("retrieval_hit_count", 0),
+                        "retrieval_error_type": template_result["analysis"].get("retrieval_error_type", ""),
                     },
                     "context": context,
                 }
@@ -2468,6 +2738,9 @@ class EnergyRepository:
                 "event_type": "analysis",
                 "field_complete": field_complete,
                 "result_risk_level": "",
+                "knowledge_source": str(result.get("analysis", {}).get("knowledge_source", "")),
+                "retrieval_hit_count": int(result.get("analysis", {}).get("retrieval_hit_count", 0) or 0),
+                "retrieval_error_type": str(result.get("analysis", {}).get("retrieval_error_type", "")),
             }
         )
         return result
@@ -2534,6 +2807,9 @@ class EnergyRepository:
                 "event_type": "diagnose",
                 "field_complete": field_complete,
                 "result_risk_level": str(result.get("diagnosis", {}).get("risk_level", "")),
+                "knowledge_source": str(result.get("diagnosis", {}).get("knowledge_source", "")),
+                "retrieval_hit_count": int(result.get("diagnosis", {}).get("retrieval_hit_count", 0) or 0),
+                "retrieval_error_type": str(result.get("diagnosis", {}).get("retrieval_error_type", "")),
             }
         )
         return result
