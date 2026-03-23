@@ -30,9 +30,9 @@ test.describe('A8 acceptance chains', () => {
     }
 
     await row.locator('.el-button--danger', { hasText: '诊断' }).click();
-    await expect(page.getByRole('button', { name: '智能助手' })).toBeVisible();
-    await expect(page.locator('.diagnosis')).toBeVisible({ timeout: 60000 });
-    await expect(page.locator('.diagnosis').getByText(/来源：DeepSeek|来源：模板兜底/).first()).toBeVisible();
+    await expect(page.getByText('智能助手（RAGFlow 工作区）')).toBeVisible();
+    await expect(page.locator('.assistant-embed-frame')).toBeVisible();
+    await expect(page.locator('.assistant-prompt-panel textarea')).toHaveValue(/原因判断、排查步骤、立即动作、预防建议/);
 
     await page.getByRole('button', { name: '故障监控' }).click();
     const detailBtn = page.locator('.el-table__body-wrapper tbody tr').first().locator('.el-button', { hasText: '详情' });

@@ -99,6 +99,8 @@ createApp({
       analysisInsight: null,
       analysisFeedbackLabel: '',
       chatInput: '',
+      assistantPromptDraft: '',
+      assistantPromptKind: 'analysis',
       aiProvider: 'auto',
       aiStats: {
         windowHours: 24,
@@ -116,7 +118,18 @@ createApp({
         llm: { total: 0, successRate: 0, avgLatency: 0, fallbackRate: 0, completeRate: 0 },
         feedback: { total: 0, usefulRate: 0 },
       },
-      health: { status: 'unknown', regression: 'unknown', aiConfigured: false, aiModelReady: false, ragflowConfigured: false, ragflowEnabled: false, ragflowDatasetCount: 0 },
+      health: {
+        status: 'unknown',
+        regression: 'unknown',
+        aiConfigured: false,
+        aiModelReady: false,
+        ragflowConfigured: false,
+        ragflowEnabled: false,
+        ragflowDatasetCount: 0,
+        ragflowShareUrl: '',
+        ragflowShareReady: false,
+        ragflowSharedDialogId: '',
+      },
       diagnosis: null,
       diagnosisFeedbackLabel: '',
       selectedAnomaly: null,
@@ -321,6 +334,112 @@ createApp({
       const rangeText = this.isCompleteRange(this.filters.range) ? `${this.filters.range[0]} ~ ${this.filters.range[1]}` : '全量时间范围';
       return `${this.currentMetricLabel()} | ${buildingText} | ${rangeText}`;
     },
+    assistantPromptTitle() {
+      return this.assistantPromptKind === 'anomaly' ? '异常诊断提问草稿' : '当前分析提问草稿';
+    },
+    assistantHintText() {
+      if (this.health.ragflowShareReady) {
+        return '右侧已经接入 RAGFlow 共享助手。左侧问题会在点击按钮后自动复制，你直接粘贴到右侧输入框里就能开始问答。';
+      }
+      return '当前还没有拿到可嵌入的 RAGFlow 共享地址，你可以先复制这里的问题，到 RAGFlow 网页聊天页继续使用。';
+    },
+    analysisBulletText(items, emptyText) {
+      if (!Array.isArray(items) || !items.length) return emptyText;
+      return items.slice(0, 3).map((item) => `- ${item.title}：${item.detail}`).join('\n');
+    },
+    buildAnalysisAssistantPrompt() {
+      const scope = this.analysisInsights.scope_summary || {};
+      const peer = this.analysisCompare.peer_group || {};
+      const opportunities = (this.analysisInsights.saving_opportunities || []).slice(0, 3).map((item) => `- ${item.title}：${item.detail}`);
+      const anomalyWindows = (this.analysisInsights.anomaly_windows || []).slice(0, 3).map((item) => `- ${this.formatCompactDateTime(item.timestamp)} ${item.anomaly_name}，偏差 ${this.formatNumber(item.deviation_pct, 1)}%，影响估算 ${this.formatInsightKwh(item.estimated_loss_kwh)}`);
+      return [
+        '请作为建筑能源与运维专家，结合下面的项目分析上下文，输出“结论-证据-动作”三段式中文回答。',
+        '如果存在明显异常，请同时补充风险提示和优先检查顺序。',
+        '',
+        `分析对象：${scope.building_name || '全部建筑'}（${scope.building_type || 'portfolio'}）`,
+        `分析指标：${this.currentMetricLabel()}（${this.analysisSummary.unit || 'kWh'}）`,
+        `筛选时间：${this.formatCompactDateTime(scope.selected_start_time)} ~ ${this.formatCompactDateTime(scope.selected_end_time)}`,
+        `有效数据：${this.formatCompactDateTime(scope.data_start_time)} ~ ${this.formatCompactDateTime(scope.data_end_time)}，共 ${scope.point_count || 0} 个点位`,
+        `总量：${this.formatNumber(this.analysisSummary.total_value, 1)} ${this.analysisSummary.unit || 'kWh'}`,
+        `均值：${this.formatNumber(this.analysisSummary.avg_value, 1)} ${this.analysisSummary.unit || 'kWh'}`,
+        `峰值：${this.formatNumber(this.analysisSummary.peak_value, 1)} ${this.analysisSummary.unit || 'kWh'}`,
+        `波动率：${this.formatNumber(this.analysisSummary.volatility_pct, 1)}%`,
+        `窗口变化：${this.formatNumber(this.analysisTrend.summary?.window_change_pct, 1)}%`,
+        `温度相关：${this.formatNumber(this.analysisTrend.summary?.temperature_correlation, 2)}`,
+        peer.peer_count ? `同类对比：样本 ${peer.peer_count} 栋，偏离同类均值 ${this.formatNumber(peer.gap_pct, 1)}%，同类百分位 ${this.formatNumber(peer.peer_percentile, 1)}` : '同类对比：当前为全集或缺少单体样本，请谨慎使用同类结论',
+        '',
+        '趋势结论：',
+        this.analysisBulletText(this.analysisInsights.trend_findings, '- 当前没有额外趋势结论'),
+        '',
+        '天气联动：',
+        this.analysisBulletText(this.analysisInsights.weather_findings, '- 当前没有温度联动结论'),
+        '',
+        '节能机会：',
+        opportunities.length ? opportunities.join('\n') : '- 当前时间范围暂无明显节能机会点',
+        '',
+        '异常窗口：',
+        anomalyWindows.length ? anomalyWindows.join('\n') : '- 当前筛选范围内没有识别到异常窗口',
+      ].join('\n');
+    },
+    buildAnomalyAssistantPrompt(row = this.selectedAnomaly) {
+      if (!row) {
+        return this.buildAnalysisAssistantPrompt();
+      }
+      return [
+        '请作为建筑运维诊断助手，基于下面的异常上下文输出：原因判断、排查步骤、立即动作、预防建议。',
+        '请优先给出现场可执行的检查顺序，并尽量结合建筑场景与设备运行特征。',
+        '',
+        `建筑：${row.building_name}（${row.building_type || '-'}）`,
+        `异常类型：${row.anomaly_name}`,
+        `异常时间：${this.formatCompactDateTime(row.timestamp)}`,
+        `偏差比例：${this.formatNumber(row.deviation_pct, 1)}%`,
+        `当前状态：${row.status || 'new'}`,
+        `当前分析范围：${this.currentAnalysisScopeText()}`,
+        `补充背景：${this.analysisBulletText(this.analysisInsights.trend_findings, '- 当前没有额外背景分析')}`,
+      ].join('\n');
+    },
+    prepareAssistantPrompt(kind = 'analysis', row = null) {
+      this.assistantPromptKind = kind;
+      const prompt = kind === 'anomaly' ? this.buildAnomalyAssistantPrompt(row) : this.buildAnalysisAssistantPrompt();
+      this.assistantPromptDraft = prompt;
+      this.chatInput = prompt;
+      return prompt;
+    },
+    async copyAssistantPrompt(options = {}) {
+      const { silent = false } = options;
+      const text = String(this.assistantPromptDraft || '').trim();
+      if (!text) {
+        if (!silent) this.$message.warning('当前没有可复制的问题草稿');
+        return false;
+      }
+      try {
+        if (navigator.clipboard?.writeText) {
+          await navigator.clipboard.writeText(text);
+        } else {
+          const textarea = document.createElement('textarea');
+          textarea.value = text;
+          textarea.style.position = 'fixed';
+          textarea.style.opacity = '0';
+          document.body.appendChild(textarea);
+          textarea.select();
+          document.execCommand('copy');
+          document.body.removeChild(textarea);
+        }
+        if (!silent) this.$message.success('已复制提问草稿，可直接粘贴到右侧 RAGFlow');
+        return true;
+      } catch (err) {
+        console.error(err);
+        if (!silent) this.$message.error('自动复制失败，请手动复制左侧内容');
+        return false;
+      }
+    },
+    openRagflowAssistant() {
+      if (!this.health.ragflowShareUrl) {
+        this.$message.warning('当前未配置 RAGFlow 共享地址');
+        return;
+      }
+      window.open(this.health.ragflowShareUrl, '_blank', 'noopener');
+    },
     isCompleteRange(range) {
       return Array.isArray(range) && range.length === 2 && !!range[0] && !!range[1];
     },
@@ -469,12 +588,14 @@ createApp({
       this.anomalyQuery.page = 1;
       this.analysisInsight = null;
       this.analysisFeedbackLabel = '';
+      if (this.assistantPromptKind === 'analysis') this.assistantPromptDraft = '';
       this.ensureRangeWithinScope({ applyDefaultIfEmpty: true, silent: true });
       this.refreshCurrentPage();
     },
     onAnalysisMetricChange() {
       this.analysisInsight = null;
       this.analysisFeedbackLabel = '';
+      if (this.assistantPromptKind === 'analysis') this.assistantPromptDraft = '';
       if (this.activePage === 'analysis' || this.activePage === 'assistant') {
         this.refreshCurrentPage();
       }
@@ -486,14 +607,15 @@ createApp({
     },
     onDateRangeChange() {
       if (this.refreshTimer) clearTimeout(this.refreshTimer);
-      this.refreshTimer = setTimeout(() => {
-        this.anomalyQuery.page = 1;
-        this.analysisInsight = null;
-        this.analysisFeedbackLabel = '';
-        this.ensureRangeWithinScope({ applyDefaultIfEmpty: false, silent: false });
-        this.refreshCurrentPage();
-      }, 200);
-    },
+        this.refreshTimer = setTimeout(() => {
+          this.anomalyQuery.page = 1;
+          this.analysisInsight = null;
+          this.analysisFeedbackLabel = '';
+          if (this.assistantPromptKind === 'analysis') this.assistantPromptDraft = '';
+          this.ensureRangeWithinScope({ applyDefaultIfEmpty: false, silent: false });
+          this.refreshCurrentPage();
+        }, 200);
+      },
     onAnomalyFilterChange() {
       this.anomalyQuery.page = 1;
       this.loadAnomalies();
@@ -820,6 +942,9 @@ createApp({
         this.health.ragflowConfigured = !!data.ragflow?.configured;
         this.health.ragflowEnabled = !!data.ragflow?.enabled;
         this.health.ragflowDatasetCount = data.ragflow?.dataset_count ?? 0;
+        this.health.ragflowShareUrl = data.ragflow?.shared_url || '';
+        this.health.ragflowShareReady = !!data.ragflow?.assistant_ready;
+        this.health.ragflowSharedDialogId = data.ragflow?.shared_dialog_id || '';
       } catch (err) {
         console.error(err);
         this.health.status = 'unknown';
@@ -829,6 +954,9 @@ createApp({
         this.health.ragflowConfigured = false;
         this.health.ragflowEnabled = false;
         this.health.ragflowDatasetCount = 0;
+        this.health.ragflowShareUrl = '';
+        this.health.ragflowShareReady = false;
+        this.health.ragflowSharedDialogId = '';
       }
     },
     async exportAnomalies() {
@@ -859,7 +987,7 @@ createApp({
         await this.syncVisibleCharts();
         return;
       }
-      await Promise.all([this.loadAiStats(), this.loadAiEvaluate()]);
+      await this.loadSystemHealth();
     },
     async switchPage(key) {
       this.activePage = key;
@@ -971,11 +1099,11 @@ createApp({
       };
       this.chatInput = templates[kind] || templates.spike;
     },
-    diagnoseFromAnomaly(row) {
+    async diagnoseFromAnomaly(row) {
       this.selectedAnomaly = row;
-      this.activePage = 'assistant';
-      this.chatInput = `${row.building_name} 在 ${row.timestamp} 出现 ${row.anomaly_name}，请给出诊断和处理建议。`;
-      this.submitDiagnosis();
+      this.prepareAssistantPrompt('anomaly', row);
+      await this.switchPage('assistant');
+      await this.copyAssistantPrompt({ silent: false });
     },
     copyDiagnosisToActionNote() {
       if (!this.diagnosis || !this.selectedAnomaly) return;
@@ -1085,9 +1213,10 @@ createApp({
       }
     },
     async runAnalysisAssistant() {
-      this.activePage = 'assistant';
-      await nextTick();
-      await this.submitAnalysisReport();
+      this.selectedAnomaly = null;
+      this.prepareAssistantPrompt('analysis');
+      await this.switchPage('assistant');
+      await this.copyAssistantPrompt({ silent: false });
     },
     async submitAnalysisFeedback(label) {
       if (!this.analysisInsight?.trace_id) {

@@ -433,113 +433,81 @@
           </div>
         </section>
 
-        <section v-show="activePage === 'assistant'" class="page">
-          <div class="panel">
-            <div class="panel-head">
-              <div>
-                <div class="panel-eyebrow">Assistant</div>
-                <div class="panel-title">智能助手（诊断 + 当前分析结论）</div>
+        <section v-show="activePage === 'assistant'" class="page assistant-page">
+          <div class="assistant-hero">
+            <div>
+              <div class="panel-eyebrow">Assistant Workspace</div>
+              <div class="panel-title">智能助手（RAGFlow 工作区）</div>
+              <div class="assistant-hero-sub">左侧整理项目上下文与提问草稿，右侧直接使用你已经跑通的 RAGFlow 助手。分析页的“AI 分析”和故障页的“诊断”都会把问题准备好并复制到剪贴板。</div>
+            </div>
+            <div class="assistant-hero-actions">
+              <el-tag size="small" effect="light" :type="health.ragflowShareReady ? 'success' : 'warning'">
+                {{ health.ragflowShareReady ? 'RAGFlow 已接入' : 'RAGFlow 共享地址未配置' }}
+              </el-tag>
+              <el-button @click="openRagflowAssistant" :disabled="!health.ragflowShareUrl">新窗口打开</el-button>
+            </div>
+          </div>
+
+          <div class="assistant-layout">
+            <div class="assistant-side">
+              <div class="panel assistant-context-panel">
+                <div class="panel-head">
+                  <div>
+                    <div class="panel-eyebrow">Context</div>
+                    <div class="panel-title assistant-panel-title">项目上下文</div>
+                  </div>
+                </div>
+                <div class="assistant-context-grid">
+                  <div class="assistant-context-item">
+                    <div class="assistant-context-label">当前分析范围</div>
+                    <div class="assistant-context-value">{{ currentAnalysisScopeText() }}</div>
+                  </div>
+                  <div class="assistant-context-item">
+                    <div class="assistant-context-label">知识库状态</div>
+                    <div class="assistant-context-value">{{ health.ragflowConfigured ? `已配置 ${health.ragflowDatasetCount || 0} 个数据集` : '尚未配置' }}</div>
+                  </div>
+                  <div class="assistant-context-item assistant-context-item--full">
+                    <div class="assistant-context-label">当前异常上下文</div>
+                    <div v-if="selectedAnomaly" class="assistant-context-value">
+                      {{ selectedAnomaly.building_name }} / {{ selectedAnomaly.anomaly_name }} / {{ formatCompactDateTime(selectedAnomaly.timestamp) }} / 偏差 {{ formatNumber(selectedAnomaly.deviation_pct, 1) }}%
+                    </div>
+                    <div v-else class="assistant-context-note">当前没有从故障页带入异常。若需要做异常诊断，请从“故障监控”页点击“诊断”。</div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="panel assistant-prompt-panel">
+                <div class="panel-head">
+                  <div>
+                    <div class="panel-eyebrow">Prompt</div>
+                    <div class="panel-title assistant-panel-title">{{ assistantPromptTitle() }}</div>
+                  </div>
+                </div>
+                <div class="assistant-provider-note">{{ assistantHintText() }}</div>
+                <el-input v-model="assistantPromptDraft" type="textarea" :rows="16" placeholder="在能耗分析页点击“AI 分析”或在故障列表点击“诊断”后，这里会自动生成可直接提问的草稿。"></el-input>
+                <div class="assistant-actions">
+                  <el-button type="primary" @click="copyAssistantPrompt()">复制到剪贴板</el-button>
+                  <el-button @click="prepareAssistantPrompt('analysis')">重建分析提问</el-button>
+                  <el-button @click="prepareAssistantPrompt('anomaly', selectedAnomaly)" :disabled="!selectedAnomaly">重建异常提问</el-button>
+                </div>
               </div>
             </div>
-            <div class="assistant-box">
-              <div class="analysis-brief">
+
+            <div class="panel assistant-embed-panel">
+              <div class="panel-head">
                 <div>
-                  <div class="analysis-brief-title">当前分析上下文</div>
-                  <div class="analysis-brief-sub">{{ currentAnalysisScopeText() }}</div>
+                  <div class="panel-eyebrow">RAGFlow</div>
+                  <div class="panel-title assistant-panel-title">共享助手嵌入区</div>
                 </div>
-                <el-button type="primary" plain @click="submitAnalysisReport" :loading="loading.analysisInsight">生成当前分析结论</el-button>
+                <div class="panel-meta">使用你在 RAGFlow 中已经验证过的聊天链路</div>
               </div>
-              <div class="assistant-provider-note">
-                <span>{{ aiAvailabilityText() }}</span>
+              <div v-if="health.ragflowShareReady" class="assistant-embed-wrap">
+                <iframe class="assistant-embed-frame" :src="health.ragflowShareUrl" title="RAGFlow 智能助手" loading="lazy"></iframe>
               </div>
-
-              <div v-if="analysisInsight" class="diagnosis diagnosis--analysis">
-                <h3>分析结论</h3>
-                <p>来源：{{ resultSourceText(analysisInsight) }} | 策略：{{ resultTriggerText(analysisInsight) }} | 知识来源：{{ knowledgeSourceLabel(analysisInsight.knowledge_source) }} | 命中：{{ analysisInsight.retrieval_hit_count || 0 }} 条 | 耗时：{{ analysisInsight.latency_ms }}ms</p>
-                <p v-if="analysisInsight.fallback_used" class="state-warn">{{ resultFallbackText(analysisInsight) }}</p>
-                <p v-if="analysisInsight.retrieval_error_type && analysisInsight.knowledge_source !== 'ragflow'" class="panel-meta">RAGFlow 当前未返回可用证据，系统已切换到本地知识兜底。</p>
-                <p>{{ analysisInsight.summary }}</p>
-                <h4>主要发现</h4><ul><li v-for="item in analysisInsight.findings" :key="item">{{ item }}</li></ul>
-                <h4>可能原因</h4><ul><li v-for="item in analysisInsight.possible_causes" :key="item">{{ item }}</li></ul>
-                <h4>节能建议</h4><ul><li v-for="item in analysisInsight.energy_saving_suggestions" :key="item">{{ item }}</li></ul>
-                <h4>运维建议</h4><ul><li v-for="item in analysisInsight.operations_suggestions" :key="item">{{ item }}</li></ul>
-                <h4>知识证据</h4><ul><li v-for="item in analysisInsight.evidence" :key="item.chunk_id || item.title">[{{ knowledgeSourceLabel(item.source_type) }}] {{ item.title }} / {{ item.section }} - {{ item.excerpt }}</li></ul>
-                <div class="assistant-actions">
-                  <span class="template-label">质量标记：</span>
-                  <el-button size="small" :type="analysisFeedbackLabel === 'useful' ? 'success' : 'default'" @click="submitAnalysisFeedback('useful')">useful</el-button>
-                  <el-button size="small" :type="analysisFeedbackLabel === 'not_useful' ? 'danger' : 'default'" @click="submitAnalysisFeedback('not_useful')">not useful</el-button>
-                </div>
-              </div>
-
               <div v-else class="empty-tip empty-tip--emphasis">
-                <div class="empty-tip-title">尚未生成 AI 分析结论</div>
-                <div class="empty-tip-desc">{{ analysisInsightPendingText() }}</div>
+                <div class="empty-tip-title">还没有可嵌入的 RAGFlow 共享链接</div>
+                <div class="empty-tip-desc">后端已经支持读取共享聊天地址。补齐共享聊天的 `shared_id/auth` 后，这里会直接变成可用的助手工作区。</div>
               </div>
-
-              <div class="template-row">
-                <span class="template-label">快捷模板：</span>
-                <el-button size="small" @click="applyDiagnosisTemplate('spike')">突增排查</el-button>
-                <el-button size="small" @click="applyDiagnosisTemplate('offline')">低负荷排查</el-button>
-                <el-button size="small" @click="applyDiagnosisTemplate('highload')">高负荷排查</el-button>
-                <el-select v-model="aiProvider" style="width: 160px">
-                  <el-option label="模板兜底" value="template"></el-option>
-                  <el-option label="DeepSeek" value="llm"></el-option>
-                  <el-option label="优先 DeepSeek（失败降级）" value="auto"></el-option>
-                </el-select>
-              </div>
-              <div class="assistant-provider-note">说明：在线分析仅在点击“基于当前分析生成结论”或“生成诊断”时触发，页面刷新不会自动消耗额度。</div>
-
-              <el-input v-model="chatInput" type="textarea" :rows="3" placeholder="例如：这条突增告警的根因是什么，应该先检查哪里？"></el-input>
-              <div class="assistant-actions">
-                <el-button type="primary" @click="submitDiagnosis" :loading="loading.ai">生成诊断</el-button>
-                <el-button @click="copyDiagnosisToActionNote" :disabled="!diagnosis || !selectedAnomaly">写入处理备注草稿</el-button>
-              </div>
-
-              <div class="ai-stats-grid-panel">
-                <div class="ai-stats">
-                  <div class="ai-stats-title">近{{ aiStats.windowHours }}小时 AI 运行统计</div>
-                  <div class="ai-stats-grid">
-                    <div>系统内分析事件: {{ aiStats.totalCalls }}</div>
-                    <div>真实外部LLM调用: {{ aiStats.realLlmCalls }}</div>
-                    <div>请求LLM策略次数: {{ aiStats.llmCalls }}</div>
-                    <div>模板/本地结果次数: {{ aiStats.templateCalls }}</div>
-                    <div>降级次数: {{ aiStats.fallbackCalls }}</div>
-                    <div>降级率: {{ aiStats.fallbackRate }}%</div>
-                    <div>平均耗时: {{ aiStats.avgLatency }} ms</div>
-                  </div>
-                </div>
-                <div class="ai-stats">
-                  <div class="ai-stats-title">近{{ aiEvaluate.windowHours }}小时 诊断质量评估</div>
-                  <div class="ai-stats-grid">
-                    <div>Template 成功率: {{ aiEvaluate.template.successRate }}%</div>
-                    <div>Template 完整率: {{ aiEvaluate.template.completeRate }}%</div>
-                    <div>LLM 成功率: {{ aiEvaluate.llm.successRate }}%</div>
-                    <div>LLM 降级率: {{ aiEvaluate.llm.fallbackRate }}%</div>
-                    <div>LLM 平均耗时: {{ aiEvaluate.llm.avgLatency }} ms</div>
-                    <div>人工有用率: {{ aiEvaluate.feedback.usefulRate }}%</div>
-                  </div>
-                </div>
-              </div>
-
-              <div v-if="diagnosis" class="diagnosis">
-                <h3>{{ diagnosis.anomaly_name }} ({{ diagnosis.risk_level }})</h3>
-                <p>置信度：{{ diagnosis.confidence }} | 来源：{{ resultSourceText(diagnosis) }} | 策略：{{ resultTriggerText(diagnosis) }} | 知识来源：{{ knowledgeSourceLabel(diagnosis.knowledge_source) }} | 命中：{{ diagnosis.retrieval_hit_count || 0 }} 条 | 耗时：{{ diagnosis.latency_ms }}ms</p>
-                <p v-if="diagnosis.fallback_used" class="state-warn">{{ resultFallbackText(diagnosis) }}</p>
-                <p v-if="diagnosis.retrieval_error_type && diagnosis.knowledge_source !== 'ragflow'" class="panel-meta">RAGFlow 当前未返回可用证据，系统已切换到本地知识兜底。</p>
-                <p>{{ diagnosis.conclusion }}</p>
-                <h4>可能原因</h4><ul><li v-for="item in diagnosis.causes" :key="item">{{ item }}</li></ul>
-                <h4>排查步骤</h4><ul><li v-for="item in diagnosis.steps" :key="item">{{ item }}</li></ul>
-                <h4>优先动作</h4><ul><li v-for="item in diagnosis.recommended_actions" :key="item">{{ item }}</li></ul>
-                <h4>预防建议</h4><ul><li v-for="item in diagnosis.prevention" :key="item">{{ item }}</li></ul>
-                <h4>知识证据</h4><ul><li v-for="item in diagnosis.evidence" :key="item.chunk_id">[{{ knowledgeSourceLabel(item.source_type) }}] {{ item.title }} / {{ item.section }} - {{ item.excerpt }}</li></ul>
-                <div class="assistant-actions">
-                  <span class="template-label">质量标记：</span>
-                  <el-button size="small" :type="diagnosisFeedbackLabel === 'useful' ? 'success' : 'default'" @click="submitDiagnosisFeedback('useful')">useful</el-button>
-                  <el-button size="small" :type="diagnosisFeedbackLabel === 'not_useful' ? 'danger' : 'default'" @click="submitDiagnosisFeedback('not_useful')">not useful</el-button>
-                </div>
-              </div>
-
-              <div v-else class="empty-tip">暂无诊断结果，请先输入问题或从故障列表点击“诊断”。</div>
             </div>
           </div>
         </section>

@@ -15,7 +15,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlencode, urlparse
 from urllib.request import Request, urlopen
 
 
@@ -99,6 +99,15 @@ def parse_time(value: str | None) -> dt.datetime | None:
 
 def to_iso(ts: dt.datetime) -> str:
     return ts.strftime(TIME_FMT)
+
+
+def infer_ragflow_web_base_url(api_base_url: str) -> str:
+    base = (api_base_url or "").rstrip("/")
+    if base.endswith("/api/v1"):
+        return base[:-7]
+    if base.endswith("/api"):
+        return base[:-4]
+    return base
 
 
 class DiagnoseProvider:
@@ -543,6 +552,11 @@ class EnergyRepository:
         dataset_ids_raw = os.getenv("RAGFLOW_DATASET_IDS", RAGFLOW_DEFAULT_DATASET_IDS).strip() or RAGFLOW_DEFAULT_DATASET_IDS
         dataset_ids = [item.strip() for item in dataset_ids_raw.split(",") if item.strip()]
         api_key = os.getenv("RAGFLOW_API_KEY", "").strip()
+        web_base_url = (os.getenv("RAGFLOW_WEB_BASE_URL", "").strip() or infer_ragflow_web_base_url(base_url)).rstrip("/")
+        shared_dialog_id = os.getenv("RAGFLOW_SHARED_DIALOG_ID", "").strip()
+        shared_auth = os.getenv("RAGFLOW_SHARED_AUTH", "").strip()
+        shared_from = os.getenv("RAGFLOW_SHARED_FROM", "chat").strip() or "chat"
+        shared_url = os.getenv("RAGFLOW_SHARED_URL", "").strip()
         try:
             top_k = max(1, int(os.getenv("RAGFLOW_TOP_K", str(RAGFLOW_DEFAULT_TOP_K))))
         except ValueError:
@@ -562,8 +576,12 @@ class EnergyRepository:
 
         enabled = bool(base_url and dataset_ids)
         configured = bool(enabled and api_key)
+        if not shared_url and web_base_url and shared_dialog_id and shared_auth:
+            share_path = "/agent/share" if shared_from == "agent" else "/chat/share"
+            shared_url = f"{web_base_url}{share_path}?{urlencode({'shared_id': shared_dialog_id, 'from': shared_from, 'auth': shared_auth})}"
         return {
             "base_url": base_url,
+            "web_base_url": web_base_url,
             "dataset_ids": dataset_ids,
             "dataset_count": len(dataset_ids),
             "api_key": api_key,
@@ -573,6 +591,10 @@ class EnergyRepository:
             "timeout_sec": timeout_sec,
             "enabled": enabled,
             "configured": configured,
+            "shared_dialog_id": shared_dialog_id,
+            "shared_from": shared_from,
+            "shared_url": shared_url,
+            "assistant_ready": bool(shared_url),
         }
 
     def _sanitize_excerpt(self, value: Any, limit: int = 220) -> str:
@@ -1230,8 +1252,13 @@ class EnergyRepository:
             "ragflow": {
                 "configured": ragflow["configured"],
                 "base_url": ragflow["base_url"],
+                "web_base_url": ragflow["web_base_url"],
                 "dataset_count": ragflow["dataset_count"],
                 "enabled": ragflow["enabled"],
+                "shared_dialog_id": ragflow["shared_dialog_id"],
+                "shared_from": ragflow["shared_from"],
+                "shared_url": ragflow["shared_url"],
+                "assistant_ready": ragflow["assistant_ready"],
             },
             "recent_regression": regression,
             "updated_at": to_iso(dt.datetime.now()),

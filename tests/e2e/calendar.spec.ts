@@ -107,10 +107,11 @@ test.describe('A8 closed loop chains', () => {
     await expect(page.locator('#trendChart canvas').first()).toBeVisible();
 
     await page.getByRole('button', { name: 'AI 分析' }).click();
-    await expect(page.getByRole('button', { name: '智能助手' })).toBeVisible();
-    await expect(page.locator('.diagnosis--analysis')).toBeVisible({ timeout: 60000 });
-    await expect(page.locator('.diagnosis--analysis').getByText(/来源：DeepSeek|来源：模板兜底/).first()).toBeVisible();
-    await expect(page.locator('.diagnosis--analysis').getByText(/知识来源：RAGFlow|知识来源：本地知识兜底|知识来源：未命中知识/).first()).toBeVisible();
+    await expect(page.getByText('智能助手（RAGFlow 工作区）')).toBeVisible();
+    await expect(page.getByText('当前分析提问草稿')).toBeVisible();
+    await expect(page.locator('.assistant-embed-frame')).toBeVisible();
+    await expect(page.locator('.assistant-embed-frame')).toHaveAttribute('src', /shared_id=/);
+    await expect(page.locator('.assistant-prompt-panel textarea')).toHaveValue(/结论-证据-动作/);
   });
 
   test('anomaly ack -> detail timeline works', async ({ page }) => {
@@ -156,16 +157,9 @@ test.describe('A8 closed loop chains', () => {
     const row = page.locator('.el-table__body-wrapper tbody tr').first();
     await row.locator('.el-button--danger', { hasText: '诊断' }).click();
 
-    await expect(page.getByRole('button', { name: '智能助手' })).toBeVisible();
-    await expect(page.getByText('近24小时 AI 运行统计')).toBeVisible();
-    await expect(page.getByText('近24小时 诊断质量评估')).toBeVisible();
-    await expect(page.locator('.diagnosis')).toBeVisible({ timeout: 60000 });
-    await expect(page.locator('.diagnosis').getByText(/来源：DeepSeek|来源：模板兜底/).first()).toBeVisible();
-    await expect(page.locator('.diagnosis').getByText(/知识来源：RAGFlow|知识来源：本地知识兜底|知识来源：未命中知识/).first()).toBeVisible();
-
-    await page.getByRole('button', { name: '写入处理备注草稿' }).click();
-    await expect(page.locator('.action-form')).toBeVisible();
-    const noteValue = await page.locator('.action-form textarea').first().inputValue();
-    expect(noteValue).toContain('诊断结论');
+    await expect(page.getByText('智能助手（RAGFlow 工作区）')).toBeVisible();
+    await expect(page.getByText('异常诊断提问草稿')).toBeVisible();
+    await expect(page.locator('.assistant-embed-frame')).toBeVisible();
+    await expect(page.locator('.assistant-prompt-panel textarea')).toHaveValue(/原因判断、排查步骤、立即动作、预防建议/);
   });
 });
