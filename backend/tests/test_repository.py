@@ -90,6 +90,8 @@ class RepositoryTests(unittest.TestCase):
         self.assertIn("provider", d)
         self.assertIn("latency_ms", d)
         self.assertIn("trace_id", d)
+        self.assertIn("data_evidence", d)
+        self.assertGreaterEqual(len(d["data_evidence"]), 1)
         self.assertFalse(d["fallback_used"])
 
     def test_diagnose_llm_fallback(self):
@@ -268,6 +270,31 @@ class RepositoryTests(unittest.TestCase):
         self.assertEqual(diagnosis["retrieval_error_type"], "empty_result")
         self.assertEqual(diagnosis["evidence"][0]["source_type"], "local_knowledge")
 
+    def test_ragflow_chat_proxy_normalizes_response(self):
+        fake_result = {
+            "answer": "这是来自 RAGFlow 的知识回答。",
+            "session_id": "rag-session-1",
+            "message_id": "msg-1",
+            "reference": {
+                "chunks": [
+                    {
+                        "id": "chunk-1",
+                        "document_name": "03-校园与教育建筑运维场景.md",
+                        "content": "教学楼高温时段应优先核查空调与通风排程。",
+                        "similarity": 0.91,
+                    }
+                ]
+            },
+        }
+        with mock.patch.object(REPO, "_ragflow_chat_completion", return_value=fake_result):
+            result = REPO.ask_ragflow_chat({"question": "教学楼夏季白天空调用电偏高怎么办？"})
+
+        self.assertEqual(result["provider"], "ragflow_chat")
+        self.assertEqual(result["session_id"], "rag-session-1")
+        self.assertEqual(result["knowledge_source"], "ragflow")
+        self.assertEqual(result["references"][0]["source_type"], "ragflow")
+        self.assertIn("校园与教育建筑", result["references"][0]["title"])
+
     def test_ai_stats_shape(self):
         aid = self._first_anomaly_id()
         _ = REPO.diagnose({"message": "请分析异常", "anomaly_id": aid, "provider": "template"})
@@ -300,9 +327,10 @@ class RepositoryTests(unittest.TestCase):
         with mock.patch.dict(
             "os.environ",
             {
-                "RAGFLOW_BASE_URL": "http://127.0.0.1:8080/api/v1",
+                "RAGFLOW_BASE_URL": "http://127.0.0.1:8088/api/v1",
                 "RAGFLOW_DATASET_IDS": "dataset-a,dataset-b",
                 "RAGFLOW_API_KEY": "rag-key",
+                "RAGFLOW_CHAT_ID": "chat-1",
             },
             clear=False,
         ):
@@ -312,6 +340,8 @@ class RepositoryTests(unittest.TestCase):
         self.assertIn("ragflow", health)
         self.assertTrue(health["ragflow"]["configured"])
         self.assertEqual(health["ragflow"]["dataset_count"], 2)
+        self.assertTrue(health["ragflow"]["chat_ready"])
+        self.assertEqual(health["ragflow"]["chat_id"], "chat-1")
 
     def test_ai_evaluate_and_feedback(self):
         aid = self._first_anomaly_id()

@@ -2,6 +2,49 @@
 
 test.describe('A8 acceptance chains', () => {
   test('ack -> diagnose -> postmortem note -> export csv', async ({ page, request }) => {
+    await page.route('**/api/ai/diagnose', async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          code: 0,
+          message: 'ok',
+          data: {
+            diagnosis: {
+              conclusion: '当前异常更接近夜间常开负荷与排程未收敛叠加造成的能耗突增。',
+              causes: ['夜间设备未及时关闭。'],
+              steps: ['优先核查 BMS 排程和夜间常开设备。'],
+              prevention: ['建立夜间巡检和排程复核机制。'],
+              recommended_actions: ['立即排查空调、新风、热水与公共照明夜间运行状态。'],
+              evidence: [
+                {
+                  chunk_id: 'rag-accept-1',
+                  title: '05-居住与住宿建筑运行场景.md',
+                  section: '相似度 0.90',
+                  excerpt: '住宿建筑夜间高负荷常与热水系统和公共区照明常开有关。',
+                  source_type: 'ragflow',
+                },
+              ],
+              data_evidence: [
+                {
+                  title: '异常点与24h基线',
+                  detail: '异常时刻较近24小时基线明显抬升。',
+                  source_type: 'data_signal',
+                },
+              ],
+              provider: 'llm_provider',
+              requested_provider: 'auto',
+              fallback_used: false,
+              knowledge_source: 'ragflow',
+              retrieval_hit_count: 1,
+              latency_ms: 1012,
+              trace_id: 'trace-acceptance-diagnose',
+            },
+          },
+        }),
+      });
+    });
+
     await page.goto('/');
     await page.getByRole('button', { name: '故障监控' }).click();
     await expect(page.locator('.el-table')).toBeVisible();
@@ -30,9 +73,10 @@ test.describe('A8 acceptance chains', () => {
     }
 
     await row.locator('.el-button--danger', { hasText: '诊断' }).click();
-    await expect(page.getByText('智能助手（RAGFlow 工作区）')).toBeVisible();
-    await expect(page.locator('.assistant-embed-frame')).toBeVisible();
-    await expect(page.locator('.assistant-prompt-panel textarea')).toHaveValue(/原因判断、排查步骤、立即动作、预防建议/);
+    await expect(page.locator('.assistant-page .panel-title').filter({ hasText: '智能助手' })).toBeVisible();
+    await expect(page.locator('.assistant-summary-card')).toContainText('当前异常更接近夜间常开负荷与排程未收敛叠加造成的能耗突增');
+    await expect(page.locator('.assistant-section').filter({ hasText: '立即动作' })).toContainText('立即排查空调、新风、热水与公共照明夜间运行状态');
+    await expect(page.locator('.assistant-evidence-item').filter({ hasText: 'RAGFlow' })).toContainText('05-居住与住宿建筑运行场景');
 
     await page.getByRole('button', { name: '故障监控' }).click();
     const detailBtn = page.locator('.el-table__body-wrapper tbody tr').first().locator('.el-button', { hasText: '详情' });

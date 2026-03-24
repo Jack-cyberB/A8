@@ -38,11 +38,12 @@ TIME_FMT = "%Y-%m-%d %H:%M:%S"
 CARBON_FACTOR = 0.785
 SEVERITY_SCORE = {"low": 1, "medium": 2, "high": 3}
 SUPPORTED_ANALYSIS_METRICS = {"electricity"}
-RAGFLOW_DEFAULT_BASE_URL = "http://127.0.0.1:8080/api/v1"
-RAGFLOW_DEFAULT_DATASET_IDS = "ba5f2eac252511f1964d92819ecc816d"
+RAGFLOW_DEFAULT_BASE_URL = "http://127.0.0.1:8088/api/v1"
+RAGFLOW_DEFAULT_DATASET_IDS = ""
+RAGFLOW_DEFAULT_CHAT_ID = ""
 RAGFLOW_DEFAULT_TOP_K = 6
 RAGFLOW_DEFAULT_SIMILARITY_THRESHOLD = 0.2
-RAGFLOW_DEFAULT_VECTOR_SIMILARITY_WEIGHT = 0.3
+RAGFLOW_DEFAULT_VECTOR_SIMILARITY_WEIGHT = 0.45
 RAGFLOW_DEFAULT_TIMEOUT_SEC = 12.0
 
 STATUS_NEW = "new"
@@ -280,10 +281,18 @@ class LLMDiagnoseProvider(DiagnoseProvider):
 
         anomaly_name = str(diag_template.get("anomaly_name", ""))
         evidence = diag_template.get("evidence", [])
+        data_evidence = diag_template.get("data_evidence", [])
         evidence_text = "\n".join(
             [
                 f"- {str(x.get('title', ''))}: {str(x.get('excerpt', ''))}"
                 for x in evidence[:3]
+                if isinstance(x, dict)
+            ]
+        ).strip()
+        data_evidence_text = "\n".join(
+            [
+                f"- {str(x.get('title', ''))}: {str(x.get('detail', ''))}"
+                for x in data_evidence[:6]
                 if isinstance(x, dict)
             ]
         ).strip()
@@ -301,6 +310,7 @@ class LLMDiagnoseProvider(DiagnoseProvider):
             f"异常类型: {anomaly_name}\n"
             f"异常上下文: {json.dumps(context, ensure_ascii=False)}\n"
             f"模板诊断摘要: {diag_template.get('conclusion', '')}\n"
+            f"数据证据:\n{data_evidence_text}\n"
             f"知识证据:\n{evidence_text}\n"
             f"用户问题: {prompt_message}\n"
             "请结合异常发生时间、偏差比例、当前建筑和知识证据，优先输出可执行的排查顺序与风险判断。\n"
@@ -339,6 +349,7 @@ class LLMDiagnoseProvider(DiagnoseProvider):
                     if llm_diag.get(key):
                         merged[key] = llm_diag[key]
                 merged["possible_causes"] = merged.get("causes", [])
+                merged["data_evidence"] = diag_template.get("data_evidence", [])
                 merged["evidence"] = diag_template.get("evidence", [])
                 return {"diagnosis": merged, "context": context}
             except HTTPError as exc:
@@ -553,10 +564,11 @@ class EnergyRepository:
         dataset_ids = [item.strip() for item in dataset_ids_raw.split(",") if item.strip()]
         api_key = os.getenv("RAGFLOW_API_KEY", "").strip()
         web_base_url = (os.getenv("RAGFLOW_WEB_BASE_URL", "").strip() or infer_ragflow_web_base_url(base_url)).rstrip("/")
-        shared_dialog_id = os.getenv("RAGFLOW_SHARED_DIALOG_ID", "").strip()
-        shared_auth = os.getenv("RAGFLOW_SHARED_AUTH", "").strip()
-        shared_from = os.getenv("RAGFLOW_SHARED_FROM", "chat").strip() or "chat"
-        shared_url = os.getenv("RAGFLOW_SHARED_URL", "").strip()
+        chat_id = (
+            os.getenv("RAGFLOW_CHAT_ID", "").strip()
+            or os.getenv("RAGFLOW_SHARED_DIALOG_ID", "").strip()
+            or RAGFLOW_DEFAULT_CHAT_ID
+        )
         try:
             top_k = max(1, int(os.getenv("RAGFLOW_TOP_K", str(RAGFLOW_DEFAULT_TOP_K))))
         except ValueError:
@@ -576,9 +588,7 @@ class EnergyRepository:
 
         enabled = bool(base_url and dataset_ids)
         configured = bool(enabled and api_key)
-        if not shared_url and web_base_url and shared_dialog_id and shared_auth:
-            share_path = "/agent/share" if shared_from == "agent" else "/chat/share"
-            shared_url = f"{web_base_url}{share_path}?{urlencode({'shared_id': shared_dialog_id, 'from': shared_from, 'auth': shared_auth})}"
+        chat_ready = bool(configured and chat_id)
         return {
             "base_url": base_url,
             "web_base_url": web_base_url,
@@ -591,10 +601,9 @@ class EnergyRepository:
             "timeout_sec": timeout_sec,
             "enabled": enabled,
             "configured": configured,
-            "shared_dialog_id": shared_dialog_id,
-            "shared_from": shared_from,
-            "shared_url": shared_url,
-            "assistant_ready": bool(shared_url),
+            "chat_id": chat_id,
+            "chat_ready": chat_ready,
+            "assistant_ready": chat_ready,
         }
 
     def _sanitize_excerpt(self, value: Any, limit: int = 220) -> str:
@@ -622,6 +631,141 @@ class EnergyRepository:
             "section": str(section or "").strip(),
             "excerpt": self._sanitize_excerpt(excerpt),
             "source_type": source_type,
+        }
+
+    def _parse_ragflow_stream_payload(self, raw_text: str) -> list[dict[str, Any]]:
+        events: list[dict[str, Any]] = []
+        for block in re.split(r"\r?\n\r?\n", str(raw_text or "")):
+            if not block.strip():
+                continue
+            for line in block.splitlines():
+                stripped = line.strip()
+                if not stripped.startswith("data:"):
+                    continue
+                payload = stripped[5:].strip()
+                if not payload:
+                    continue
+                try:
+                    event = json.loads(payload)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(event, dict):
+                    events.append(event)
+        return events
+
+    def _ragflow_headers(self) -> dict[str, str]:
+        settings = self._ragflow_settings()
+        headers = {"Content-Type": "application/json"}
+        if settings["api_key"]:
+            headers["Authorization"] = f"Bearer {settings['api_key']}"
+        return headers
+
+    def _parse_ragflow_json_or_stream(self, raw_text: str) -> dict[str, Any]:
+        text = str(raw_text or "").strip()
+        if not text:
+            return {}
+        try:
+            payload = json.loads(text)
+        except json.JSONDecodeError:
+            payload = None
+        if isinstance(payload, dict):
+            return payload
+
+        events = self._parse_ragflow_stream_payload(text)
+        if not events:
+            raise ValueError("RAGFlow returned empty payload")
+
+        for event in reversed(events):
+            if isinstance(event.get("data"), dict):
+                return event
+        return events[-1]
+
+    def _ragflow_request(
+        self,
+        path: str,
+        *,
+        method: str = "POST",
+        payload: dict[str, Any] | None = None,
+        timeout_sec: float | None = None,
+    ) -> dict[str, Any]:
+        settings = self._ragflow_settings()
+        req = Request(
+            f"{settings['base_url']}{path}",
+            data=json.dumps(payload).encode("utf-8") if payload is not None else None,
+            method=method,
+            headers=self._ragflow_headers(),
+        )
+        with urlopen(req, timeout=timeout_sec or settings["timeout_sec"]) as resp:
+            raw = resp.read().decode("utf-8")
+        return self._parse_ragflow_json_or_stream(raw)
+
+    def _ensure_ragflow_session(self, session_id: str | None = None) -> str:
+        if session_id:
+            return session_id
+        settings = self._ragflow_settings()
+        if not settings["chat_ready"]:
+            raise RuntimeError("RAGFlow chat not configured")
+        payload = {
+            "name": f"A8-{dt.datetime.now().strftime('%m%d-%H%M%S')}",
+        }
+        result = self._ragflow_request(
+            f"/chats/{settings['chat_id']}/sessions",
+            method="POST",
+            payload=payload,
+        )
+        data = result.get("data") if isinstance(result, dict) else None
+        if not isinstance(data, dict) or not str(data.get("id", "")).strip():
+            raise RuntimeError("RAGFlow session create failed")
+        return str(data.get("id", "")).strip()
+
+    def _normalize_ragflow_reference(self, reference: dict[str, Any] | None, limit: int = 6) -> list[dict[str, str]]:
+        chunks = reference.get("chunks", []) if isinstance(reference, dict) else []
+        items: list[dict[str, str]] = []
+        for idx, chunk in enumerate(chunks[:limit], start=1):
+            if not isinstance(chunk, dict):
+                continue
+            similarity = chunk.get("similarity")
+            section = ""
+            if similarity is not None:
+                try:
+                    section = f"相似度 {float(similarity):.2f}"
+                except (TypeError, ValueError):
+                    section = ""
+            items.append(
+                self._normalize_evidence_item(
+                    chunk_id=chunk.get("id") or f"ragflow-chat-{idx}",
+                    title=chunk.get("document_name") or "RAGFlow 文档",
+                    section=section,
+                    excerpt=chunk.get("content") or chunk.get("highlight") or "",
+                    source_type="ragflow",
+                )
+            )
+        return items
+
+    def _ragflow_chat_completion(self, question: str, session_id: str | None = None) -> dict[str, Any]:
+        settings = self._ragflow_settings()
+        if not settings["chat_ready"]:
+            raise RuntimeError("RAGFlow chat not configured")
+
+        ensured_session_id = self._ensure_ragflow_session(session_id)
+        body: dict[str, Any] = {
+            "question": question,
+            "stream": False,
+            "session_id": ensured_session_id,
+        }
+        event = self._ragflow_request(
+            f"/chats/{settings['chat_id']}/completions",
+            method="POST",
+            payload=body,
+        )
+        latest = event.get("data") if isinstance(event.get("data"), dict) else event
+        if not isinstance(latest, dict):
+            raise RuntimeError("RAGFlow chat returned no payload")
+        return {
+            "answer": str(latest.get("answer", "")).strip(),
+            "reference": latest.get("reference") if isinstance(latest.get("reference"), dict) else {},
+            "session_id": str(latest.get("session_id", "")).strip() or ensured_session_id,
+            "message_id": str(latest.get("id", "")).strip(),
         }
 
     def _retrieve_ragflow_knowledge(self, query_text: str, limit: int = 3) -> dict[str, Any]:
@@ -657,57 +801,44 @@ class EnergyRepository:
             with urlopen(req, timeout=settings["timeout_sec"]) as resp:
                 payload = json.loads(resp.read().decode("utf-8"))
         except HTTPError as exc:
-            return {
-                "items": [],
-                "knowledge_source": "none",
-                "retrieval_hit_count": 0,
-                "retrieval_error_type": "http_error",
-            }
+            payload = None
+            retrieval_error_type = "http_error"
         except (URLError, TimeoutError, socket.timeout):
-            return {
-                "items": [],
-                "knowledge_source": "none",
-                "retrieval_hit_count": 0,
-                "retrieval_error_type": "timeout",
-            }
+            payload = None
+            retrieval_error_type = "timeout"
         except json.JSONDecodeError:
-            return {
-                "items": [],
-                "knowledge_source": "none",
-                "retrieval_hit_count": 0,
-                "retrieval_error_type": "parse_error",
-            }
+            payload = None
+            retrieval_error_type = "parse_error"
+        else:
+            retrieval_error_type = ""
 
-        if not isinstance(payload, dict) or payload.get("code") not in (0, None):
-            return {
-                "items": [],
-                "knowledge_source": "none",
-                "retrieval_hit_count": 0,
-                "retrieval_error_type": "http_error",
-            }
+        if payload is not None and (not isinstance(payload, dict) or payload.get("code") not in (0, None)):
+            retrieval_error_type = "http_error"
+            payload = None
 
-        data = payload.get("data") or {}
-        chunks = data.get("chunks", []) if isinstance(data, dict) else []
         items: list[dict[str, str]] = []
-        for idx, chunk in enumerate(chunks[:limit], start=1):
-            if not isinstance(chunk, dict):
-                continue
-            similarity = chunk.get("similarity")
-            section = chunk.get("section") or chunk.get("important_keywords") or ""
-            if not section and similarity is not None:
-                try:
-                    section = f"相似度 {float(similarity):.2f}"
-                except (TypeError, ValueError):
-                    section = ""
-            items.append(
-                self._normalize_evidence_item(
-                    chunk_id=chunk.get("id") or chunk.get("chunk_id") or f"ragflow-{idx}",
-                    title=chunk.get("document_name") or chunk.get("docnm_kwd") or chunk.get("document_id") or "RAGFlow 片段",
-                    section=section or chunk.get("dataset_id") or "",
-                    excerpt=chunk.get("content_with_weight") or chunk.get("content") or chunk.get("text") or "",
-                    source_type="ragflow",
+        if payload is not None:
+            data = payload.get("data") or {}
+            chunks = data.get("chunks", []) if isinstance(data, dict) else []
+            for idx, chunk in enumerate(chunks[:limit], start=1):
+                if not isinstance(chunk, dict):
+                    continue
+                similarity = chunk.get("similarity")
+                section = chunk.get("section") or chunk.get("important_keywords") or ""
+                if not section and similarity is not None:
+                    try:
+                        section = f"相似度 {float(similarity):.2f}"
+                    except (TypeError, ValueError):
+                        section = ""
+                items.append(
+                    self._normalize_evidence_item(
+                        chunk_id=chunk.get("id") or chunk.get("chunk_id") or f"ragflow-{idx}",
+                        title=chunk.get("document_name") or chunk.get("docnm_kwd") or chunk.get("document_id") or "RAGFlow 片段",
+                        section=section or chunk.get("dataset_id") or "",
+                        excerpt=chunk.get("content_with_weight") or chunk.get("content") or chunk.get("text") or "",
+                        source_type="ragflow",
+                    )
                 )
-            )
 
         if items:
             return {
@@ -715,12 +846,57 @@ class EnergyRepository:
                 "knowledge_source": "ragflow",
                 "retrieval_hit_count": len(items),
                 "retrieval_error_type": "",
+                "ragflow_session_id": "",
             }
+
+        try:
+            chat_result = self._ragflow_chat_completion(query_text)
+            chat_items = self._normalize_ragflow_reference(chat_result.get("reference"), limit=limit)
+            if chat_items:
+                return {
+                    "items": chat_items,
+                    "knowledge_source": "ragflow",
+                    "retrieval_hit_count": len(chat_items),
+                    "retrieval_error_type": retrieval_error_type or "retrieval_fallback_chat",
+                    "ragflow_session_id": str(chat_result.get("session_id", "")).strip(),
+                }
+        except HTTPError:
+            if not retrieval_error_type:
+                retrieval_error_type = "chat_http_error"
+        except (URLError, TimeoutError, socket.timeout):
+            if not retrieval_error_type:
+                retrieval_error_type = "chat_timeout"
+        except Exception:
+            if not retrieval_error_type:
+                retrieval_error_type = "chat_error"
+
         return {
             "items": [],
             "knowledge_source": "none",
             "retrieval_hit_count": 0,
-            "retrieval_error_type": "empty_result",
+            "retrieval_error_type": retrieval_error_type or "empty_result",
+            "ragflow_session_id": "",
+        }
+
+    def ask_ragflow_chat(self, payload: dict[str, Any]) -> dict[str, Any]:
+        question = str(payload.get("question", "")).strip()
+        if not question:
+            raise ValueError("question is required")
+
+        session_id = str(payload.get("session_id", "")).strip() or None
+        started = time.perf_counter()
+        result = self._ragflow_chat_completion(question, session_id=session_id)
+        latency_ms = int((time.perf_counter() - started) * 1000)
+        references = self._normalize_ragflow_reference(result.get("reference"), limit=6)
+        return {
+            "answer": str(result.get("answer", "")).strip(),
+            "session_id": str(result.get("session_id", "")).strip(),
+            "message_id": str(result.get("message_id", "")).strip(),
+            "chat_id": self._ragflow_settings().get("chat_id", ""),
+            "references": references,
+            "knowledge_source": "ragflow",
+            "provider": "ragflow_chat",
+            "latency_ms": latency_ms,
         }
 
     def _build_diagnose_knowledge_query(
@@ -730,12 +906,16 @@ class EnergyRepository:
         context: dict[str, Any] | None,
     ) -> str:
         context = context or {}
+        tags = "、".join([str(item).strip() for item in (context.get("phenomenon_tags") or [])[:4] if str(item).strip()])
+        systems = "、".join([str(item).strip() for item in (context.get("likely_systems") or [])[:4] if str(item).strip()])
         parts = [
             f"异常类型：{anomaly_name}",
             f"建筑类型：{context.get('building_type') or ''}",
             f"建筑名称：{context.get('building_name') or ''}",
-            f"发生时间：{to_iso(context['timestamp']) if context.get('timestamp') else ''}",
+            f"发生时间：{context.get('timestamp') or ''}",
             f"偏差比例：{context.get('deviation_pct') or ''}",
+            f"关键现象：{tags}",
+            f"可能设备系统：{systems}",
             f"用户问题：{message or '请给出诊断与运维建议'}",
         ]
         return "\n".join([part for part in parts if str(part).strip()])
@@ -1255,9 +1435,8 @@ class EnergyRepository:
                 "web_base_url": ragflow["web_base_url"],
                 "dataset_count": ragflow["dataset_count"],
                 "enabled": ragflow["enabled"],
-                "shared_dialog_id": ragflow["shared_dialog_id"],
-                "shared_from": ragflow["shared_from"],
-                "shared_url": ragflow["shared_url"],
+                "chat_ready": ragflow["chat_ready"],
+                "chat_id": ragflow["chat_id"],
                 "assistant_ready": ragflow["assistant_ready"],
             },
             "recent_regression": regression,
@@ -2290,12 +2469,14 @@ class EnergyRepository:
                 "knowledge_source": "local",
                 "retrieval_hit_count": len(local_items),
                 "retrieval_error_type": ragflow_result.get("retrieval_error_type", ""),
+                "ragflow_session_id": ragflow_result.get("ragflow_session_id", ""),
             }
         return {
             "items": [],
             "knowledge_source": "none",
             "retrieval_hit_count": 0,
             "retrieval_error_type": ragflow_result.get("retrieval_error_type", ""),
+            "ragflow_session_id": ragflow_result.get("ragflow_session_id", ""),
         }
 
     def _resolve_context(self, payload: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None]:
@@ -2327,17 +2508,215 @@ class EnergyRepository:
 
         return context, building_id
 
+    def _diagnose_likely_systems(self, building_type: str, anomaly_type: str) -> list[str]:
+        systems: list[str] = []
+        anomaly_map = {
+            "anomaly_spike": ["空调系统", "照明系统", "动力设备"],
+            "anomaly_off_hours_load": ["照明系统", "新风系统", "待机设备", "热水设备"],
+            "anomaly_sustained_high_load": ["空调主机", "循环水泵", "新风机组", "连续运行设备"],
+        }
+        building_text = str(building_type or "").lower()
+        systems.extend(anomaly_map.get(anomaly_type, ["空调系统", "照明系统", "重点用能设备"]))
+        if "lodging" in building_text or "residential" in building_text:
+            systems.extend(["热水系统", "客房末端设备"])
+        elif "office" in building_text or "education" in building_text:
+            systems.extend(["办公插座负荷", "教室末端空调"])
+        elif "parking" in building_text or "garage" in building_text:
+            systems.extend(["通风排烟系统", "照明系统"])
+        seen: set[str] = set()
+        deduped: list[str] = []
+        for item in systems:
+            if item and item not in seen:
+                deduped.append(item)
+                seen.add(item)
+        return deduped[:5]
+
+    def _build_diagnose_context(self, payload: dict[str, Any]) -> tuple[dict[str, Any], str, dict[str, Any] | None]:
+        context, fallback_building_id = self._resolve_context(payload)
+        message = str(payload.get("message", "")).strip()
+        anomaly_type = str(payload.get("anomaly_type", "")).strip() or (context["anomaly_type"] if context else self._type_from_keywords(message))
+        building_id = (context["building_id"] if context else fallback_building_id) or None
+        event_time = context["timestamp"] if context else parse_time(str(payload.get("timestamp", "")).strip() or None)
+        building_meta = self.buildings_meta.get(building_id or "", {})
+        building_name = (context["building_name"] if context else None) or building_meta.get("building_name") or "当前建筑"
+        building_type = (context["building_type"] if context else None) or building_meta.get("building_type") or "portfolio"
+        detail = self.query_anomaly_detail(int(context["anomaly_id"])) if context else None
+
+        start_time = parse_time(str(payload.get("start_time", "")).strip() or None)
+        end_time = parse_time(str(payload.get("end_time", "")).strip() or None)
+        analysis_payload = {
+            "building_id": building_id,
+            "metric_type": "electricity",
+            "start_time": to_iso(start_time) if start_time else None,
+            "end_time": to_iso(end_time) if end_time else None,
+        }
+        analysis_context = self._build_analysis_context(analysis_payload)
+        summary = analysis_context.get("summary") or {}
+        insights = analysis_context.get("insights") or {}
+        distribution = analysis_context.get("distribution") or {}
+        compare = analysis_context.get("compare") or {}
+
+        building_rows = self.by_building.get(building_id or "", [])
+        before_window: list[dict[str, Any]] = []
+        after_window: list[dict[str, Any]] = []
+        same_hour_rows: list[dict[str, Any]] = []
+        current_temp = None
+        temp_band = "normal"
+        if event_time and building_rows:
+            before_start = event_time - dt.timedelta(hours=24)
+            after_end = event_time + dt.timedelta(hours=24)
+            before_window = [row for row in building_rows if before_start <= row["timestamp"] < event_time]
+            after_window = [row for row in building_rows if event_time < row["timestamp"] <= after_end]
+            same_hour_rows = [
+                row
+                for row in building_rows
+                if row["timestamp"] < event_time and row["timestamp"].hour == event_time.hour
+            ][-7:]
+            site_id = self.building_site_map.get(building_id or "")
+            weather_lookup = self.weather_by_site.get(site_id or "", {})
+            weather_point = weather_lookup.get(event_time, {})
+            current_temp = weather_point.get("temperature_c")
+            temps = sorted(
+                float(item["temperature_c"])
+                for item in weather_lookup.values()
+                if item.get("temperature_c") is not None
+            )
+            if current_temp is not None and temps:
+                hot_threshold = temps[min(len(temps) - 1, max(0, int(len(temps) * 0.8)))]
+                cold_threshold = temps[min(len(temps) - 1, max(0, int(len(temps) * 0.2)))]
+                if current_temp >= hot_threshold:
+                    temp_band = "hot"
+                elif current_temp <= cold_threshold:
+                    temp_band = "cold"
+
+        before_stats = self._summarize_values([float(row["electricity_kwh"]) for row in before_window])
+        after_stats = self._summarize_values([float(row["electricity_kwh"]) for row in after_window])
+        same_hour_stats = self._summarize_values([float(row["electricity_kwh"]) for row in same_hour_rows])
+        peer_group = compare.get("peer_group") or {}
+        trend_findings = insights.get("trend_findings") or []
+        weather_findings = insights.get("weather_findings") or []
+        compare_findings = insights.get("compare_findings") or []
+        night_base = distribution.get("night_base_load") or {}
+        phenomenon_tags = []
+        if context:
+            phenomenon_tags.append(str(detail["anomaly"]["anomaly_name"]) if detail else anomaly_type)
+        if before_stats.get("avg"):
+            deviation_vs_before = ((float(context["electricity_kwh"]) - before_stats["avg"]) / before_stats["avg"] * 100) if context and before_stats["avg"] else 0.0
+            if abs(deviation_vs_before) >= 25:
+                phenomenon_tags.append("负荷明显偏离近24小时基线")
+        if float(night_base.get("ratio_vs_avg_pct", 0) or 0) >= 65:
+            phenomenon_tags.append("夜间基线偏高")
+        if any("非工作时段" in f"{item.get('title', '')}{item.get('detail', '')}" for item in trend_findings if isinstance(item, dict)):
+            phenomenon_tags.append("非工作时段负荷不降")
+        if any("温度" in f"{item.get('title', '')}{item.get('detail', '')}" for item in weather_findings if isinstance(item, dict)):
+            phenomenon_tags.append("天气联动明显")
+        if any("同类" in f"{item.get('title', '')}{item.get('detail', '')}" for item in compare_findings if isinstance(item, dict)):
+            phenomenon_tags.append("同类对照存在差异")
+        seen_tags: set[str] = set()
+        phenomenon_tags = [item for item in phenomenon_tags if item and not (item in seen_tags or seen_tags.add(item))]
+
+        data_evidence: list[dict[str, Any]] = []
+        if context and detail:
+            data_evidence.append(
+                {
+                    "title": "异常点与24h基线",
+                    "detail": f"异常时刻负荷 {round(float(context['electricity_kwh']), 2)} kWh，24h基线均值 {detail['baseline_window']['avg_kwh']} kWh，偏差 {round(float(context['deviation_pct']), 2)}%。",
+                    "source_type": "data_signal",
+                }
+            )
+        if same_hour_stats.get("avg"):
+            data_evidence.append(
+                {
+                    "title": "同小时历史基线",
+                    "detail": f"近7个同小时均值 {same_hour_stats['avg']} kWh，可用于排除单纯时段性波动。",
+                    "source_type": "data_signal",
+                }
+            )
+        if before_stats.get("avg") or after_stats.get("avg"):
+            data_evidence.append(
+                {
+                    "title": "异常前后窗口",
+                    "detail": f"异常前24h均值 {before_stats.get('avg', 0)} kWh，异常后24h均值 {after_stats.get('avg', 0)} kWh。",
+                    "source_type": "data_signal",
+                }
+            )
+        if peer_group:
+            data_evidence.append(
+                {
+                    "title": "同类建筑对照",
+                    "detail": f"同类样本 {peer_group.get('peer_count', 0)} 栋，偏离同类均值 {peer_group.get('gap_pct', 0)}%，同类百分位 {peer_group.get('peer_percentile', 0)}。",
+                    "source_type": "data_compare",
+                }
+            )
+        if current_temp is not None:
+            data_evidence.append(
+                {
+                    "title": "天气条件",
+                    "detail": f"异常时段温度约 {round(float(current_temp), 1)}°C，当前判定为 {('高温区间' if temp_band == 'hot' else '低温区间' if temp_band == 'cold' else '常规温度区间')}。",
+                    "source_type": "data_weather",
+                }
+            )
+        if detail:
+            processing = detail.get("processing_summary") or {}
+            data_evidence.append(
+                {
+                    "title": "处理闭环状态",
+                    "detail": f"当前状态 {processing.get('latest_status', '-') }，历史处理 {processing.get('history_count', 0)} 次，处理人 {processing.get('assignee') or '未指派'}。",
+                    "source_type": "ops_status",
+                }
+            )
+
+        return (
+            {
+                "anomaly_id": context["anomaly_id"] if context else None,
+                "building_id": building_id,
+                "building_name": building_name,
+                "building_type": building_type,
+                "timestamp": to_iso(event_time) if event_time else None,
+                "anomaly_type": anomaly_type,
+                "anomaly_name": (detail or {}).get("anomaly", {}).get("anomaly_name") if detail else "",
+                "status": (detail or {}).get("processing_summary", {}).get("latest_status") if detail else None,
+                "deviation_pct": round(float(context["deviation_pct"]), 2) if context else 0.0,
+                "value_kwh": round(float(context["electricity_kwh"]), 2) if context else 0.0,
+                "analysis_scope": {
+                    "start_time": analysis_context.get("start_time"),
+                    "end_time": analysis_context.get("end_time"),
+                    "metric_type": analysis_context.get("metric_type"),
+                },
+                "window_context": {
+                    "baseline_24h_avg_kwh": (detail or {}).get("baseline_window", {}).get("avg_kwh"),
+                    "same_hour_avg_kwh": same_hour_stats.get("avg", 0.0),
+                    "before_24h_avg_kwh": before_stats.get("avg", 0.0),
+                    "after_24h_avg_kwh": after_stats.get("avg", 0.0),
+                    "point_count": (analysis_context.get("summary") or {}).get("point_count", 0),
+                },
+                "analysis_background": {
+                    "trend_findings": trend_findings[:3],
+                    "weather_findings": weather_findings[:3],
+                    "compare_findings": compare_findings[:3],
+                    "night_base_load": night_base,
+                },
+                "peer_context": peer_group,
+                "weather_context": {
+                    "temperature_c": current_temp,
+                    "temperature_band": temp_band,
+                    "temperature_correlation": (analysis_context.get("trend") or {}).get("summary", {}).get("temperature_correlation"),
+                },
+                "operations_context": {
+                    "processing_summary": (detail or {}).get("processing_summary"),
+                    "postmortem_note": (detail or {}).get("postmortem_note"),
+                },
+                "phenomenon_tags": phenomenon_tags[:6],
+                "likely_systems": self._diagnose_likely_systems(building_type, anomaly_type),
+                "data_evidence": data_evidence,
+            },
+            anomaly_type,
+            context,
+        )
+
     def _diagnose_by_template(self, payload: dict[str, Any]) -> dict[str, Any]:
         message = str(payload.get("message", "")).strip()
-        anomaly_type = str(payload.get("anomaly_type", "")).strip() or None
-        context, fallback_building_id = self._resolve_context(payload)
-
-        if anomaly_type:
-            chosen_type = anomaly_type
-        elif context:
-            chosen_type = context["anomaly_type"]
-        else:
-            chosen_type = self._type_from_keywords(message)
+        diagnose_context, chosen_type, raw_context = self._build_diagnose_context(payload)
 
         knowledge = self.dict_data.get(chosen_type, self.dict_data.get("anomaly_spike", {}))
         anomaly_name = knowledge.get("name", chosen_type)
@@ -2348,15 +2727,15 @@ class EnergyRepository:
             chosen_type,
             message,
             limit=3,
-            query_text=self._build_diagnose_knowledge_query(anomaly_name, message, context),
+            query_text=self._build_diagnose_knowledge_query(anomaly_name, message, diagnose_context),
         )
         evidence = retrieval["items"]
 
-        if context:
+        if raw_context:
             conclusion = (
-                f"{context['building_name']} 在 {to_iso(context['timestamp'])} 出现{anomaly_name}，"
-                f"实测 {context['electricity_kwh']} kWh，历史均值 {context['mean_kwh']} kWh，"
-                f"偏差 {context['deviation_pct']}%。"
+                f"{diagnose_context['building_name']} 在 {diagnose_context['timestamp']} 出现{anomaly_name}，"
+                f"异常点负荷 {diagnose_context['value_kwh']} kWh，"
+                f"较24小时基线 {diagnose_context['window_context'].get('baseline_24h_avg_kwh') or raw_context['mean_kwh']} kWh 偏离 {diagnose_context['deviation_pct']}%。"
             )
         else:
             conclusion = (
@@ -2364,9 +2743,9 @@ class EnergyRepository:
                 "建议先执行基础排查步骤，再结合实时曲线确认是否恢复。"
             )
 
-        if context and evidence:
+        if raw_context and evidence:
             confidence = 0.85
-        elif context:
+        elif raw_context:
             confidence = 0.72
         elif evidence:
             confidence = 0.58
@@ -2386,18 +2765,16 @@ class EnergyRepository:
                 "steps": steps,
                 "prevention": prevention,
                 "recommended_actions": recommended_actions,
+                "data_evidence": diagnose_context.get("data_evidence", []),
                 "evidence": evidence,
                 "confidence": round(confidence, 2),
                 "risk_level": risk_level,
                 "knowledge_source": retrieval["knowledge_source"],
                 "retrieval_hit_count": retrieval["retrieval_hit_count"],
                 "retrieval_error_type": retrieval["retrieval_error_type"],
+                "ragflow_session_id": retrieval.get("ragflow_session_id", ""),
             },
-            "context": {
-                "anomaly_id": context["anomaly_id"] if context else None,
-                "building_id": context["building_id"] if context else fallback_building_id,
-                "timestamp": to_iso(context["timestamp"]) if context else None,
-            },
+            "context": diagnose_context,
         }
 
     def _build_analysis_context(
@@ -2636,6 +3013,7 @@ class EnergyRepository:
                 "knowledge_source": retrieval["knowledge_source"],
                 "retrieval_hit_count": retrieval["retrieval_hit_count"],
                 "retrieval_error_type": retrieval["retrieval_error_type"],
+                "ragflow_session_id": retrieval.get("ragflow_session_id", ""),
             },
             "context": context,
         }
@@ -2948,6 +3326,18 @@ class Handler(BaseHTTPRequestHandler):
                 result = REPO.analyze(payload)
             except ValueError as exc:
                 self._json({"code": 400, "message": str(exc), "data": None}, HTTPStatus.BAD_REQUEST)
+                return
+            self._json({"code": 0, "message": "ok", "data": result})
+            return
+
+        if parsed.path == "/api/ragflow/chat":
+            try:
+                result = REPO.ask_ragflow_chat(payload)
+            except ValueError as exc:
+                self._json({"code": 400, "message": str(exc), "data": None}, HTTPStatus.BAD_REQUEST)
+                return
+            except Exception as exc:
+                self._json({"code": 502, "message": str(exc), "data": None}, HTTPStatus.BAD_GATEWAY)
                 return
             self._json({"code": 0, "message": "ok", "data": result})
             return

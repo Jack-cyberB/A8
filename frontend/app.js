@@ -101,6 +101,15 @@ createApp({
       chatInput: '',
       assistantPromptDraft: '',
       assistantPromptKind: 'analysis',
+      assistantMode: 'knowledge',
+      assistantKnowledgeInput: '',
+      assistantChat: {
+        loading: false,
+        sessionId: '',
+        error: '',
+        lastLatencyMs: 0,
+        messages: [],
+      },
       aiProvider: 'auto',
       aiStats: {
         windowHours: 24,
@@ -126,9 +135,8 @@ createApp({
         ragflowConfigured: false,
         ragflowEnabled: false,
         ragflowDatasetCount: 0,
-        ragflowShareUrl: '',
-        ragflowShareReady: false,
-        ragflowSharedDialogId: '',
+        ragflowChatReady: false,
+        ragflowChatId: '',
       },
       diagnosis: null,
       diagnosisFeedbackLabel: '',
@@ -264,13 +272,46 @@ createApp({
       return '请先在能耗分析页确认建筑和时间范围，再点击“AI 分析”进入这里生成完整结论。页面筛选和刷新不会自动消耗额度。';
     },
     aiAvailabilityText() {
-      if (this.health.aiConfigured && this.health.ragflowConfigured) {
-        return `DeepSeek 与 RAGFlow 已就绪。当前接入 ${this.health.ragflowDatasetCount || 0} 个知识库数据集，生成时会优先引用检索证据。`;
+      if (this.health.aiConfigured && this.health.ragflowConfigured && this.health.ragflowChatReady) {
+        return `DeepSeek 与 RAGFlow 已就绪。当前接入 ${this.health.ragflowDatasetCount || 0} 个知识库数据集，知识问答走本地 TEI 检索，诊断与分析会优先引用召回证据。`;
       }
       if (this.health.aiConfigured) {
-        return 'DeepSeek 已就绪。当前知识检索未完全接入 RAGFlow 时，会自动回退到本地知识兜底。';
+        return 'DeepSeek 已就绪。当前知识检索若未完全接入 RAGFlow，会自动回退到本地知识兜底，不影响主流程演示。';
       }
       return '当前环境尚未配置 DeepSeek API Key，点击后会自动使用模板兜底，不会影响主流程。';
+    },
+    ragflowStatusText() {
+      if (this.health.ragflowConfigured && this.health.ragflowChatReady) {
+        return `RAGFlow 知识问答已就绪 · ${this.health.ragflowDatasetCount || 0} 个数据集`;
+      }
+      if (this.health.ragflowConfigured) {
+        return `RAGFlow 检索已配置 · 会话待就绪`;
+      }
+      return 'RAGFlow 未配置';
+    },
+    assistantKnowledgeStarters() {
+      const scope = this.analysisInsights.scope_summary || {};
+      const building = scope.building_name || '当前建筑';
+      const anomaly = this.selectedAnomaly;
+      return [
+        {
+          key: 'analysis-focus',
+          title: '当前分析解读',
+          question: `结合${building}在${this.currentAnalysisScopeText()}下的表现，解释夜间基线、非工作时段负荷和节能优化上最该关注什么。`,
+        },
+        {
+          key: 'cooling-check',
+          title: '空调运行排查',
+          question: `如果${building}在高温白天空调用电偏高，运维上应优先排查哪些系统与控制策略？`,
+        },
+        {
+          key: 'anomaly-focus',
+          title: '当前异常知识追问',
+          question: anomaly
+            ? `针对${anomaly.building_type || '当前'}建筑出现“${anomaly.anomaly_name}”，从运维常识看优先排查哪些设备系统？为什么这种现象会发生？`
+            : `针对${building}出现异常负荷波动时，通常应从哪些设备系统和控制策略开始排查？`,
+        },
+      ];
     },
     humanizeDegradeMessage(message) {
       const raw = String(message || '').trim();
@@ -334,14 +375,36 @@ createApp({
       const rangeText = this.isCompleteRange(this.filters.range) ? `${this.filters.range[0]} ~ ${this.filters.range[1]}` : '全量时间范围';
       return `${this.currentMetricLabel()} | ${buildingText} | ${rangeText}`;
     },
-    assistantPromptTitle() {
-      return this.assistantPromptKind === 'anomaly' ? '异常诊断提问草稿' : '当前分析提问草稿';
-    },
-    assistantHintText() {
-      if (this.health.ragflowShareReady) {
-        return '右侧已经接入 RAGFlow 共享助手。左侧问题会在点击按钮后自动复制，你直接粘贴到右侧输入框里就能开始问答。';
+    switchAssistantMode(mode) {
+      this.assistantMode = mode;
+      if (mode === 'knowledge' && !String(this.assistantKnowledgeInput || '').trim()) {
+        this.assistantKnowledgeInput = this.buildKnowledgeQuestion(this.selectedAnomaly ? 'anomaly' : 'analysis');
       }
-      return '当前还没有拿到可嵌入的 RAGFlow 共享地址，你可以先复制这里的问题，到 RAGFlow 网页聊天页继续使用。';
+    },
+    buildKnowledgeQuestion(kind = 'analysis') {
+      if (kind === 'anomaly' && this.selectedAnomaly) {
+        return `针对${this.selectedAnomaly.building_type || '当前'}建筑出现“${this.selectedAnomaly.anomaly_name}”，从运维常识看优先排查哪些设备系统？为什么这种现象会发生？`;
+      }
+      const scope = this.analysisInsights.scope_summary || {};
+      return `结合${scope.building_name || '当前建筑'}在${this.currentAnalysisScopeText()}下的能耗表现，解释夜间基线、非工作时段负荷和节能优化上最该关注什么。`;
+    },
+    fillKnowledgeQuestion(kind = 'analysis') {
+      this.assistantKnowledgeInput = this.buildKnowledgeQuestion(kind);
+    },
+    assistantTaskTitle() {
+      return this.assistantPromptKind === 'anomaly' ? '异常诊断结果' : '当前分析结论';
+    },
+    assistantTaskHint() {
+      if (this.assistantPromptKind === 'anomaly') {
+        return '这里展示 A8 基于结构化异常事件、窗口数据、同类对照、天气条件和知识证据生成的诊断结果。';
+      }
+      return '这里展示 A8 基于当前分析范围、趋势、结构、同类对比和知识证据生成的分析结论。';
+    },
+    diagnosisDataEvidence() {
+      return Array.isArray(this.diagnosis?.data_evidence) ? this.diagnosis.data_evidence : [];
+    },
+    diagnosisKnowledgeEvidence() {
+      return Array.isArray(this.diagnosis?.evidence) ? this.diagnosis.evidence : [];
     },
     analysisBulletText(items, emptyText) {
       if (!Array.isArray(items) || !items.length) return emptyText;
@@ -402,43 +465,90 @@ createApp({
       this.assistantPromptKind = kind;
       const prompt = kind === 'anomaly' ? this.buildAnomalyAssistantPrompt(row) : this.buildAnalysisAssistantPrompt();
       this.assistantPromptDraft = prompt;
-      this.chatInput = prompt;
+      if (!String(this.assistantKnowledgeInput || '').trim()) {
+        this.assistantKnowledgeInput = this.buildKnowledgeQuestion(kind);
+      }
       return prompt;
     },
-    async copyAssistantPrompt(options = {}) {
+    newAssistantMessage(role, content = '') {
+      return {
+        id: `${role}-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`,
+        role,
+        content,
+        pending: false,
+        references: [],
+        knowledgeSource: role === 'assistant' ? 'RAGFlow' : '',
+      };
+    },
+    normalizeAssistantReferences(reference = {}) {
+      const chunks = Array.isArray(reference?.chunks) ? reference.chunks : [];
+      const docAggs = Array.isArray(reference?.doc_aggs) ? reference.doc_aggs : [];
+      return chunks.slice(0, 6).map((item, index) => {
+        const docAgg = docAggs.find((doc) => doc.doc_id === item.document_id);
+        return {
+          id: item.id || `${item.document_id || 'doc'}-${index}`,
+          title: item.document_name || docAgg?.doc_name || '知识片段',
+          excerpt: String(item.content || '').replace(/\s+/g, ' ').trim(),
+          similarity: Number(item.similarity || 0),
+          sourceType: item.source_type || 'ragflow',
+        };
+      });
+    },
+    resetAssistantConversation(options = {}) {
+      const { keepDraft = true, silent = false } = options;
+      this.assistantChat.sessionId = '';
+      this.assistantChat.error = '';
+      this.assistantChat.lastLatencyMs = 0;
+      this.assistantChat.messages = [];
+      if (!keepDraft) this.assistantPromptDraft = '';
+      if (!silent) this.$message.success('已创建新的知识问答会话');
+    },
+    async sendAssistantPrompt(options = {}) {
       const { silent = false } = options;
-      const text = String(this.assistantPromptDraft || '').trim();
-      if (!text) {
-        if (!silent) this.$message.warning('当前没有可复制的问题草稿');
+      const question = String(this.assistantKnowledgeInput || '').trim();
+      if (!question) {
+        if (!silent) this.$message.warning('请先输入知识问答问题');
         return false;
       }
+      if (this.assistantChat.loading) return false;
+
+      this.assistantChat.loading = true;
+      this.assistantChat.error = '';
+      const userMessage = this.newAssistantMessage('user', question);
+      const assistantMessage = this.newAssistantMessage('assistant', '');
+      assistantMessage.pending = true;
+      assistantMessage.content = 'RAGFlow 正在检索并生成，请稍候...';
+      this.assistantChat.messages.push(userMessage, assistantMessage);
+
+      const startedAt = performance.now();
       try {
-        if (navigator.clipboard?.writeText) {
-          await navigator.clipboard.writeText(text);
-        } else {
-          const textarea = document.createElement('textarea');
-          textarea.value = text;
-          textarea.style.position = 'fixed';
-          textarea.style.opacity = '0';
-          document.body.appendChild(textarea);
-          textarea.select();
-          document.execCommand('copy');
-          document.body.removeChild(textarea);
-        }
-        if (!silent) this.$message.success('已复制提问草稿，可直接粘贴到右侧 RAGFlow');
+        const data = await this.fetchJson(`${API_BASE}/api/ragflow/chat`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            question,
+            session_id: this.assistantChat.sessionId || null,
+          }),
+        });
+        assistantMessage.pending = false;
+        assistantMessage.content = data.answer || 'RAGFlow 已返回，但当前没有可展示的文本结果。';
+        assistantMessage.references = Array.isArray(data.references) ? data.references : [];
+        assistantMessage.knowledgeSource = 'RAGFlow';
+        this.assistantChat.sessionId = data.session_id || this.assistantChat.sessionId;
+        this.assistantChat.lastLatencyMs = Number(data.latency_ms || Math.round(performance.now() - startedAt));
         return true;
       } catch (err) {
         console.error(err);
-        if (!silent) this.$message.error('自动复制失败，请手动复制左侧内容');
+        assistantMessage.pending = false;
+        assistantMessage.content = 'RAGFlow 当前未能完成回答，请稍后重试。若持续失败，请先检查本地知识库和会话配置。';
+        assistantMessage.references = [];
+        assistantMessage.knowledgeSource = 'error';
+        this.assistantChat.error = `发送失败：${err.message || '未知错误'}`;
+        if (!silent) this.$message.error(this.assistantChat.error);
         return false;
+      } finally {
+        this.assistantChat.loading = false;
       }
-    },
-    openRagflowAssistant() {
-      if (!this.health.ragflowShareUrl) {
-        this.$message.warning('当前未配置 RAGFlow 共享地址');
-        return;
-      }
-      window.open(this.health.ragflowShareUrl, '_blank', 'noopener');
     },
     isCompleteRange(range) {
       return Array.isArray(range) && range.length === 2 && !!range[0] && !!range[1];
@@ -942,9 +1052,8 @@ createApp({
         this.health.ragflowConfigured = !!data.ragflow?.configured;
         this.health.ragflowEnabled = !!data.ragflow?.enabled;
         this.health.ragflowDatasetCount = data.ragflow?.dataset_count ?? 0;
-        this.health.ragflowShareUrl = data.ragflow?.shared_url || '';
-        this.health.ragflowShareReady = !!data.ragflow?.assistant_ready;
-        this.health.ragflowSharedDialogId = data.ragflow?.shared_dialog_id || '';
+        this.health.ragflowChatReady = !!(data.ragflow?.chat_ready ?? data.ragflow?.assistant_ready);
+        this.health.ragflowChatId = data.ragflow?.chat_id || '';
       } catch (err) {
         console.error(err);
         this.health.status = 'unknown';
@@ -954,9 +1063,8 @@ createApp({
         this.health.ragflowConfigured = false;
         this.health.ragflowEnabled = false;
         this.health.ragflowDatasetCount = 0;
-        this.health.ragflowShareUrl = '';
-        this.health.ragflowShareReady = false;
-        this.health.ragflowSharedDialogId = '';
+        this.health.ragflowChatReady = false;
+        this.health.ragflowChatId = '';
       }
     },
     async exportAnomalies() {
@@ -1102,8 +1210,11 @@ createApp({
     async diagnoseFromAnomaly(row) {
       this.selectedAnomaly = row;
       this.prepareAssistantPrompt('anomaly', row);
+      this.assistantMode = 'diagnosis';
+      this.diagnosis = null;
       await this.switchPage('assistant');
-      await this.copyAssistantPrompt({ silent: false });
+      await nextTick();
+      await this.submitDiagnosis();
     },
     copyDiagnosisToActionNote() {
       if (!this.diagnosis || !this.selectedAnomaly) return;
@@ -1121,19 +1232,21 @@ createApp({
       this.activePage = 'anomaly';
     },
     async submitDiagnosis() {
-      if (!this.chatInput.trim() && !this.selectedAnomaly) {
+      if (!this.selectedAnomaly && !this.chatInput.trim()) {
         this.$message.warning('请先输入问题或从异常列表触发诊断');
         return;
       }
       this.loading.ai = true;
       try {
         const payload = {
-          message: this.chatInput,
+          message: this.selectedAnomaly ? '请基于当前异常事件给出结构化诊断。' : this.chatInput,
           provider: this.aiProvider,
           building_id: this.selectedAnomaly?.building_id || this.filters.buildingId || null,
           anomaly_id: this.selectedAnomaly?.anomaly_id || null,
           timestamp: this.selectedAnomaly?.timestamp || null,
           anomaly_type: this.selectedAnomaly?.anomaly_type || null,
+          start_time: this.isCompleteRange(this.filters.range) ? this.filters.range[0] : null,
+          end_time: this.isCompleteRange(this.filters.range) ? this.filters.range[1] : null,
         };
         const data = await this.fetchJson(`${API_BASE}/api/ai/diagnose`, {
           method: 'POST',
@@ -1215,8 +1328,11 @@ createApp({
     async runAnalysisAssistant() {
       this.selectedAnomaly = null;
       this.prepareAssistantPrompt('analysis');
+      this.assistantMode = 'diagnosis';
+      this.analysisInsight = null;
       await this.switchPage('assistant');
-      await this.copyAssistantPrompt({ silent: false });
+      await nextTick();
+      await this.submitAnalysisReport();
     },
     async submitAnalysisFeedback(label) {
       if (!this.analysisInsight?.trace_id) {
