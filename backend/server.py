@@ -1,5 +1,6 @@
 ﻿from __future__ import annotations
 
+import concurrent.futures
 import csv
 import datetime as dt
 import io
@@ -13,7 +14,7 @@ import uuid
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from typing import Any, Generator
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlencode, urlparse
 from urllib.request import Request, urlopen
@@ -44,7 +45,7 @@ RAGFLOW_DEFAULT_CHAT_ID = ""
 RAGFLOW_DEFAULT_TOP_K = 6
 RAGFLOW_DEFAULT_SIMILARITY_THRESHOLD = 0.2
 RAGFLOW_DEFAULT_VECTOR_SIMILARITY_WEIGHT = 0.45
-RAGFLOW_DEFAULT_TIMEOUT_SEC = 12.0
+RAGFLOW_DEFAULT_TIMEOUT_SEC = 6.0
 
 STATUS_NEW = "new"
 STATUS_ACK = "acknowledged"
@@ -262,6 +263,51 @@ class LLMDiagnoseProvider(DiagnoseProvider):
             data = json.loads(resp.read().decode("utf-8"))
         return data
 
+    def _call_chat_completion_stream(
+        self,
+        *,
+        base_url: str,
+        api_key: str,
+        model: str,
+        timeout_sec: float,
+        messages: list[dict[str, str]],
+    ) -> Generator[str, None, None]:
+        """Yield text tokens from a streaming chat completion (SSE)."""
+        endpoint = f"{base_url.rstrip('/')}/chat/completions"
+        body = json.dumps(
+            {
+                "model": model,
+                "messages": messages,
+                "temperature": 0.3,
+                "stream": True,
+            }
+        ).encode("utf-8")
+        req = Request(
+            endpoint,
+            data=body,
+            method="POST",
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {api_key}",
+            },
+        )
+        with urlopen(req, timeout=timeout_sec) as resp:
+            for raw_line in resp:
+                line = raw_line.decode("utf-8").strip()
+                if not line.startswith("data:"):
+                    continue
+                data_str = line[5:].strip()
+                if data_str == "[DONE]":
+                    break
+                try:
+                    chunk = json.loads(data_str)
+                    delta = chunk.get("choices", [{}])[0].get("delta", {})
+                    text = delta.get("content", "")
+                    if text:
+                        yield text
+                except (json.JSONDecodeError, IndexError, KeyError):
+                    continue
+
     def diagnose(self, repo: "EnergyRepository", payload: dict[str, Any]) -> dict[str, Any]:
         if payload.get("simulate_llm_failure"):
             raise RuntimeError("Simulated llm failure")
@@ -272,7 +318,7 @@ class LLMDiagnoseProvider(DiagnoseProvider):
 
         base_url = os.getenv("OPENAI_BASE_URL", "https://api.deepseek.com").strip() or "https://api.deepseek.com"
         model = os.getenv("OPENAI_MODEL", "deepseek-chat").strip() or "deepseek-chat"
-        timeout_sec = float(os.getenv("OPENAI_TIMEOUT_SEC", "20"))
+        timeout_sec = float(os.getenv("OPENAI_TIMEOUT_SEC", "12"))
         max_retries = int(os.getenv("OPENAI_MAX_RETRIES", "2"))
 
         template_result = repo._diagnose_by_template(payload)
@@ -303,7 +349,10 @@ class LLMDiagnoseProvider(DiagnoseProvider):
         system_prompt = (
             "你是建筑能源运维诊断助手，面向真实运维排障场景。必须只输出一个JSON对象，不要输出其他文本。"
             "JSON字段必须包含：conclusion, causes, steps, prevention, recommended_actions, evidence, confidence, risk_level。"
-            "其中causes/steps/prevention/recommended_actions为字符串数组，evidence为数组。risk_level只能是low/medium/high。"
+            "其中causes/steps/prevention/recommended_actions为字符串数组，每个数组至少包含1条内容，不允许输出空数组。"
+            "evidence为数组。risk_level只能是low/medium/high。confidence为0.0到1.0之间的数字。"
+            "conclusion必须引用建筑名称、异常发生时间段和具体偏差数值（如'较基线偏高X%'）。"
+            "如提供了知识证据，请在conclusion中用[1][2]等标注引用来源。"
             "请使用中文，优先给出可执行的排查步骤和处理动作，不要泛泛而谈。"
         )
         user_prompt = (
@@ -848,27 +897,6 @@ class EnergyRepository:
                 "retrieval_error_type": "",
                 "ragflow_session_id": "",
             }
-
-        try:
-            chat_result = self._ragflow_chat_completion(query_text)
-            chat_items = self._normalize_ragflow_reference(chat_result.get("reference"), limit=limit)
-            if chat_items:
-                return {
-                    "items": chat_items,
-                    "knowledge_source": "ragflow",
-                    "retrieval_hit_count": len(chat_items),
-                    "retrieval_error_type": retrieval_error_type or "retrieval_fallback_chat",
-                    "ragflow_session_id": str(chat_result.get("session_id", "")).strip(),
-                }
-        except HTTPError:
-            if not retrieval_error_type:
-                retrieval_error_type = "chat_http_error"
-        except (URLError, TimeoutError, socket.timeout):
-            if not retrieval_error_type:
-                retrieval_error_type = "chat_timeout"
-        except Exception:
-            if not retrieval_error_type:
-                retrieval_error_type = "chat_error"
 
         return {
             "items": [],
@@ -2458,25 +2486,44 @@ class EnergyRepository:
         query_text: str | None = None,
     ) -> dict[str, Any]:
         search_query = str(query_text or message or anomaly_type).strip()
-        ragflow_result = self._retrieve_ragflow_knowledge(search_query, limit=limit)
-        if ragflow_result["items"]:
-            return ragflow_result
 
-        local_items = self._search_local_knowledge(anomaly_type, message, limit=limit)
+        # Run RAGFlow retrieval and local keyword search in parallel.
+        # RAGFlow gets a 4-second hard deadline at the caller level regardless of its own HTTP timeout.
+        # Local search is fast (<100ms) and always finishes in time, so there is zero extra wait on RAGFlow failure.
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            ragflow_future = pool.submit(self._retrieve_ragflow_knowledge, search_query, limit)
+            local_future = pool.submit(self._search_local_knowledge, anomaly_type, message, limit)
+
+            try:
+                ragflow_result = ragflow_future.result(timeout=4.0)
+            except Exception:
+                ragflow_result = {
+                    "items": [],
+                    "knowledge_source": "none",
+                    "retrieval_hit_count": 0,
+                    "retrieval_error_type": "timeout",
+                    "ragflow_session_id": "",
+                }
+
+            if ragflow_result["items"]:
+                return ragflow_result
+
+            local_items = local_future.result()
+
         if local_items:
             return {
                 "items": local_items,
                 "knowledge_source": "local",
                 "retrieval_hit_count": len(local_items),
                 "retrieval_error_type": ragflow_result.get("retrieval_error_type", ""),
-                "ragflow_session_id": ragflow_result.get("ragflow_session_id", ""),
+                "ragflow_session_id": "",
             }
         return {
             "items": [],
             "knowledge_source": "none",
             "retrieval_hit_count": 0,
-            "retrieval_error_type": ragflow_result.get("retrieval_error_type", ""),
-            "ragflow_session_id": ragflow_result.get("ragflow_session_id", ""),
+            "retrieval_error_type": ragflow_result.get("retrieval_error_type", "empty_result"),
+            "ragflow_session_id": "",
         }
 
     def _resolve_context(self, payload: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None]:
@@ -2777,6 +2824,74 @@ class EnergyRepository:
             "context": diagnose_context,
         }
 
+    def diagnose_stream_events(
+        self, payload: dict[str, Any]
+    ) -> Generator[tuple[str, dict[str, Any]], None, None]:
+        """Yield (event_name, data_dict) tuples for SSE streaming diagnosis.
+
+        Flow:
+          1. Compute template result synchronously (~300ms incl. parallel knowledge retrieval).
+          2. Yield 'template' event immediately so the frontend renders a full answer.
+          3. Stream an LLM-enriched conclusion token-by-token ('token' events).
+          4. Yield 'done' or 'fallback' event to close the stream.
+        """
+        template_result = self._diagnose_by_template(payload)
+        diag = template_result["diagnosis"]
+        context = template_result["context"]
+        trace_id = uuid.uuid4().hex
+
+        yield "template", {**diag, "trace_id": trace_id, "provider": "template_provider", "pending": True}
+
+        api_key = os.getenv("OPENAI_API_KEY", "").strip()
+        if not api_key:
+            yield "done", {"provider": "template_provider", "trace_id": trace_id, "latency_ms": 0}
+            return
+
+        base_url = os.getenv("OPENAI_BASE_URL", "https://api.deepseek.com").strip() or "https://api.deepseek.com"
+        model = os.getenv("OPENAI_MODEL", "deepseek-chat").strip() or "deepseek-chat"
+        timeout_sec = float(os.getenv("OPENAI_TIMEOUT_SEC", "12"))
+
+        evidence_text = "\n".join(
+            f"- {x.get('title', '')}: {x.get('excerpt', '')}"
+            for x in diag.get("evidence", [])[:3]
+            if isinstance(x, dict)
+        ).strip()
+
+        system_prompt = (
+            "你是建筑能源运维诊断助手。用一到两段中文，以运维专家视角，"
+            "针对给定的建筑能源异常给出专业分析结论。结合建筑名称、时间、偏差数值和知识证据。"
+            "直接输出结论文字，不要输出JSON、标题或列表。"
+        )
+        user_prompt = (
+            f"异常类型: {diag.get('anomaly_name', '')}\n"
+            f"建筑: {context.get('building_name', '')}，"
+            f"时间: {context.get('timestamp', '')}，"
+            f"负荷 {context.get('value_kwh', '')} kWh，"
+            f"偏离 {context.get('deviation_pct', '')}%\n"
+            f"模板结论: {diag.get('conclusion', '')}\n"
+            f"知识证据:\n{evidence_text or '无'}\n"
+            "请给出更专业的诊断结论，引用具体数值。"
+        )
+
+        start = time.perf_counter()
+        try:
+            llm_provider = self.providers["llm"]
+            for token in llm_provider._call_chat_completion_stream(
+                base_url=base_url,
+                api_key=api_key,
+                model=model,
+                timeout_sec=timeout_sec,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+            ):
+                yield "token", {"text": token}
+            latency_ms = int((time.perf_counter() - start) * 1000)
+            yield "done", {"provider": "llm_provider", "trace_id": trace_id, "latency_ms": latency_ms}
+        except Exception as exc:
+            yield "fallback", {"reason": str(exc), "provider": "template_provider", "trace_id": trace_id}
+
     def _build_analysis_context(
         self,
         payload: dict[str, Any],
@@ -2941,6 +3056,59 @@ class EnergyRepository:
             },
         }
 
+    def _compact_analysis_prompt(self, ctx: dict[str, Any], max_chars: int = 6000) -> str:
+        """Return a JSON string of prompt_context trimmed to max_chars.
+
+        Priority order (drop later items first when over budget):
+          1. building + summary (always kept)
+          2. trend_snapshot + distribution_snapshot
+          3. insight_snapshot.trend_findings (top 3)
+          4. insight_snapshot.weather_findings (top 2)
+          5. insight_snapshot.anomaly_windows (top 3) → drop if still over
+          6. insight_snapshot.compare_findings → drop if still over
+          7. analysis_seed.evidence excerpts → truncate to 60 chars each
+        """
+        import copy
+        c = copy.deepcopy(ctx)
+
+        def _try(obj: dict[str, Any]) -> str:
+            return json.dumps(obj, ensure_ascii=False)
+
+        if len(_try(c)) <= max_chars:
+            return _try(c)
+
+        # Trim anomaly_windows
+        snap = c.get("insight_snapshot", {})
+        snap["anomaly_windows"] = snap.get("anomaly_windows", [])[:3]
+        if len(_try(c)) <= max_chars:
+            return _try(c)
+
+        # Drop compare_findings
+        snap["compare_findings"] = []
+        if len(_try(c)) <= max_chars:
+            return _try(c)
+
+        # Trim weather findings
+        snap["weather_findings"] = snap.get("weather_findings", [])[:2]
+        if len(_try(c)) <= max_chars:
+            return _try(c)
+
+        # Trim trend findings
+        snap["trend_findings"] = snap.get("trend_findings", [])[:2]
+        if len(_try(c)) <= max_chars:
+            return _try(c)
+
+        # Truncate evidence excerpts
+        for ev in c.get("analysis_seed", {}).get("evidence", []):
+            if isinstance(ev, dict):
+                ev["excerpt"] = str(ev.get("excerpt", ""))[:60]
+        if len(_try(c)) <= max_chars:
+            return _try(c)
+
+        # Last resort: drop saving_opportunities
+        snap["saving_opportunities"] = snap.get("saving_opportunities", [])[:2]
+        return _try(c)
+
     def _analyze_by_template(self, payload: dict[str, Any]) -> dict[str, Any]:
         context = self._build_analysis_context(payload)
         summary = context["summary"]
@@ -3042,8 +3210,8 @@ class EnergyRepository:
 
                 base_url = os.getenv("OPENAI_BASE_URL", "https://api.deepseek.com").strip() or "https://api.deepseek.com"
                 model = os.getenv("OPENAI_MODEL", "deepseek-chat").strip() or "deepseek-chat"
-                base_timeout_sec = float(os.getenv("OPENAI_TIMEOUT_SEC", "20"))
-                timeout_sec = float(os.getenv("OPENAI_ANALYZE_TIMEOUT_SEC", str(max(base_timeout_sec, 45.0))))
+                base_timeout_sec = float(os.getenv("OPENAI_TIMEOUT_SEC", "12"))
+                timeout_sec = float(os.getenv("OPENAI_ANALYZE_TIMEOUT_SEC", str(max(base_timeout_sec, 20.0))))
                 context = template_result["context"]
                 analysis_seed = template_result["analysis"]
                 user_question = str(payload.get("message", "")).strip() or "请围绕当前筛选范围输出一份可直接用于汇报的分析结论。"
@@ -3051,13 +3219,17 @@ class EnergyRepository:
                     "你是建筑能源分析助手，面向楼宇能源管理和运维答辩场景。"
                     "你必须只输出一个JSON对象，不要输出任何解释、前后缀或Markdown。"
                     "JSON字段必须包含：summary, findings, possible_causes, energy_saving_suggestions, operations_suggestions, evidence。"
-                    "findings/possible_causes/energy_saving_suggestions/operations_suggestions/evidence 必须是数组。"
-                    "请使用中文；不要输出空泛套话；结论必须引用给定的时间范围、趋势、同类对比、天气联动或异常窗口。"
+                    "findings/possible_causes/energy_saving_suggestions/operations_suggestions/evidence 必须是数组，每个数组至少包含1条内容，不允许空数组。"
+                    "请使用中文；不要输出空泛套话；summary必须引用建筑名称和时间范围；结论必须引用趋势、同类对比、天气联动或异常窗口中的具体数值。"
                     "建议动作尽量落到具体时段、运行策略、夜间基线或异常事件。"
                 )
                 prompt_context = self._build_analysis_prompt_context(payload, context, analysis_seed)
+                prompt_context_str = json.dumps(prompt_context, ensure_ascii=False)
+                # Keep prompt within ~6000 chars to avoid context-length errors
+                if len(prompt_context_str) > 6000:
+                    prompt_context_str = self._compact_analysis_prompt(prompt_context, max_chars=6000)
                 user_prompt = (
-                    f"当前分析上下文: {json.dumps(prompt_context, ensure_ascii=False)}\n"
+                    f"当前分析上下文: {prompt_context_str}\n"
                     f"用户补充问题: {user_question}\n"
                     "请基于当前建筑、筛选时间、KPI 摘要、趋势变化、温度关系、同类差距、节能机会和异常窗口生成结果。\n"
                     "如果证据不足，请明确说明证据不足，但仍要给出最稳妥的建议。\n"
@@ -3280,6 +3452,25 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Origin", "*")
         self.end_headers()
 
+    def _set_sse_headers(self) -> None:
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET,POST,OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.end_headers()
+
+    def _send_sse(self, event: str, data: Any) -> bool:
+        """Write one SSE event; returns False if the connection was broken."""
+        line = f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+        try:
+            self.wfile.write(line.encode("utf-8"))
+            self.wfile.flush()
+            return True
+        except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
+            return False
+
     def _json(self, data: Any, status: int = HTTPStatus.OK) -> None:
         self._set_json_headers(status)
         payload = json.dumps(data, ensure_ascii=False).encode("utf-8")
@@ -3314,6 +3505,16 @@ class Handler(BaseHTTPRequestHandler):
             payload = json.loads(body.decode("utf-8"))
         except json.JSONDecodeError:
             self._json({"code": 400, "message": "invalid json", "data": None}, HTTPStatus.BAD_REQUEST)
+            return
+
+        if parsed.path == "/api/ai/stream":
+            self._set_sse_headers()
+            try:
+                for event_name, event_data in REPO.diagnose_stream_events(payload):
+                    if not self._send_sse(event_name, event_data):
+                        break
+            except Exception as exc:
+                self._send_sse("error", {"message": str(exc)})
             return
 
         if parsed.path == "/api/ai/diagnose":

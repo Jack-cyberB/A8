@@ -110,6 +110,14 @@ createApp({
         lastLatencyMs: 0,
         messages: [],
       },
+      unifiedChat: {
+        messages: [],
+        input: '',
+        loading: false,
+        streaming: false,
+        streamBuffer: '',
+        sessionId: '',
+      },
       aiProvider: 'auto',
       aiStats: {
         windowHours: 24,
@@ -381,6 +389,178 @@ createApp({
         this.assistantKnowledgeInput = this.buildKnowledgeQuestion(this.selectedAnomaly ? 'anomaly' : 'analysis');
       }
     },
+    // ── Unified chat interface ────────────────────────────────────────────────
+    unifiedQuickStarters() {
+      const starters = [];
+      if (this.selectedAnomaly) {
+        starters.push({
+          key: 'diagnose_current',
+          label: `诊断: ${this.selectedAnomaly.anomaly_name}`,
+          question: `请诊断 ${this.selectedAnomaly.building_name} 在 ${this.formatCompactDateTime(this.selectedAnomaly.timestamp)} 出现的${this.selectedAnomaly.anomaly_name}。`,
+        });
+        starters.push({
+          key: 'kb_current',
+          label: '查运维规范',
+          question: `针对${this.selectedAnomaly.building_type || ''}建筑"${this.selectedAnomaly.anomaly_name}"，从运维规范角度优先排查哪些设备系统？`,
+        });
+      }
+      starters.push({ key: 'energy_saving', label: '节能建议', question: '针对当前建筑给出具体的节能优化建议。' });
+      starters.push({ key: 'analyze', label: '解读分析', question: '解读当前时段的能耗分析，给出主要发现和建议。' });
+      return starters.slice(0, 4);
+    },
+    routeUnifiedMessage(question) {
+      const diagKw = ['诊断', '故障', '排查', '原因', '异常', '为什么', '突增', '高负荷', '离线', '排查步骤', '不正常'];
+      const analysisKw = ['分析', '解读', '结论', '节能建议', '运维建议', '主要发现', '能耗报告'];
+      if (diagKw.some(k => question.includes(k))) return 'diagnosis';
+      if (analysisKw.some(k => question.includes(k))) return 'analysis';
+      return 'knowledge';
+    },
+    async sendUnifiedMessage(questionOverride) {
+      const question = String(questionOverride || this.unifiedChat.input || '').trim();
+      if (!question) { this.$message.warning('请先输入问题'); return; }
+      if (this.unifiedChat.loading) return;
+      this.unifiedChat.input = '';
+      this.unifiedChat.messages.push({ id: `${Date.now()}-user`, role: 'user', content: question });
+      const route = this.routeUnifiedMessage(question);
+      if (route === 'diagnosis') {
+        await this.sendStreamingDiagnosis({ question });
+      } else {
+        await this.sendUnifiedKnowledgeMessage(question);
+      }
+      await this.$nextTick();
+      this.scrollAssistantToBottom();
+    },
+    async sendStreamingDiagnosis({ question } = {}) {
+      this.unifiedChat.loading = true;
+      this.unifiedChat.streaming = true;
+      this.unifiedChat.streamBuffer = '';
+      const msgId = `${Date.now()}-assistant`;
+      const baseData = {
+        conclusion: '正在检索数据和知识库...',
+        causes: [], steps: [], recommended_actions: [], prevention: [], evidence: [],
+        anomaly_name: this.selectedAnomaly?.anomaly_name || '能源异常诊断',
+      };
+      this.unifiedChat.messages.push({ id: msgId, role: 'assistant', type: 'diagnosis', pending: true, data: baseData });
+      await this.$nextTick();
+      this.scrollAssistantToBottom();
+
+      const payload = {
+        message: question || '请基于当前异常事件给出结构化诊断。',
+        provider: this.aiProvider,
+        building_id: this.selectedAnomaly?.building_id || this.filters.buildingId || null,
+        anomaly_id: this.selectedAnomaly?.anomaly_id || null,
+        timestamp: this.selectedAnomaly?.timestamp || null,
+        anomaly_type: this.selectedAnomaly?.anomaly_type || null,
+        start_time: this.isCompleteRange(this.filters.range) ? this.filters.range[0] : null,
+        end_time: this.isCompleteRange(this.filters.range) ? this.filters.range[1] : null,
+      };
+
+      try {
+        const response = await fetch(`${API_BASE}/api/ai/stream`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buf = '';
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buf += decoder.decode(value, { stream: true });
+          const events = buf.split('\n\n');
+          buf = events.pop();
+          for (const block of events) {
+            const evName = block.match(/^event: (.+)/m)?.[1];
+            const dataStr = block.match(/^data: (.+)/m)?.[1];
+            if (!dataStr) continue;
+            let evData;
+            try { evData = JSON.parse(dataStr); } catch { continue; }
+            const idx = this.unifiedChat.messages.findIndex(m => m.id === msgId);
+            if (idx < 0) break;
+            if (evName === 'template') {
+              evData.causes = evData.causes || evData.possible_causes || [];
+              evData.steps = evData.steps || [];
+              evData.prevention = evData.prevention || [];
+              evData.recommended_actions = evData.recommended_actions || [];
+              evData.evidence = evData.evidence || [];
+              this.unifiedChat.messages.splice(idx, 1, { id: msgId, role: 'assistant', type: 'diagnosis', pending: true, data: evData });
+              this.diagnosis = evData;
+            } else if (evName === 'token') {
+              this.unifiedChat.streamBuffer += evData.text;
+              const cur = this.unifiedChat.messages[idx];
+              this.unifiedChat.messages.splice(idx, 1, { ...cur, data: { ...cur.data, conclusion: this.unifiedChat.streamBuffer } });
+            } else if (evName === 'done') {
+              const cur = this.unifiedChat.messages[idx];
+              const finalConclusion = this.unifiedChat.streamBuffer || cur.data.conclusion;
+              const finalData = { ...cur.data, ...evData, conclusion: finalConclusion };
+              this.unifiedChat.messages.splice(idx, 1, { ...cur, pending: false, data: finalData });
+              this.diagnosis = finalData;
+            } else if (evName === 'fallback' || evName === 'error') {
+              const cur = this.unifiedChat.messages[idx];
+              this.unifiedChat.messages.splice(idx, 1, { ...cur, pending: false });
+            }
+            await this.$nextTick();
+            this.scrollAssistantToBottom();
+          }
+        }
+      } catch (err) {
+        const idx = this.unifiedChat.messages.findIndex(m => m.id === msgId);
+        if (idx >= 0) {
+          const cur = this.unifiedChat.messages[idx];
+          this.unifiedChat.messages.splice(idx, 1, { ...cur, pending: false, data: { ...cur.data, conclusion: '诊断请求失败，请稍后重试。' } });
+        }
+        this.$message.error('诊断失败：' + (err.message || '未知错误'));
+      } finally {
+        this.unifiedChat.loading = false;
+        this.unifiedChat.streaming = false;
+      }
+    },
+    async sendUnifiedKnowledgeMessage(question) {
+      this.unifiedChat.loading = true;
+      const msgId = `${Date.now()}-assistant`;
+      this.unifiedChat.messages.push({ id: msgId, role: 'assistant', type: 'knowledge', pending: true, content: '正在检索知识库...', references: [] });
+      await this.$nextTick();
+      this.scrollAssistantToBottom();
+      try {
+        const data = await this.fetchJson(`${API_BASE}/api/ragflow/chat`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ question, session_id: this.unifiedChat.sessionId || null }),
+        });
+        const idx = this.unifiedChat.messages.findIndex(m => m.id === msgId);
+        if (idx >= 0) {
+          this.unifiedChat.messages.splice(idx, 1, {
+            id: msgId, role: 'assistant', type: 'knowledge', pending: false,
+            content: data.answer || '知识库未返回结果。',
+            references: Array.isArray(data.references) ? data.references : [],
+          });
+        }
+        this.unifiedChat.sessionId = data.session_id || this.unifiedChat.sessionId;
+      } catch (err) {
+        const idx = this.unifiedChat.messages.findIndex(m => m.id === msgId);
+        if (idx >= 0) {
+          this.unifiedChat.messages.splice(idx, 1, { id: msgId, role: 'assistant', type: 'knowledge', pending: false, content: '知识问答失败，请稍后重试。', references: [] });
+        }
+        this.$message.error('知识问答失败：' + (err.message || '未知错误'));
+      } finally {
+        this.unifiedChat.loading = false;
+      }
+    },
+    resetUnifiedConversation() {
+      this.unifiedChat.messages = [];
+      this.unifiedChat.input = '';
+      this.unifiedChat.sessionId = '';
+      this.unifiedChat.loading = false;
+      this.unifiedChat.streaming = false;
+      this.unifiedChat.streamBuffer = '';
+    },
+    scrollAssistantToBottom() {
+      const el = this.$refs.assistantBody;
+      if (el) el.scrollTop = el.scrollHeight;
+    },
+    // ── End unified chat ──────────────────────────────────────────────────────
     buildKnowledgeQuestion(kind = 'analysis') {
       if (kind === 'anomaly' && this.selectedAnomaly) {
         return `针对${this.selectedAnomaly.building_type || '当前'}建筑出现“${this.selectedAnomaly.anomaly_name}”，从运维常识看优先排查哪些设备系统？为什么这种现象会发生？`;
@@ -1214,7 +1394,9 @@ createApp({
       this.diagnosis = null;
       await this.switchPage('assistant');
       await nextTick();
-      await this.submitDiagnosis();
+      const userQuestion = `请诊断 ${row.building_name} 在 ${this.formatCompactDateTime(row.timestamp)} 出现的${row.anomaly_name}（偏差 ${this.formatNumber(row.deviation_pct, 1)}%）。`;
+      this.unifiedChat.messages.push({ id: `${Date.now()}-user`, role: 'user', content: userQuestion });
+      await this.sendStreamingDiagnosis({ question: userQuestion });
     },
     copyDiagnosisToActionNote() {
       if (!this.diagnosis || !this.selectedAnomaly) return;
@@ -1332,7 +1514,17 @@ createApp({
       this.analysisInsight = null;
       await this.switchPage('assistant');
       await nextTick();
+      const question = `请分析${this.currentAnalysisScopeText()}的能耗数据，生成可用于汇报的分析结论。`;
+      this.unifiedChat.messages.push({ id: `${Date.now()}-user`, role: 'user', content: question });
+      const pendingId = `${Date.now()}-assistant`;
+      this.unifiedChat.messages.push({ id: pendingId, role: 'assistant', type: 'analysis', pending: true, data: null });
       await this.submitAnalysisReport();
+      const idx = this.unifiedChat.messages.findIndex(m => m.id === pendingId);
+      if (idx >= 0 && this.analysisInsight) {
+        this.unifiedChat.messages.splice(idx, 1, { id: pendingId, role: 'assistant', type: 'analysis', pending: false, data: this.analysisInsight });
+      } else if (idx >= 0) {
+        this.unifiedChat.messages.splice(idx, 1);
+      }
     },
     async submitAnalysisFeedback(label) {
       if (!this.analysisInsight?.trace_id) {
