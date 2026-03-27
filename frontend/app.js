@@ -232,6 +232,14 @@ createApp({
       const num = Number(value || 0);
       return Number.isFinite(num) ? num.toFixed(digits) : '0.0';
     },
+    renderMarkdown(text) {
+      if (!text || typeof text !== 'string') return '';
+      const clean = text.replace(/\[ID:\d+\]/g, '');
+      if (typeof marked !== 'undefined') {
+        try { return marked.parse(clean); } catch(e) {}
+      }
+      return clean.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g,'<br>');
+    },
     formatCompactDateTime(value) {
       if (!value) return '-';
       return String(value).replace('T', ' ').slice(0, 16);

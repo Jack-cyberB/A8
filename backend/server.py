@@ -673,13 +673,15 @@ class EnergyRepository:
         section: Any,
         excerpt: Any,
         source_type: str,
-    ) -> dict[str, str]:
+        similarity: float | None = None,
+    ) -> dict[str, Any]:
         return {
             "chunk_id": str(chunk_id or "").strip() or f"{source_type}-chunk",
             "title": str(title or "").strip() or ("RAGFlow" if source_type == "ragflow" else "本地知识"),
             "section": str(section or "").strip(),
             "excerpt": self._sanitize_excerpt(excerpt),
             "source_type": source_type,
+            "similarity": round(float(similarity), 4) if similarity is not None else None,
         }
 
     def _parse_ragflow_stream_payload(self, raw_text: str) -> list[dict[str, Any]]:
@@ -787,6 +789,7 @@ class EnergyRepository:
                     section=section,
                     excerpt=chunk.get("content") or chunk.get("highlight") or "",
                     source_type="ragflow",
+                    similarity=float(similarity) if similarity is not None else None,
                 )
             )
         return items
@@ -975,7 +978,6 @@ class EnergyRepository:
                     if final:
                         ref = data.get("reference") if isinstance(data.get("reference"), dict) else {}
                         references = self._normalize_ragflow_reference(ref, limit=6)
-                        last_answer = answer
                         break
                     if answer and answer != last_answer:
                         delta = answer[len(last_answer):]
