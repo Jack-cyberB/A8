@@ -21,11 +21,23 @@ from urllib.request import Request, urlopen
 
 
 ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT_FALLBACK = Path(r"D:/Project/2026/A8")
+
+
+def resolve_project_path(*parts: str) -> Path:
+    local_path = ROOT.joinpath(*parts)
+    if local_path.exists():
+        return local_path
+    fallback_path = PROJECT_ROOT_FALLBACK.joinpath(*parts)
+    return fallback_path
+
+
 ENV_FILE = ROOT / ".env"
 DEMO_DATA_FILE = ROOT / "data" / "energy_dataset.csv"
 NORMALIZED_DATA_FILE = ROOT / "data" / "normalized" / "energy_normalized.csv"
-METADATA_FILE = ROOT / "data" / "raw" / "bdg2" / "data" / "metadata" / "metadata.csv"
-WEATHER_FILE = ROOT / "data" / "raw" / "bdg2" / "data" / "weather" / "weather.csv"
+METADATA_FILE = resolve_project_path("data", "raw", "bdg2", "data", "metadata", "metadata.csv")
+RAW_ELECTRICITY_FILE = resolve_project_path("data", "raw", "bdg2", "data", "meters", "cleaned", "electricity_cleaned.csv")
+WEATHER_FILE = resolve_project_path("data", "raw", "bdg2", "data", "weather", "weather.csv")
 DICT_FILE = ROOT / "data" / "ai_dictionary.json"
 KNOWLEDGE_FILE = ROOT / "data" / "normalized" / "knowledge_chunks.jsonl"
 RUNTIME_DIR = ROOT / "data" / "runtime"
@@ -46,6 +58,26 @@ RAGFLOW_DEFAULT_TOP_K = 6
 RAGFLOW_DEFAULT_SIMILARITY_THRESHOLD = 0.2
 RAGFLOW_DEFAULT_VECTOR_SIMILARITY_WEIGHT = 0.45
 RAGFLOW_DEFAULT_TIMEOUT_SEC = 6.0
+
+SHOWCASE_BUILDINGS = {
+    "Panther_education_Genevieve": {"display_category": "教学楼", "peer_category": "teaching_building"},
+    "Panther_education_Jerome": {"display_category": "实验楼", "peer_category": "lab_building"},
+    "Panther_office_Patti": {"display_category": "办公楼", "peer_category": "office_building"},
+    "Panther_lodging_Marisol": {"display_category": "宿舍", "peer_category": "dormitory"},
+    "Panther_assembly_Denice": {"display_category": "体育馆", "peer_category": "gymnasium"},
+    "Fox_public_Martin": {"display_category": "图书馆", "peer_category": "library"},
+    "Fox_food_Scott": {"display_category": "食堂", "peer_category": "canteen"},
+}
+
+PEER_CATEGORY_LABELS = {
+    "teaching_building": "教学楼",
+    "lab_building": "实验楼",
+    "office_building": "办公楼",
+    "dormitory": "宿舍",
+    "library": "图书馆",
+    "gymnasium": "体育馆",
+    "canteen": "食堂",
+}
 
 STATUS_NEW = "new"
 STATUS_ACK = "acknowledged"
@@ -101,6 +133,34 @@ def parse_time(value: str | None) -> dt.datetime | None:
 
 def to_iso(ts: dt.datetime) -> str:
     return ts.strftime(TIME_FMT)
+
+
+def showcase_display_name(building_id: str, peer_category: str | None = None) -> str:
+    config = SHOWCASE_BUILDINGS.get(building_id)
+    if config:
+        return f"{building_id}（{config['display_category']}）"
+    label = PEER_CATEGORY_LABELS.get(peer_category or "", "")
+    return f"{building_id}（{label}）" if label else building_id
+
+
+def infer_peer_category(primaryspaceusage: str | None, sub_primaryspaceusage: str | None) -> str | None:
+    primary = str(primaryspaceusage or "").strip().lower()
+    sub = str(sub_primaryspaceusage or "").strip().lower()
+    if primary == "education" and "classroom" in sub:
+        return "teaching_building"
+    if primary == "education" and any(token in sub for token in ("laboratory", "research", "academic")):
+        return "lab_building"
+    if primary == "office" and (not sub or sub == "office"):
+        return "office_building"
+    if primary == "lodging/residential" and any(token in sub for token in ("dormitory", "residence hall")):
+        return "dormitory"
+    if primary == "public services" and "library" in sub:
+        return "library"
+    if primary == "entertainment/public assembly" and any(token in sub for token in ("gymnasium", "stadium", "fitness center")):
+        return "gymnasium"
+    if primary == "food sales and service":
+        return "canteen"
+    return None
 
 
 def infer_ragflow_web_base_url(api_base_url: str) -> str:
@@ -440,6 +500,7 @@ class EnergyRepository:
         self.demo_data_file = demo_data_file
         self.normalized_data_file = normalized_data_file
         self.metadata_file = metadata_file
+        self.raw_electricity_file = RAW_ELECTRICITY_FILE
         self.weather_file = weather_file
         self.dict_file = dict_file
         self.knowledge_file = knowledge_file
@@ -448,6 +509,11 @@ class EnergyRepository:
         self.note_log_file = note_log_file
         self.regression_summary_file = regression_summary_file
 
+        self.bdq2_metadata = self._load_bdg2_metadata()
+        self.showcase_config = SHOWCASE_BUILDINGS
+        self.peer_category_to_buildings = self._build_peer_category_to_buildings()
+        self.raw_electricity_headers = self._load_raw_electricity_headers()
+        self.compare_pool_cache: dict[tuple[str, str | None, str | None], dict[str, float]] = {}
         self.rows = self._load_rows()
         self.building_site_map = self._load_building_site_map()
         self.weather_by_site = self._load_weather_by_site()
@@ -556,17 +622,51 @@ class EnergyRepository:
         with self.dict_file.open("r", encoding="utf-8-sig") as f:
             return json.load(f).get("anomaly_type_dict", {})
 
-    def _load_building_site_map(self) -> dict[str, str]:
+    def _load_bdg2_metadata(self) -> dict[str, dict[str, Any]]:
         if not self.metadata_file.exists():
             return {}
-        mapping: dict[str, str] = {}
+        metadata: dict[str, dict[str, Any]] = {}
         with self.metadata_file.open("r", encoding="utf-8", newline="") as f:
             reader = csv.DictReader(f)
             for raw in reader:
                 building_id = str(raw.get("building_id", "")).strip()
-                site_id = str(raw.get("site_id", "")).strip()
-                if building_id and site_id:
-                    mapping[building_id] = site_id
+                if not building_id:
+                    continue
+                peer_category = infer_peer_category(raw.get("primaryspaceusage"), raw.get("sub_primaryspaceusage"))
+                metadata[building_id] = {
+                    "building_id": building_id,
+                    "site_id": str(raw.get("site_id", "")).strip(),
+                    "primaryspaceusage": str(raw.get("primaryspaceusage", "")).strip(),
+                    "sub_primaryspaceusage": str(raw.get("sub_primaryspaceusage", "")).strip(),
+                    "peer_category": peer_category,
+                    "display_category": SHOWCASE_BUILDINGS.get(building_id, {}).get("display_category") or PEER_CATEGORY_LABELS.get(peer_category or "", ""),
+                    "display_name": showcase_display_name(building_id, peer_category),
+                }
+        return metadata
+
+    def _build_peer_category_to_buildings(self) -> dict[str, list[str]]:
+        mapping: dict[str, list[str]] = {}
+        for building_id, meta in self.bdq2_metadata.items():
+            peer_category = str(meta.get("peer_category") or "").strip()
+            if not peer_category:
+                continue
+            mapping.setdefault(peer_category, []).append(building_id)
+        return mapping
+
+    def _load_raw_electricity_headers(self) -> set[str]:
+        if not self.raw_electricity_file.exists():
+            return set()
+        with self.raw_electricity_file.open("r", encoding="utf-8", newline="") as f:
+            reader = csv.reader(f)
+            headers = next(reader, [])
+        return {str(item).strip() for item in headers[1:] if str(item).strip()}
+
+    def _load_building_site_map(self) -> dict[str, str]:
+        mapping: dict[str, str] = {}
+        for building_id, meta in self.bdq2_metadata.items():
+            site_id = str(meta.get("site_id", "")).strip()
+            if site_id:
+                mapping[building_id] = site_id
         return mapping
 
     def _load_weather_by_site(self) -> dict[str, dict[dt.datetime, dict[str, float]]]:
@@ -1095,10 +1195,31 @@ class EnergyRepository:
                 "spike_threshold": mean_val + 2 * std_val,
                 "high_load_threshold": mean_val * 1.5,
             }
+            raw_meta = self.bdq2_metadata.get(building_id, {})
+            peer_category = (
+                self.showcase_config.get(building_id, {}).get("peer_category")
+                or raw_meta.get("peer_category")
+                or ""
+            )
+            display_category = (
+                self.showcase_config.get(building_id, {}).get("display_category")
+                or raw_meta.get("display_category")
+                or items[0]["building_type"]
+            )
+            display_name = (
+                raw_meta.get("display_name")
+                or showcase_display_name(building_id, peer_category)
+            )
             self.buildings_meta[building_id] = {
                 "building_id": building_id,
-                "building_name": items[0]["building_name"],
-                "building_type": items[0]["building_type"],
+                "building_name": display_name,
+                "building_type": display_category,
+                "display_name": display_name,
+                "display_category": display_category,
+                "peer_category": peer_category,
+                "raw_building_name": items[0]["building_name"],
+                "primaryspaceusage": raw_meta.get("primaryspaceusage", ""),
+                "sub_primaryspaceusage": raw_meta.get("sub_primaryspaceusage", ""),
                 "site_id": self.building_site_map.get(building_id),
                 "record_count": len(items),
                 "start_time": items[0]["timestamp"],
@@ -1851,6 +1972,65 @@ class EnergyRepository:
             return fallback_id, list(self.by_building.get(fallback_id, []))
         return None, []
 
+    def _peer_compare_pool(
+        self,
+        peer_category: str,
+        start_time: dt.datetime | None,
+        end_time: dt.datetime | None,
+    ) -> dict[str, float]:
+        cache_key = (
+            peer_category,
+            to_iso(start_time) if start_time else None,
+            to_iso(end_time) if end_time else None,
+        )
+        cached = self.compare_pool_cache.get(cache_key)
+        if cached is not None:
+            return dict(cached)
+
+        candidate_ids = [
+            bid
+            for bid in self.peer_category_to_buildings.get(peer_category, [])
+            if bid in self.raw_electricity_headers
+        ]
+        if not candidate_ids or not self.raw_electricity_file.exists():
+            self.compare_pool_cache[cache_key] = {}
+            return {}
+
+        sums = {bid: 0.0 for bid in candidate_ids}
+        counts = {bid: 0 for bid in candidate_ids}
+        with self.raw_electricity_file.open("r", encoding="utf-8", newline="") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                ts = parse_time(row.get("timestamp", ""))
+                if not ts:
+                    continue
+                if start_time and ts < start_time:
+                    continue
+                if end_time and ts > end_time:
+                    continue
+                for bid in candidate_ids:
+                    raw_val = row.get(bid, "")
+                    if raw_val is None:
+                        continue
+                    raw_val = str(raw_val).strip()
+                    if not raw_val:
+                        continue
+                    try:
+                        value = float(raw_val)
+                    except ValueError:
+                        continue
+                    if value < 0:
+                        continue
+                    sums[bid] += value
+                    counts[bid] += 1
+        result = {
+            bid: (sums[bid] / counts[bid])
+            for bid in candidate_ids
+            if counts[bid] > 0
+        }
+        self.compare_pool_cache[cache_key] = dict(result)
+        return result
+
     def _sort_anomalies(self, rows: list[dict[str, Any]], sort: str) -> list[dict[str, Any]]:
         if sort == "timestamp_asc":
             return sorted(rows, key=lambda x: x["timestamp"])
@@ -1886,12 +2066,18 @@ class EnergyRepository:
 
     def query_buildings(self) -> dict[str, Any]:
         items = []
-        for _, meta in sorted(self.buildings_meta.items(), key=lambda x: x[0]):
+        for building_id in self.showcase_config:
+            meta = self.buildings_meta.get(building_id)
+            if not meta:
+                continue
             items.append(
                 {
                     "building_id": meta["building_id"],
                     "building_name": meta["building_name"],
                     "building_type": meta["building_type"],
+                    "display_name": meta.get("display_name", meta["building_name"]),
+                    "display_category": meta.get("display_category", meta["building_type"]),
+                    "peer_category": meta.get("peer_category", ""),
                     "record_count": meta["record_count"],
                     "start_time": to_iso(meta["start_time"]),
                     "end_time": to_iso(meta["end_time"]),
@@ -2095,32 +2281,67 @@ class EnergyRepository:
             }
 
         target_meta = self.buildings_meta.get(target_building_id, {})
-        target_type = target_meta.get("building_type", "unknown")
-        peer_rows = self._filter_rows(None, start_time, end_time)
-        grouped: dict[str, list[float]] = {}
-        grouped_type: dict[str, str] = {}
-        for row in peer_rows:
-            grouped.setdefault(row["building_id"], []).append(float(row["electricity_kwh"]))
-            grouped_type[row["building_id"]] = str(row["building_type"])
+        peer_category = str(target_meta.get("peer_category", "")).strip()
+        if not peer_category:
+            return {
+                "metric_type": metric,
+                "metric_label": "电力",
+                "unit": "kWh",
+                "building": None,
+                "peer_group": None,
+                "items": [],
+                "peer_ranking": [],
+                "message": "当前建筑未纳入代表建筑展示集或未配置对标类别。",
+            }
 
-        building_avg = {bid: (sum(vals) / len(vals)) for bid, vals in grouped.items() if vals}
-        peer_candidates = {bid: avg for bid, avg in building_avg.items() if grouped_type.get(bid) == target_type}
-        peer_avg = round(sum(peer_candidates.values()) / len(peer_candidates), 4) if peer_candidates else 0.0
-        target_avg = round(building_avg.get(target_building_id, 0.0), 4)
+        target_rows = self._filter_rows(target_building_id, start_time, end_time)
+        target_values = [float(row["electricity_kwh"]) for row in target_rows]
+        target_avg = round(sum(target_values) / len(target_values), 4) if target_values else 0.0
+        peer_candidates = self._peer_compare_pool(peer_category, start_time, end_time)
+        if target_building_id in peer_candidates:
+            peer_candidates = {bid: avg for bid, avg in peer_candidates.items() if bid != target_building_id}
+        if not peer_candidates:
+            return {
+                "metric_type": metric,
+                "metric_label": "电力",
+                "unit": "kWh",
+                "building": {
+                    "building_id": target_building_id,
+                    "building_name": target_meta.get("display_name", target_building_id),
+                    "building_type": target_meta.get("display_category", ""),
+                    "avg_value": target_avg,
+                },
+                "peer_group": {
+                    "peer_category": peer_category,
+                    "peer_category_label": PEER_CATEGORY_LABELS.get(peer_category, peer_category),
+                    "peer_avg_value": 0.0,
+                    "peer_count": 0,
+                    "vs_peer_pct": 0.0,
+                    "gap_pct": 0.0,
+                    "peer_percentile": 0.0,
+                    "ranking_position": None,
+                },
+                "items": [{"label": "当前建筑", "value": target_avg}],
+                "peer_ranking": [],
+                "message": "当前类别在所选时间范围内无可比样本。",
+            }
+
+        peer_avg = round(sum(peer_candidates.values()) / len(peer_candidates), 4)
+        all_peer_values = list(peer_candidates.values()) + [target_avg]
+        peer_total_count = len(all_peer_values)
         vs_peer_pct = round(((target_avg - peer_avg) / peer_avg * 100) if peer_avg else 0.0, 2)
         percentile = round(
             (
-                sum(1 for avg in peer_candidates.values() if avg <= target_avg) / len(peer_candidates) * 100
-            ) if peer_candidates else 0.0,
+                sum(1 for avg in all_peer_values if avg <= target_avg) / peer_total_count * 100
+            ) if peer_total_count else 0.0,
             2,
         )
-        ordered_peers = [bid for bid, _ in sorted(peer_candidates.items(), key=lambda item: item[1], reverse=True)]
-        ranking_position = ordered_peers.index(target_building_id) + 1 if target_building_id in ordered_peers else None
+        ranking_position = sum(1 for avg in peer_candidates.values() if avg > target_avg) + 1
 
         ranking = [
             {
                 "building_id": bid,
-                "building_name": self.buildings_meta.get(bid, {}).get("building_name", bid),
+                "building_name": self.bdq2_metadata.get(bid, {}).get("display_name", showcase_display_name(bid, peer_category)),
                 "avg_value": round(avg, 4),
             }
             for bid, avg in sorted(peer_candidates.items(), key=lambda x: x[1], reverse=True)[:8]
@@ -2132,14 +2353,15 @@ class EnergyRepository:
             "unit": "kWh",
             "building": {
                 "building_id": target_building_id,
-                "building_name": target_meta.get("building_name", target_building_id),
-                "building_type": target_type,
+                "building_name": target_meta.get("display_name", target_building_id),
+                "building_type": target_meta.get("display_category", ""),
                 "avg_value": target_avg,
             },
             "peer_group": {
-                "building_type": target_type,
+                "peer_category": peer_category,
+                "peer_category_label": PEER_CATEGORY_LABELS.get(peer_category, peer_category),
                 "peer_avg_value": peer_avg,
-                "peer_count": len(peer_candidates),
+                "peer_count": peer_total_count,
                 "vs_peer_pct": vs_peer_pct,
                 "gap_pct": vs_peer_pct,
                 "peer_percentile": percentile,
@@ -2150,6 +2372,7 @@ class EnergyRepository:
                 {"label": "同类均值", "value": peer_avg},
             ],
             "peer_ranking": ranking,
+            "message": "",
         }
 
     def query_analysis_insights(

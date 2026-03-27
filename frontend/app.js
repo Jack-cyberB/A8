@@ -165,8 +165,8 @@ createApp({
       analysisInsights: {
         scope_summary: {
           building_id: 'ALL',
-          building_name: '全部建筑',
-          building_type: 'portfolio',
+          building_name: '未选择建筑',
+          building_type: '',
           selected_start_time: null,
           selected_end_time: null,
           data_start_time: null,
@@ -594,7 +594,7 @@ createApp({
       }
       if (this.assistantSubmodule === 'knowledge') {
         return [
-          { label: '当前建筑', value: building ? `${building.name} (${building.type})` : '全部建筑' },
+          { label: '当前建筑', value: building ? building.name : '未选择建筑' },
           { label: '时间范围', value: scopeText },
           { label: '知识状态', value: this.assistantKnowledgeStatusText() },
         ];
@@ -608,7 +608,7 @@ createApp({
       }
       return [
         { label: '分析对象', value: this.currentMetricLabel() },
-        { label: '当前建筑', value: building ? `${building.name} (${building.type})` : '全部建筑' },
+        { label: '当前建筑', value: building ? building.name : '未选择建筑' },
         { label: '时间窗口', value: scopeText },
       ];
     },
@@ -676,7 +676,7 @@ createApp({
     },
     currentAnalysisScopeText() {
       const building = this.selectedBuildingMeta();
-      const buildingText = building ? `${building.name} (${building.type})` : '全部建筑';
+      const buildingText = building ? building.name : '未选择建筑';
       const rangeText = this.isCompleteRange(this.filters.range) ? `${this.filters.range[0]} ~ ${this.filters.range[1]}` : '全量时间范围';
       return `${this.currentMetricLabel()} | ${buildingText} | ${rangeText}`;
     },
@@ -1093,7 +1093,7 @@ createApp({
         '请作为建筑能源与运维专家，结合下面的项目分析上下文，输出“结论-证据-动作”三段式中文回答。',
         '如果存在明显异常，请同时补充风险提示和优先检查顺序。',
         '',
-        `分析对象：${scope.building_name || '全部建筑'}（${scope.building_type || 'portfolio'}）`,
+        `分析对象：${scope.building_name || '未选择建筑'}`,
         `分析指标：${this.currentMetricLabel()}（${this.analysisSummary.unit || 'kWh'}）`,
         `筛选时间：${this.formatCompactDateTime(scope.selected_start_time)} ~ ${this.formatCompactDateTime(scope.selected_end_time)}`,
         `有效数据：${this.formatCompactDateTime(scope.data_start_time)} ~ ${this.formatCompactDateTime(scope.data_end_time)}，共 ${scope.point_count || 0} 个点位`,
@@ -1126,7 +1126,7 @@ createApp({
         '请作为建筑运维诊断助手，基于下面的异常上下文输出：原因判断、排查步骤、立即动作、预防建议。',
         '请优先给出现场可执行的检查顺序，并尽量结合建筑场景与设备运行特征。',
         '',
-        `建筑：${row.building_name}（${row.building_type || '-'}）`,
+        `建筑：${row.building_name || '-'}`,
         `异常类型：${row.anomaly_name}`,
         `异常时间：${this.formatCompactDateTime(row.timestamp)}`,
         `偏差比例：${this.formatNumber(row.deviation_pct, 1)}%`,
@@ -1331,8 +1331,8 @@ createApp({
       this.analysisInsights = {
         scope_summary: {
           building_id: this.filters.buildingId || 'ALL',
-          building_name: this.selectedBuildingMeta()?.name || '全部建筑',
-          building_type: this.selectedBuildingMeta()?.type || 'portfolio',
+          building_name: this.selectedBuildingMeta()?.name || '未选择建筑',
+          building_type: this.selectedBuildingMeta()?.type || '',
           selected_start_time: this.isCompleteRange(this.filters.range) ? this.filters.range[0] : null,
           selected_end_time: this.isCompleteRange(this.filters.range) ? this.filters.range[1] : null,
           data_start_time: null,
@@ -1418,12 +1418,16 @@ createApp({
         const data = await this.fetchJson(`${API_BASE}/api/buildings`);
         this.buildings = (data.items || []).map((x) => ({
           id: x.building_id,
-          name: x.building_name,
-          type: x.building_type,
+          name: x.display_name || x.building_name,
+          type: x.display_category || x.building_type,
+          peerCategory: x.peer_category || '',
           startTime: x.start_time,
           endTime: x.end_time,
           recordCount: x.record_count,
         }));
+        if (!this.buildings.some((item) => item.id === this.filters.buildingId)) {
+          this.filters.buildingId = this.buildings[0]?.id || '';
+        }
         const range = data.global_range || {};
         this.globalRange = {
           startTime: range.start_time || '',
@@ -1494,8 +1498,8 @@ createApp({
       return {
         scope_summary: {
           building_id: this.filters.buildingId || 'ALL',
-          building_name: meta?.name || '全部建筑',
-          building_type: meta?.type || 'portfolio',
+          building_name: meta?.name || '未选择建筑',
+          building_type: meta?.type || '',
           selected_start_time: selectedStart,
           selected_end_time: selectedEnd,
           data_start_time: selectedStart,

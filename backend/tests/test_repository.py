@@ -94,12 +94,11 @@ class RepositoryTests(unittest.TestCase):
         self.assertGreaterEqual(len(d["data_evidence"]), 1)
         self.assertFalse(d["fallback_used"])
 
-    def test_diagnose_llm_fallback(self):
+    def test_diagnose_llm_failure_raises(self):
         aid = self._first_anomaly_id()
-        result = REPO.diagnose({"message": "请分析异常", "anomaly_id": aid, "provider": "llm", "simulate_llm_failure": True})
-        d = result["diagnosis"]
-        self.assertTrue(d["fallback_used"])
-        self.assertEqual(d["provider"], "template_provider")
+        with self.assertRaises(RuntimeError) as ctx:
+            REPO.diagnose({"message": "请分析异常", "anomaly_id": aid, "provider": "llm", "simulate_llm_failure": True})
+        self.assertIn("Simulated llm failure", str(ctx.exception))
 
     def test_diagnose_llm_success_mock(self):
         aid = self._first_anomaly_id()

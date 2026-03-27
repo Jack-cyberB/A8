@@ -7,12 +7,31 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-BDG2_ELEC = ROOT / "data" / "raw" / "bdg2" / "data" / "meters" / "cleaned" / "electricity_cleaned.csv"
-BDG2_META = ROOT / "data" / "raw" / "bdg2" / "data" / "metadata" / "metadata.csv"
-SIKONG_DIR = ROOT / "data" / "raw" / "sikong"
+PROJECT_ROOT_FALLBACK = Path(r"D:/Project/2026/A8")
+
+
+def resolve_project_path(*parts: str) -> Path:
+    local_path = ROOT.joinpath(*parts)
+    if local_path.exists():
+        return local_path
+    return PROJECT_ROOT_FALLBACK.joinpath(*parts)
+
+
+BDG2_ELEC = resolve_project_path("data", "raw", "bdg2", "data", "meters", "cleaned", "electricity_cleaned.csv")
+BDG2_META = resolve_project_path("data", "raw", "bdg2", "data", "metadata", "metadata.csv")
+SIKONG_DIR = resolve_project_path("data", "raw", "sikong")
 OUT_DIR = ROOT / "data" / "normalized"
 OUT_ENERGY = OUT_DIR / "energy_normalized.csv"
 OUT_KNOWLEDGE = OUT_DIR / "knowledge_chunks.jsonl"
+SHOWCASE_BUILDINGS = {
+    "Panther_education_Genevieve": {"display_category": "教学楼"},
+    "Panther_education_Jerome": {"display_category": "实验楼"},
+    "Panther_office_Patti": {"display_category": "办公楼"},
+    "Panther_lodging_Marisol": {"display_category": "宿舍"},
+    "Panther_assembly_Denice": {"display_category": "体育馆"},
+    "Fox_public_Martin": {"display_category": "图书馆"},
+    "Fox_food_Scott": {"display_category": "食堂"},
+}
 
 
 def load_bdg2_meta(path: Path) -> dict[str, dict[str, str]]:
@@ -23,9 +42,10 @@ def load_bdg2_meta(path: Path) -> dict[str, dict[str, str]]:
             bid = row.get("building_id", "").strip()
             if not bid:
                 continue
+            display_category = SHOWCASE_BUILDINGS.get(bid, {}).get("display_category", "")
             meta[bid] = {
-                "building_name": bid,
-                "building_type": row.get("primaryspaceusage", "unknown").strip() or "unknown",
+                "building_name": f"{bid}（{display_category}）" if display_category else bid,
+                "building_type": display_category or (row.get("primaryspaceusage", "unknown").strip() or "unknown"),
             }
     return meta
 
@@ -35,7 +55,8 @@ def choose_buildings(electricity_file: Path, meta: dict[str, dict[str, str]], ma
         reader = csv.reader(f)
         headers = next(reader)
     cols = [c for c in headers[1:] if c in meta]
-    return cols[:max_buildings]
+    showcase = [bid for bid in SHOWCASE_BUILDINGS if bid in cols]
+    return showcase or cols[:max_buildings]
 
 
 def normalize_energy(
@@ -145,6 +166,7 @@ def normalize_sikong_knowledge(sikong_dir: Path, out_file: Path) -> int:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Normalize BDG2 and Sikong data for A8 project.")
     parser.add_argument("--max-buildings", type=int, default=30, help="Number of BDG2 building columns to include.")
+    parser.add_argument("--skip-knowledge", action="store_true", help="Skip regenerating normalized knowledge chunks.")
     args = parser.parse_args()
 
     if not BDG2_ELEC.exists():
@@ -160,10 +182,13 @@ def main() -> None:
         raise RuntimeError("No matching building columns found in electricity file.")
 
     input_rows, output_rows = normalize_energy(BDG2_ELEC, meta, selected_buildings, OUT_ENERGY)
-    chunk_count = normalize_sikong_knowledge(SIKONG_DIR, OUT_KNOWLEDGE)
+    chunk_count = 0
+    if not args.skip_knowledge:
+        chunk_count = normalize_sikong_knowledge(SIKONG_DIR, OUT_KNOWLEDGE)
 
     summary = {
         "selected_buildings": len(selected_buildings),
+        "building_ids": selected_buildings,
         "input_timeseries_rows": input_rows,
         "normalized_energy_rows": output_rows,
         "knowledge_chunks": chunk_count,

@@ -3,7 +3,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from urllib.error import URLError
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -75,16 +75,22 @@ try:
         method="POST",
         payload={"message": "请分析突增异常", "anomaly_id": aid, "provider": "template"},
     )
-    diagnose_fallback = get_json(
-        f"{SERVER_URL}/api/ai/diagnose",
-        method="POST",
-        payload={
-            "message": "请分析突增异常",
-            "anomaly_id": aid,
-            "provider": "llm",
-            "simulate_llm_failure": True,
-        },
-    )
+    diagnose_failure_status = None
+    diagnose_failure_body = ""
+    try:
+        _ = get_json(
+            f"{SERVER_URL}/api/ai/diagnose",
+            method="POST",
+            payload={
+                "message": "请分析突增异常",
+                "anomaly_id": aid,
+                "provider": "llm",
+                "simulate_llm_failure": True,
+            },
+        )
+    except HTTPError as exc:
+        diagnose_failure_status = exc.code
+        diagnose_failure_body = exc.read().decode("utf-8", errors="ignore")
     trace_id = diagnose_template["data"]["diagnosis"]["trace_id"]
     feedback = get_json(
         f"{SERVER_URL}/api/ai/feedback",
@@ -129,7 +135,8 @@ try:
     assert diagnose_template["code"] == 0 and not diagnose_template["data"]["diagnosis"]["fallback_used"]
     assert diagnose_template["data"]["diagnosis"]["knowledge_source"] in {"ragflow", "local", "none"}
     assert all("source_type" in item for item in diagnose_template["data"]["diagnosis"]["evidence"])
-    assert diagnose_fallback["code"] == 0 and diagnose_fallback["data"]["diagnosis"]["fallback_used"]
+    assert diagnose_failure_status == 502
+    assert "Simulated llm failure" in diagnose_failure_body
     assert feedback["code"] == 0 and feedback["data"]["label"] == "useful"
     assert evaluate["code"] == 0 and "llm" in evaluate["data"]
     assert analysis_report["code"] == 0 and "findings" in analysis_report["data"]["analysis"]

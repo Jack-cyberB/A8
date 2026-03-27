@@ -46,8 +46,7 @@
           <div class="filter-block filter-block--building">
             <div class="filter-label">建筑</div>
             <el-select v-model="filters.buildingId" placeholder="建筑" style="width: 240px" @change="onBuildingChange">
-              <el-option label="全部建筑" value=""></el-option>
-              <el-option v-for="b in buildings" :key="b.id" :label="`${b.name} (${b.type})`" :value="b.id"></el-option>
+              <el-option v-for="b in buildings" :key="b.id" :label="b.name" :value="b.id"></el-option>
             </el-select>
           </div>
 
@@ -153,7 +152,7 @@
                 <div class="analysis-scope">
                   <div class="analysis-scope-item">
                     <div class="analysis-scope-label">当前建筑</div>
-                    <div class="analysis-scope-value">{{ selectedBuildingMeta() ? `${selectedBuildingMeta().name} (${selectedBuildingMeta().type})` : '全部建筑' }}</div>
+                    <div class="analysis-scope-value">{{ selectedBuildingMeta() ? selectedBuildingMeta().name : '未选择建筑' }}</div>
                     <div class="analysis-scope-note">作为当前全站筛选上下文</div>
                   </div>
                   <div class="analysis-scope-item">
@@ -307,8 +306,8 @@
             <div class="analysis-scope">
               <div class="analysis-scope-item">
                 <div class="analysis-scope-label">当前建筑</div>
-                <div class="analysis-scope-value">{{ analysisInsights.scope_summary.building_name || '全部建筑' }}</div>
-                <div class="analysis-scope-note">{{ analysisInsights.scope_summary.building_type || 'portfolio' }}</div>
+                <div class="analysis-scope-value">{{ analysisInsights.scope_summary.building_name || '未选择建筑' }}</div>
+                <div class="analysis-scope-note" v-if="analysisInsights.scope_summary.building_type">{{ analysisInsights.scope_summary.building_type }}</div>
               </div>
               <div class="analysis-scope-item">
                 <div class="analysis-scope-label">筛选时间</div>

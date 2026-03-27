@@ -12,7 +12,7 @@ TESTS = [
     "backend.tests.test_repository.RepositoryTests.test_anomaly_list_has_status_fields",
     "backend.tests.test_repository.RepositoryTests.test_anomaly_detail_has_processing_summary",
     "backend.tests.test_repository.RepositoryTests.test_diagnose_template_shape",
-    "backend.tests.test_repository.RepositoryTests.test_diagnose_llm_fallback",
+    "backend.tests.test_repository.RepositoryTests.test_diagnose_llm_failure_raises",
     "backend.tests.test_repository.RepositoryTests.test_diagnose_llm_success_mock",
     "backend.tests.test_repository.RepositoryTests.test_ai_stats_shape",
     "backend.tests.test_repository.RepositoryTests.test_anomaly_note_upsert_and_detail",
