@@ -911,7 +911,8 @@ class EnergyRepository:
         if not question:
             raise ValueError("question is required")
 
-        session_id = str(payload.get("session_id", "")).strip() or None
+        _sid = payload.get("session_id")
+        session_id = str(_sid).strip() if _sid and str(_sid).strip() not in ("None", "null") else None
         started = time.perf_counter()
         result = self._ragflow_chat_completion(question, session_id=session_id)
         latency_ms = int((time.perf_counter() - started) * 1000)
