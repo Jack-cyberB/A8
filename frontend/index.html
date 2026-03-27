@@ -81,51 +81,220 @@
           </div>
         </section>
 
-        <section v-show="activePage === 'overview'" class="page">
-          <div class="cards cards--overview">
-            <div class="card">
-              <div class="card-title">总用电量</div>
-              <div class="card-value">{{ formatNumber(overview.totalKwh, 1) }} kWh</div>
-            </div>
-            <div class="card">
-              <div class="card-title">平均小时能耗</div>
-              <div class="card-value">{{ formatNumber(overview.avgKwh, 1) }} kWh</div>
-            </div>
-            <div class="card">
-              <div class="card-title">异常总数</div>
-              <div class="card-value">{{ overview.anomalyCount }}</div>
-            </div>
-            <div class="card">
-              <div class="card-title">节能潜力估算</div>
-              <div class="card-value">{{ formatNumber(overview.savingPct, 1) }}%</div>
-            </div>
-            <div class="card">
-              <div class="card-title">预计减排</div>
-              <div class="card-value">{{ formatNumber(overview.carbonKg, 1) }} kg</div>
-            </div>
+        <section class="workspace-header">
+          <div class="workspace-header-copy">
+            <div class="panel-eyebrow">{{ currentPageKicker() }}</div>
+            <div class="workspace-header-title">{{ currentPageTitle() }}</div>
+            <div class="workspace-header-desc">{{ currentPageDescription() }}</div>
           </div>
-          <div class="panel">
-            <div class="panel-head">
-              <div>
-                <div class="panel-eyebrow">Overview</div>
-                <div class="panel-title">最近 72 小时用电趋势</div>
+          <div class="workspace-header-side">
+            <div class="workspace-header-side-label">当前子模块</div>
+            <div class="workspace-header-side-value">{{ currentSubmoduleLabel() }}</div>
+          </div>
+        </section>
+
+        <section class="workspace-subnav">
+          <button
+            v-for="item in currentPageSubmodules()"
+            :key="`${activePage}-${item.key}`"
+            class="workspace-subnav-btn"
+            :class="{ active: currentSubmoduleKey() === item.key }"
+            @click="activateSubmodule(activePage, item.key)">
+            <span>{{ item.label }}</span>
+            <small>{{ item.desc }}</small>
+          </button>
+        </section>
+
+        <section v-show="activePage === 'overview'" class="page">
+          <template v-if="activeSubmoduleMap.overview === 'kpi'">
+            <div class="cards cards--overview">
+              <div class="card">
+                <div class="card-title">总用电量</div>
+                <div class="card-value">{{ formatNumber(overview.totalKwh, 1) }} kWh</div>
+              </div>
+              <div class="card">
+                <div class="card-title">平均小时能耗</div>
+                <div class="card-value">{{ formatNumber(overview.avgKwh, 1) }} kWh</div>
+              </div>
+              <div class="card">
+                <div class="card-title">异常总数</div>
+                <div class="card-value">{{ overview.anomalyCount }}</div>
+              </div>
+              <div class="card">
+                <div class="card-title">节能潜力估算</div>
+                <div class="card-value">{{ formatNumber(overview.savingPct, 1) }}%</div>
+              </div>
+              <div class="card">
+                <div class="card-title">预计减排</div>
+                <div class="card-value">{{ formatNumber(overview.carbonKg, 1) }} kg</div>
               </div>
             </div>
-            <div v-if="errors.overview" class="state-error">{{ errors.overview }}</div>
-            <div id="overviewChart" class="chart chart--overview"></div>
-          </div>
+            <div class="panel">
+              <div class="panel-head">
+                <div>
+                  <div class="panel-eyebrow">Overview</div>
+                  <div class="panel-title">最近 72 小时用电趋势</div>
+                </div>
+              </div>
+              <div v-if="errors.overview" class="state-error">{{ errors.overview }}</div>
+              <div id="overviewChart" class="chart chart--overview"></div>
+            </div>
+          </template>
+
+          <template v-else-if="activeSubmoduleMap.overview === 'profile'">
+            <div class="workspace-grid workspace-grid--overview">
+              <div class="panel">
+                <div class="panel-head">
+                  <div>
+                    <div class="panel-eyebrow">Profile</div>
+                    <div class="panel-title">当前建筑画像</div>
+                  </div>
+                </div>
+                <div class="analysis-scope">
+                  <div class="analysis-scope-item">
+                    <div class="analysis-scope-label">当前建筑</div>
+                    <div class="analysis-scope-value">{{ selectedBuildingMeta() ? `${selectedBuildingMeta().name} (${selectedBuildingMeta().type})` : '全部建筑' }}</div>
+                    <div class="analysis-scope-note">作为当前全站筛选上下文</div>
+                  </div>
+                  <div class="analysis-scope-item">
+                    <div class="analysis-scope-label">有效时间</div>
+                    <div class="analysis-scope-value">{{ currentValidRangeText() }}</div>
+                    <div class="analysis-scope-note">后续分析与助手都沿用这组范围</div>
+                  </div>
+                  <div class="analysis-scope-item">
+                    <div class="analysis-scope-label">当前分析对象</div>
+                    <div class="analysis-scope-value">{{ currentMetricLabel() }}</div>
+                    <div class="analysis-scope-note">当前已支持电力深分析，其他域保留扩展位</div>
+                  </div>
+                  <div class="analysis-scope-item">
+                    <div class="analysis-scope-label">当前异常数</div>
+                    <div class="analysis-scope-value">{{ overview.anomalyCount }}</div>
+                    <div class="analysis-scope-note">高优先 {{ overviewSeveritySummary('high') }} 条</div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="panel">
+                <div class="panel-head">
+                  <div>
+                    <div class="panel-eyebrow">Entry</div>
+                    <div class="panel-title">推荐演示入口</div>
+                  </div>
+                </div>
+                <div class="insight-list">
+                  <div class="insight-item is-info">
+                    <div class="insight-item-title">看趋势</div>
+                    <div class="insight-item-detail">进入能耗分析 > 趋势分析，先看当前范围的变化与天气联动。</div>
+                  </div>
+                  <div class="insight-item is-warning">
+                    <div class="insight-item-title">看异常</div>
+                    <div class="insight-item-detail">进入运维处置 > 异常看板，快速定位高优先异常和处置入口。</div>
+                  </div>
+                  <div class="insight-item is-success">
+                    <div class="insight-item-title">问知识</div>
+                    <div class="insight-item-detail">进入智能助手 > 知识问答，追问制度、原理和处置规范。</div>
+                  </div>
+                </div>
+                <div class="assistant-actions assistant-actions--start">
+                  <el-button @click="activateSubmodule('analysis', 'trend')">进入趋势分析</el-button>
+                  <el-button @click="activateSubmodule('anomaly', 'board')">查看异常看板</el-button>
+                  <el-button type="primary" @click="openKnowledgeAssistant('请结合当前建筑画像，说明后续演示应重点关注哪些用能问题？')">知识追问</el-button>
+                </div>
+              </div>
+            </div>
+          </template>
+
+          <template v-else>
+            <div class="cards cards--overview cards--status">
+              <div class="card">
+                <div class="card-title">系统状态</div>
+                <div class="card-value">{{ health.status }}</div>
+                <div class="card-note">回归 {{ health.regression }}</div>
+              </div>
+              <div class="card">
+                <div class="card-title">AI 调用量</div>
+                <div class="card-value">{{ aiStats.totalCalls }}</div>
+                <div class="card-note">近 {{ aiStats.windowHours }} 小时</div>
+              </div>
+              <div class="card">
+                <div class="card-title">平均延迟</div>
+                <div class="card-value">{{ formatNumber(aiStats.avgLatency, 0) }} ms</div>
+                <div class="card-note">演示稳定性观察项</div>
+              </div>
+              <div class="card">
+                <div class="card-title">知识库状态</div>
+                <div class="card-value">{{ health.ragflowChatReady ? '已接通' : '待配置' }}</div>
+                <div class="card-note">{{ health.ragflowDatasetCount || 0 }} 个数据集</div>
+              </div>
+            </div>
+            <div class="workspace-grid workspace-grid--overview">
+              <div class="panel">
+                <div class="panel-head">
+                  <div>
+                    <div class="panel-eyebrow">Health</div>
+                    <div class="panel-title">系统接口与模型就绪</div>
+                  </div>
+                </div>
+                <div class="analysis-scope">
+                  <div class="analysis-scope-item">
+                    <div class="analysis-scope-label">AI 服务</div>
+                    <div class="analysis-scope-value">{{ health.aiConfigured ? '已配置' : '未配置' }}</div>
+                    <div class="analysis-scope-note">{{ health.aiModelReady ? '模型可用' : '模型待校验' }}</div>
+                  </div>
+                  <div class="analysis-scope-item">
+                    <div class="analysis-scope-label">知识库</div>
+                    <div class="analysis-scope-value">{{ health.ragflowChatReady ? '已接通' : '未接通' }}</div>
+                    <div class="analysis-scope-note">Chat ID {{ health.ragflowChatId || '-' }}</div>
+                  </div>
+                  <div class="analysis-scope-item">
+                    <div class="analysis-scope-label">模板兜底率</div>
+                    <div class="analysis-scope-value">{{ formatNumber(aiStats.fallbackRate, 1) }}%</div>
+                    <div class="analysis-scope-note">用于比赛稳定性兜底</div>
+                  </div>
+                  <div class="analysis-scope-item">
+                    <div class="analysis-scope-label">反馈有效率</div>
+                    <div class="analysis-scope-value">{{ formatNumber(aiEvaluate.feedback.usefulRate || 0, 1) }}%</div>
+                    <div class="analysis-scope-note">已沉淀 AI 质量反馈</div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="panel">
+                <div class="panel-head">
+                  <div>
+                    <div class="panel-eyebrow">Demo Readiness</div>
+                    <div class="panel-title">当前答辩可讲重点</div>
+                  </div>
+                </div>
+                <div class="insight-list">
+                  <div class="insight-item is-info">
+                    <div class="insight-item-title">电能分析闭环已形成</div>
+                    <div class="insight-item-detail">当前可以完整演示数据总览、分析、异常处置和 AI 辅助解释。</div>
+                  </div>
+                  <div class="insight-item is-warning">
+                    <div class="insight-item-title">多领域扩展位已预留</div>
+                    <div class="insight-item-detail">分析对象与助手上下文已为水、空调、环境等后续扩展保留位置。</div>
+                  </div>
+                  <div class="insight-item is-success">
+                    <div class="insight-item-title">知识依据可展示</div>
+                    <div class="insight-item-detail">知识问答正文与证据已分层展示，更适合答辩说明依据链路。</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </template>
         </section>
 
         <section v-show="activePage === 'analysis'" class="page analysis-page">
           <div class="analysis-hero">
             <div>
               <div class="panel-eyebrow">Analysis Workspace</div>
-              <div class="analysis-hero-title">{{ currentMetricLabel() }}分析工作台</div>
-              <div class="analysis-hero-sub">围绕当前建筑和时间范围，先看趋势、结构、天气联动和同类对比；需要完整 AI 结论时，再进入智能助手生成。</div>
+              <div class="analysis-hero-title">{{ currentMetricLabel() }} · {{ currentSubmoduleLabel('analysis') }}</div>
+              <div class="analysis-hero-sub">{{ currentSubmoduleKey('analysis') === 'opportunity' ? '把高耗窗口、节能机会和动作建议收拢到同一块工作区里，便于直接跳入节能建议。' : '围绕当前建筑和时间范围，按单一任务查看趋势、结构和对标结论，避免信息混在一起。' }}</div>
             </div>
             <div class="analysis-hero-actions">
-              <el-switch v-model="analysisOverlayWeather" active-text="叠加温度" :disabled="!analysisTrend.overlayAvailable" @change="onAnalysisOverlayChange"></el-switch>
-              <el-button @click="runAnalysisAssistant" type="primary" :loading="loading.analysisInsight">AI 分析</el-button>
+              <el-switch v-if="currentSubmoduleKey('analysis') === 'trend'" v-model="analysisOverlayWeather" active-text="叠加温度" :disabled="!analysisTrend.overlayAvailable" @change="onAnalysisOverlayChange"></el-switch>
+              <el-button @click="launchAnalysisAssistant" type="primary" :loading="loading.analysisInsight">{{ currentSubmoduleKey('analysis') === 'opportunity' ? '生成节能建议' : '进入分析解读' }}</el-button>
             </div>
           </div>
 
@@ -181,7 +350,7 @@
               </div>
             </div>
 
-            <div class="analysis-main-grid">
+            <div v-if="activeSubmoduleMap.analysis === 'trend'" class="analysis-main-grid">
               <div class="panel panel--feature">
                 <div class="panel-head">
                   <div>
@@ -198,17 +367,17 @@
               </div>
             </div>
 
-            <div class="panel panel--insight-board">
+            <div v-if="activeSubmoduleMap.analysis === 'trend' || activeSubmoduleMap.analysis === 'benchmark'" class="panel panel--insight-board">
               <div class="panel-head">
                 <div>
                   <div class="panel-eyebrow">Insights</div>
-                  <div class="panel-title">规则洞察与证据提要</div>
+                  <div class="panel-title">{{ activeSubmoduleMap.analysis === 'benchmark' ? '同类偏差解释' : '规则洞察与证据提要' }}</div>
                 </div>
                 <div class="panel-meta">{{ analysisInsights.scope_summary.point_count || 0 }} 个数据点</div>
               </div>
               <div v-if="errors.analysisInsights" class="state-warn">{{ errors.analysisInsights }}</div>
-              <div class="insight-groups">
-                <div class="insight-group">
+              <div class="insight-groups" :class="{ 'insight-groups--two': activeSubmoduleMap.analysis === 'trend' }">
+                <div v-if="activeSubmoduleMap.analysis === 'trend'" class="insight-group">
                   <div class="insight-group-title">趋势结论</div>
                   <div v-if="!analysisInsights.trend_findings.length" class="empty-tip">当前时间范围暂无可解释趋势。</div>
                   <div v-else class="insight-list">
@@ -219,7 +388,7 @@
                   </div>
                 </div>
 
-                <div class="insight-group">
+                <div v-if="activeSubmoduleMap.analysis === 'trend'" class="insight-group">
                   <div class="insight-group-title">天气联动</div>
                   <div v-if="!analysisInsights.weather_findings.length" class="empty-tip">当前没有温度联动结论。</div>
                   <div v-else class="insight-list">
@@ -230,7 +399,7 @@
                   </div>
                 </div>
 
-                <div class="insight-group">
+                <div v-if="activeSubmoduleMap.analysis === 'benchmark'" class="insight-group">
                   <div class="insight-group-title">同类对比</div>
                   <div v-if="!analysisInsights.compare_findings.length" class="empty-tip">选择单体建筑后，这里会给出同类位置和差距解释。</div>
                   <div v-else class="insight-list">
@@ -242,10 +411,9 @@
                 </div>
               </div>
             </div>
-            </div>
 
-            <div class="analysis-secondary-grid">
-              <div class="panel">
+            <div v-if="activeSubmoduleMap.analysis === 'structure' || activeSubmoduleMap.analysis === 'benchmark'" class="analysis-secondary-grid" :class="{ 'analysis-secondary-grid--single': activeSubmoduleMap.analysis !== 'structure' }">
+              <div v-if="activeSubmoduleMap.analysis === 'structure'" class="panel">
                 <div class="panel-head">
                   <div>
                     <div class="panel-eyebrow">Structure</div>
@@ -265,7 +433,7 @@
                 </div>
               </div>
 
-              <div class="panel">
+              <div v-if="activeSubmoduleMap.analysis === 'benchmark'" class="panel">
                 <div class="panel-head">
                   <div>
                     <div class="panel-eyebrow">Compare</div>
@@ -304,7 +472,7 @@
               </div>
             </div>
 
-            <div class="analysis-bottom-grid">
+            <div v-if="activeSubmoduleMap.analysis === 'opportunity'" class="analysis-bottom-grid">
               <div class="panel">
                 <div class="panel-head">
                   <div>
@@ -325,6 +493,9 @@
                     </div>
                     <div class="opportunity-detail">{{ item.detail }}</div>
                     <div class="opportunity-meta">影响估算 {{ formatInsightKwh(item.estimated_loss_kwh) }}</div>
+                    <div class="assistant-actions assistant-actions--start assistant-actions--compact">
+                      <el-button size="small" type="primary" @click="sendSavingOpportunityToAssistant(item)">生成节能建议</el-button>
+                    </div>
                   </div>
                 </div>
               </div>
@@ -362,104 +533,221 @@
         </section>
 
         <section v-show="activePage === 'anomaly'" class="page">
-          <div class="panel">
-            <div class="panel-head">
-              <div>
-                <div class="panel-eyebrow">Anomaly</div>
-                <div class="panel-title">异常类型分布</div>
+          <template v-if="activeSubmoduleMap.anomaly === 'board'">
+            <div class="cards cards--overview cards--status">
+              <div class="card">
+                <div class="card-title">异常总数</div>
+                <div class="card-value">{{ overview.anomalyCount }}</div>
+                <div class="card-note">当前筛选范围</div>
+              </div>
+              <div class="card">
+                <div class="card-title">高优先异常</div>
+                <div class="card-value">{{ overviewSeveritySummary('high') }}</div>
+                <div class="card-note">优先进入诊断和确认</div>
+              </div>
+              <div class="card">
+                <div class="card-title">新告警</div>
+                <div class="card-value">{{ anomalyCountByStatus('new') }}</div>
+                <div class="card-note">等待处置</div>
+              </div>
+              <div class="card">
+                <div class="card-title">已闭环</div>
+                <div class="card-value">{{ anomalyCountByStatus('resolved') }}</div>
+                <div class="card-note">可进入处理复盘</div>
               </div>
             </div>
-            <div id="anomalyTypeChart" class="chart"></div>
-          </div>
 
-          <div class="panel">
-            <div class="panel-head">
-              <div>
-                <div class="panel-eyebrow">Operations</div>
-                <div class="panel-title">故障列表与处理闭环</div>
+            <div class="analysis-secondary-grid">
+              <div class="panel">
+                <div class="panel-head">
+                  <div>
+                    <div class="panel-eyebrow">Anomaly</div>
+                    <div class="panel-title">异常类型分布</div>
+                  </div>
+                </div>
+                <div id="anomalyTypeChart" class="chart"></div>
+              </div>
+
+              <div class="panel">
+                <div class="panel-head">
+                  <div>
+                    <div class="panel-eyebrow">Snapshot</div>
+                    <div class="panel-title">近期异常快照</div>
+                  </div>
+                </div>
+                <div v-if="!recentAnomalyRows().length" class="empty-tip">当前没有可展示的异常快照。</div>
+                <div v-else class="anomaly-window-list">
+                  <div v-for="row in recentAnomalyRows()" :key="row.anomaly_id" class="anomaly-window-card">
+                    <div class="anomaly-window-head">
+                      <div>
+                        <div class="anomaly-window-title">{{ row.anomaly_name }}</div>
+                        <div class="anomaly-window-time">{{ row.building_name }} · {{ formatCompactDateTime(row.timestamp) }}</div>
+                      </div>
+                      <div class="anomaly-window-tags">
+                        <div class="subtle-state">
+                          <span class="status-dot" :class="severityToneClass(row.severity)"></span>
+                          <span>{{ severityLabel(row.severity) }}</span>
+                        </div>
+                        <div class="subtle-metric">偏差 {{ formatNumber(row.deviation_pct, 1) }}%</div>
+                      </div>
+                    </div>
+                    <div class="assistant-actions assistant-actions--start assistant-actions--compact">
+                      <el-button size="small" @click="openAnomalyDetail(row)">详情</el-button>
+                      <el-button size="small" type="primary" @click="diagnoseFromAnomaly(row)">进入诊断</el-button>
+                    </div>
+                  </div>
+                </div>
               </div>
             </div>
-            <div class="anomaly-toolbar">
-              <el-select v-model="anomalyQuery.severity" placeholder="严重级别" style="width: 140px" @change="onAnomalyFilterChange">
-                <el-option label="全部级别" value=""></el-option>
-                <el-option label="高" value="high"></el-option>
-                <el-option label="中" value="medium"></el-option>
-                <el-option label="低" value="low"></el-option>
-              </el-select>
+          </template>
 
-              <el-select v-model="anomalyQuery.status" placeholder="处理状态" style="width: 160px" @change="onAnomalyFilterChange">
-                <el-option label="全部状态" value=""></el-option>
-                <el-option label="新告警" value="new"></el-option>
-                <el-option label="已确认" value="acknowledged"></el-option>
-                <el-option label="已忽略" value="ignored"></el-option>
-                <el-option label="已完成" value="resolved"></el-option>
-              </el-select>
+          <template v-else-if="activeSubmoduleMap.anomaly === 'events'">
+            <div class="panel">
+              <div class="panel-head">
+                <div>
+                  <div class="panel-eyebrow">Operations</div>
+                  <div class="panel-title">事件列表与处理闭环</div>
+                </div>
+              </div>
+              <div class="anomaly-toolbar">
+                <el-select v-model="anomalyQuery.severity" placeholder="严重级别" style="width: 140px" @change="onAnomalyFilterChange">
+                  <el-option label="全部级别" value=""></el-option>
+                  <el-option label="高" value="high"></el-option>
+                  <el-option label="中" value="medium"></el-option>
+                  <el-option label="低" value="low"></el-option>
+                </el-select>
 
-              <el-select v-model="anomalyQuery.sort" placeholder="排序" style="width: 200px" @change="onAnomalyFilterChange">
-                <el-option label="时间倒序" value="timestamp_desc"></el-option>
-                <el-option label="时间正序" value="timestamp_asc"></el-option>
-                <el-option label="偏差最大优先" value="deviation_desc"></el-option>
-                <el-option label="严重级别优先" value="severity_desc"></el-option>
-              </el-select>
-              <el-button @click="exportAnomalies">导出CSV</el-button>
+                <el-select v-model="anomalyQuery.status" placeholder="处理状态" style="width: 160px" @change="onAnomalyFilterChange">
+                  <el-option label="全部状态" value=""></el-option>
+                  <el-option label="新告警" value="new"></el-option>
+                  <el-option label="已确认" value="acknowledged"></el-option>
+                  <el-option label="已忽略" value="ignored"></el-option>
+                  <el-option label="已完成" value="resolved"></el-option>
+                </el-select>
+
+                <el-select v-model="anomalyQuery.sort" placeholder="排序" style="width: 200px" @change="onAnomalyFilterChange">
+                  <el-option label="时间倒序" value="timestamp_desc"></el-option>
+                  <el-option label="时间正序" value="timestamp_asc"></el-option>
+                  <el-option label="偏差最大优先" value="deviation_desc"></el-option>
+                  <el-option label="严重级别优先" value="severity_desc"></el-option>
+                </el-select>
+                <el-button @click="exportAnomalies">导出CSV</el-button>
+              </div>
+
+              <div v-if="errors.anomaly" class="state-error">{{ errors.anomaly }}</div>
+              <el-table :data="anomalyRows" height="420" stripe v-loading="loading.anomaly" class="anomaly-table">
+                <el-table-column prop="anomaly_id" label="ID" width="70"></el-table-column>
+                <el-table-column label="建筑" min-width="180" show-overflow-tooltip>
+                  <template #default="scope">
+                    <div class="table-title-cell">{{ scope.row.building_name }}</div>
+                  </template>
+                </el-table-column>
+                <el-table-column prop="anomaly_name" label="类型" min-width="140" show-overflow-tooltip></el-table-column>
+                <el-table-column label="级别" width="90">
+                  <template #default="scope">
+                    <div class="table-state">
+                      <span class="status-dot" :class="severityToneClass(scope.row.severity)"></span>
+                      <span>{{ severityLabel(scope.row.severity) }}</span>
+                    </div>
+                  </template>
+                </el-table-column>
+                <el-table-column label="状态" width="108">
+                  <template #default="scope">
+                    <div class="table-state">
+                      <span class="status-dot" :class="statusToneClass(scope.row.status)"></span>
+                      <span>{{ statusDisplay(scope.row.status) }}</span>
+                    </div>
+                  </template>
+                </el-table-column>
+                <el-table-column prop="assignee" label="处理人" width="110" show-overflow-tooltip></el-table-column>
+                <el-table-column label="时间" width="152">
+                  <template #default="scope">
+                    <span class="table-time">{{ formatCompactDateTime(scope.row.timestamp) }}</span>
+                  </template>
+                </el-table-column>
+                <el-table-column prop="deviation_pct" label="偏差(%)" width="100"></el-table-column>
+                <el-table-column label="操作" min-width="290" fixed="right">
+                  <template #default="scope">
+                    <div class="action-cell">
+                      <el-button size="small" @click="openAnomalyDetail(scope.row)">详情</el-button>
+                      <el-button size="small" type="danger" @click="diagnoseFromAnomaly(scope.row)">诊断</el-button>
+                      <el-button size="small" type="primary" @click="openActionDialog(scope.row, 'ack')">确认</el-button>
+                      <el-button size="small" @click="openActionDialog(scope.row, 'ignore')">忽略</el-button>
+                      <el-button size="small" type="success" @click="openActionDialog(scope.row, 'resolve')">完成</el-button>
+                    </div>
+                  </template>
+                </el-table-column>
+              </el-table>
+
+              <div class="empty-tip" v-if="!loading.anomaly && !anomalyRows.length">暂无异常数据</div>
+              <el-pagination class="pager" layout="total, sizes, prev, pager, next" :total="anomalyQuery.total" :page-size="anomalyQuery.pageSize" :current-page="anomalyQuery.page" :page-sizes="[10,20,50,100]" @size-change="onAnomalyPageSizeChange" @current-change="onAnomalyPageChange"></el-pagination>
             </div>
+          </template>
 
-            <div v-if="errors.anomaly" class="state-error">{{ errors.anomaly }}</div>
-            <el-table :data="anomalyRows" height="420" stripe v-loading="loading.anomaly" class="anomaly-table">
-              <el-table-column prop="anomaly_id" label="ID" width="70"></el-table-column>
-              <el-table-column label="建筑" min-width="180" show-overflow-tooltip>
-                <template #default="scope">
-                  <div class="table-title-cell">{{ scope.row.building_name }}</div>
-                </template>
-              </el-table-column>
-              <el-table-column prop="anomaly_name" label="类型" min-width="140" show-overflow-tooltip></el-table-column>
-              <el-table-column label="级别" width="90">
-                <template #default="scope">
-                  <div class="table-state">
-                    <span class="status-dot" :class="severityToneClass(scope.row.severity)"></span>
-                    <span>{{ severityLabel(scope.row.severity) }}</span>
+          <template v-else>
+            <div class="workspace-grid workspace-grid--overview">
+              <div class="panel">
+                <div class="panel-head">
+                  <div>
+                    <div class="panel-eyebrow">Review</div>
+                    <div class="panel-title">闭环事件复盘入口</div>
                   </div>
-                </template>
-              </el-table-column>
-              <el-table-column label="状态" width="108">
-                <template #default="scope">
-                  <div class="table-state">
-                    <span class="status-dot" :class="statusToneClass(scope.row.status)"></span>
-                    <span>{{ statusDisplay(scope.row.status) }}</span>
+                </div>
+                <div v-if="!reviewableAnomalyRows().length" class="empty-tip">当前还没有可复盘的闭环事件，先去事件列表完成确认或关闭。</div>
+                <div v-else class="anomaly-window-list">
+                  <div v-for="row in reviewableAnomalyRows()" :key="`review-${row.anomaly_id}`" class="anomaly-window-card">
+                    <div class="anomaly-window-head">
+                      <div>
+                        <div class="anomaly-window-title">{{ row.anomaly_name }}</div>
+                        <div class="anomaly-window-time">{{ row.building_name }} · {{ statusDisplay(row.status) }}</div>
+                      </div>
+                      <div class="subtle-metric">{{ formatCompactDateTime(row.timestamp) }}</div>
+                    </div>
+                    <div class="assistant-actions assistant-actions--start assistant-actions--compact">
+                      <el-button size="small" @click="openAnomalyDetail(row)">打开详情与复盘</el-button>
+                    </div>
                   </div>
-                </template>
-              </el-table-column>
-              <el-table-column prop="assignee" label="处理人" width="110" show-overflow-tooltip></el-table-column>
-              <el-table-column label="时间" width="152">
-                <template #default="scope">
-                  <span class="table-time">{{ formatCompactDateTime(scope.row.timestamp) }}</span>
-                </template>
-              </el-table-column>
-              <el-table-column prop="deviation_pct" label="偏差(%)" width="100"></el-table-column>
-              <el-table-column label="操作" min-width="290" fixed="right">
-                <template #default="scope">
-                  <div class="action-cell">
-                    <el-button size="small" @click="openAnomalyDetail(scope.row)">详情</el-button>
-                    <el-button size="small" type="danger" @click="diagnoseFromAnomaly(scope.row)">诊断</el-button>
-                    <el-button size="small" type="primary" @click="openActionDialog(scope.row, 'ack')">确认</el-button>
-                    <el-button size="small" @click="openActionDialog(scope.row, 'ignore')">忽略</el-button>
-                    <el-button size="small" type="success" @click="openActionDialog(scope.row, 'resolve')">完成</el-button>
-                  </div>
-                </template>
-              </el-table-column>
-            </el-table>
+                </div>
+              </div>
 
-            <div class="empty-tip" v-if="!loading.anomaly && !anomalyRows.length">暂无异常数据</div>
-            <el-pagination class="pager" layout="total, sizes, prev, pager, next" :total="anomalyQuery.total" :page-size="anomalyQuery.pageSize" :current-page="anomalyQuery.page" :page-sizes="[10,20,50,100]" @size-change="onAnomalyPageSizeChange" @current-change="onAnomalyPageChange"></el-pagination>
-          </div>
+              <div class="panel">
+                <div class="panel-head">
+                  <div>
+                    <div class="panel-eyebrow">Guidance</div>
+                    <div class="panel-title">复盘建议</div>
+                  </div>
+                </div>
+                <div class="insight-list">
+                  <div class="insight-item is-info">
+                    <div class="insight-item-title">先确认原因，再写动作</div>
+                    <div class="insight-item-detail">复盘里优先记录真实原因、采取动作和结果总结，便于答辩说明闭环能力。</div>
+                  </div>
+                  <div class="insight-item is-warning">
+                    <div class="insight-item-title">诊断建议可直接复用</div>
+                    <div class="insight-item-detail">如果已经生成异常诊断，可在详情弹窗中直接把 AI 建议写入复盘内容。</div>
+                  </div>
+                  <div class="insight-item is-success">
+                    <div class="insight-item-title">从列表进入更稳</div>
+                    <div class="insight-item-detail">建议先在事件列表定位目标事件，再进入详情页填写复盘，演示路径更清晰。</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </template>
         </section>
 
         <section v-show="activePage === 'assistant'" class="page assistant-page assistant-page--unified">
           <div class="assistant-topbar">
             <div class="assistant-topbar-copy">
-              <div class="assistant-topbar-kicker">Smart O&M Workspace</div>
-              <div class="assistant-topbar-name">智能运维助手</div>
+              <div class="assistant-topbar-kicker">{{ assistantSubmoduleConfig().kicker }}</div>
+              <div class="assistant-topbar-name">{{ assistantTitle() }}</div>
               <div class="assistant-topbar-sub">{{ currentAssistantContextText() }}</div>
+              <div class="assistant-context-strip">
+                <div v-for="item in assistantContextFacts()" :key="`${assistantSubmodule}-${item.label}`" class="assistant-context-pill">
+                  <span>{{ item.label }}</span>
+                  <strong>{{ item.value }}</strong>
+                </div>
+              </div>
             </div>
             <div class="assistant-topbar-meta">
               <div class="assistant-meta-line">
@@ -473,17 +761,13 @@
           <div class="assistant-body" ref="assistantBody">
             <div class="assistant-thread">
               <div v-if="!unifiedChat.messages.length" class="assistant-welcome-state">
-                <div class="assistant-welcome-kicker">问答、诊断、依据放在同一张工作台里</div>
-                <div class="assistant-welcome-title">把问题提给系统，再决定下一步运维动作</div>
-                <div class="assistant-welcome-desc">这里适合做三类任务：解读当前分析、追问运维知识、围绕异常给出排查建议。回答会优先给出正文，知识依据默认折叠在下方。</div>
+                <div class="assistant-welcome-kicker">{{ assistantSubmoduleConfig().label }}</div>
+                <div class="assistant-welcome-title">{{ assistantWelcomeTitle() }}</div>
+                <div class="assistant-welcome-desc">{{ assistantWelcomeDescription() }}</div>
                 <div class="assistant-welcome-facts">
-                  <div class="assistant-fact">
-                    <div class="assistant-fact-label">当前场景</div>
-                    <div class="assistant-fact-value">{{ currentAssistantContextText() }}</div>
-                  </div>
-                  <div class="assistant-fact">
-                    <div class="assistant-fact-label">工作状态</div>
-                    <div class="assistant-fact-value">{{ assistantCapabilityText() }}</div>
+                  <div v-for="item in assistantContextFacts()" :key="`welcome-${assistantSubmodule}-${item.label}`" class="assistant-fact">
+                    <div class="assistant-fact-label">{{ item.label }}</div>
+                    <div class="assistant-fact-value">{{ item.value }}</div>
                   </div>
                 </div>
               </div>
@@ -553,7 +837,7 @@
                       <div class="unified-card-meta">
                         <span>{{ msg.pending ? '正在组织回答' : '回答已整理' }}</span>
                         <span class="meta-separator"></span>
-                        <span>{{ assistantCapabilityText() }}</span>
+                        <span>{{ assistantKnowledgeStatusText() }}</span>
                       </div>
                     </div>
                   </div>
@@ -608,13 +892,52 @@
                         </ul>
                       </div>
                       <div class="assistant-section">
-                        <div class="assistant-section-title">节能建议</div>
+                        <div class="assistant-section-title">运维建议</div>
+                        <ul class="assistant-bullet-list">
+                          <li v-for="item in msg.data.operations_suggestions" :key="item">{{ item }}</li>
+                        </ul>
+                      </div>
+                    </div>
+                    <div class="assistant-actions assistant-actions--start">
+                      <el-button size="small" :type="analysisFeedbackLabel === 'useful' ? 'primary' : 'default'" @click="submitAnalysisFeedback('useful')">有帮助</el-button>
+                      <el-button size="small" :type="analysisFeedbackLabel === 'not_useful' ? 'danger' : 'default'" @click="submitAnalysisFeedback('not_useful')">没帮助</el-button>
+                    </div>
+                  </template>
+                </div>
+
+                <div v-else-if="msg.type === 'saving'" class="unified-assistant-card unified-assistant-card--saving">
+                  <div v-if="msg.pending" class="empty-tip empty-tip--emphasis">
+                    <div class="empty-tip-title">正在生成节能建议</div>
+                    <div class="empty-tip-desc">系统正在整合节能机会、当前范围和可执行动作...</div>
+                  </div>
+                  <template v-else-if="msg.data">
+                    <div class="unified-card-header">
+                      <div>
+                        <div class="unified-card-title">节能建议</div>
+                        <div class="unified-card-meta">
+                          <span>{{ resultSourceText(msg.data) }}</span>
+                          <span class="meta-separator"></span>
+                          <span>{{ msg.data.latency_ms || 0 }} ms</span>
+                        </div>
+                      </div>
+                    </div>
+                    <div class="assistant-summary-card">{{ msg.data.summary }}</div>
+                    <div class="assistant-section-grid assistant-section-grid--triple">
+                      <div class="assistant-section">
+                        <div class="assistant-section-title">优先动作</div>
                         <ul class="assistant-bullet-list">
                           <li v-for="item in msg.data.energy_saving_suggestions" :key="item">{{ item }}</li>
                         </ul>
                       </div>
                       <div class="assistant-section">
-                        <div class="assistant-section-title">运维建议</div>
+                        <div class="assistant-section-title">预估收益 / 影响</div>
+                        <ul class="assistant-bullet-list">
+                          <li v-for="item in topSavingImpactItems()" :key="item">{{ item }}</li>
+                          <li v-if="!topSavingImpactItems().length">当前没有明确收益估算时，可先以动作优先级和影响窗口组织汇报。</li>
+                        </ul>
+                      </div>
+                      <div class="assistant-section">
+                        <div class="assistant-section-title">实施配合</div>
                         <ul class="assistant-bullet-list">
                           <li v-for="item in msg.data.operations_suggestions" :key="item">{{ item }}</li>
                         </ul>
@@ -641,8 +964,8 @@
                 v-model="unifiedChat.input"
                 type="textarea"
                 :rows="2"
-                placeholder="输入问题，如：诊断当前异常、空调高负荷原因、节能建议... (Ctrl+Enter 发送)"
-                @keydown.ctrl.enter.prevent="sendUnifiedMessage()"
+                :placeholder="assistantPlaceholder()"
+                @keydown="handleUnifiedInputKeydown"
               ></el-input>
               <div class="assistant-input-actions">
                 <el-button @click="resetUnifiedConversation">新会话</el-button>

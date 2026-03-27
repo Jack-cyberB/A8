@@ -2140,3 +2140,229 @@ body {
     justify-content: space-between;
   }
 }
+
+/* ── 2026-03 Workspace Refactor ─────────────────────────────────────────── */
+.workspace-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-end;
+  gap: 16px;
+  padding: 18px 20px;
+  margin-bottom: 14px;
+  border: 1px solid rgba(114, 147, 186, 0.14);
+  border-radius: 24px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.88) 0%, rgba(245, 250, 255, 0.82) 100%);
+  box-shadow: 0 18px 34px rgba(42, 77, 126, 0.08);
+}
+
+.workspace-header-copy {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.workspace-header-title {
+  font-size: 30px;
+  font-weight: 800;
+  letter-spacing: -0.03em;
+  color: #17314e;
+}
+
+.workspace-header-desc {
+  max-width: 780px;
+  font-size: 14px;
+  line-height: 1.72;
+  color: #5d6f8b;
+}
+
+.workspace-header-side {
+  min-width: 180px;
+  padding: 14px 16px;
+  border-radius: 18px;
+  border: 1px solid rgba(120, 154, 192, 0.14);
+  background: rgba(255, 255, 255, 0.8);
+  text-align: right;
+}
+
+.workspace-header-side-label {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: #8193af;
+}
+
+.workspace-header-side-value {
+  margin-top: 8px;
+  font-size: 18px;
+  font-weight: 800;
+  color: #17314d;
+}
+
+.workspace-subnav {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
+  margin-bottom: 18px;
+}
+
+.workspace-subnav-btn {
+  display: grid;
+  gap: 6px;
+  text-align: left;
+  padding: 14px 16px;
+  border-radius: 18px;
+  border: 1px solid rgba(118, 151, 189, 0.14);
+  background: rgba(255, 255, 255, 0.72);
+  color: #28405d;
+  cursor: pointer;
+  transition: transform 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease, background 0.18s ease;
+}
+
+.workspace-subnav-btn span {
+  font-size: 14px;
+  font-weight: 800;
+}
+
+.workspace-subnav-btn small {
+  font-size: 12px;
+  color: #7284a0;
+  line-height: 1.55;
+}
+
+.workspace-subnav-btn:hover {
+  transform: translateY(-1px);
+  border-color: rgba(27, 118, 219, 0.22);
+  box-shadow: 0 12px 24px rgba(43, 75, 122, 0.08);
+}
+
+.workspace-subnav-btn.active {
+  background: linear-gradient(135deg, rgba(23, 110, 212, 0.1) 0%, rgba(255, 255, 255, 0.92) 100%);
+  border-color: rgba(24, 118, 224, 0.28);
+}
+
+.workspace-grid {
+  display: grid;
+  gap: 16px;
+}
+
+.workspace-grid--overview {
+  grid-template-columns: minmax(0, 1.08fr) minmax(0, 0.92fr);
+}
+
+.cards--status {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.analysis-secondary-grid--single,
+.analysis-bottom-grid--single {
+  grid-template-columns: 1fr;
+}
+
+.insight-groups--two {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.assistant-page--unified {
+  min-height: 680px;
+  height: min(76vh, 860px);
+}
+
+.assistant-context-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.assistant-context-pill {
+  display: grid;
+  gap: 4px;
+  padding: 10px 12px;
+  border-radius: 16px;
+  border: 1px solid rgba(122, 155, 193, 0.14);
+  background: rgba(255, 255, 255, 0.74);
+}
+
+.assistant-context-pill span {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: #7a8ca7;
+}
+
+.assistant-context-pill strong {
+  font-size: 13px;
+  line-height: 1.55;
+  color: #1f3653;
+}
+
+.assistant-topbar-copy {
+  max-width: 860px;
+}
+
+.assistant-welcome-facts {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.unified-assistant-card--saving {
+  border-left: 4px solid #16a085;
+}
+
+.assistant-section-grid--triple {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.assistant-input-actions .el-button {
+  min-width: 88px;
+}
+
+@media (max-width: 1220px) {
+  .workspace-grid--overview,
+  .cards--status,
+  .assistant-section-grid--triple {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 1080px) {
+  .workspace-header {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .workspace-header-side {
+    width: 100%;
+    text-align: left;
+  }
+
+  .assistant-context-strip,
+  .assistant-welcome-facts {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 720px) {
+  .workspace-header {
+    padding: 16px;
+  }
+
+  .workspace-header-title {
+    font-size: 24px;
+  }
+
+  .workspace-subnav {
+    grid-template-columns: 1fr;
+  }
+
+  .assistant-page--unified {
+    min-height: 620px;
+    height: auto;
+  }
+
+  .assistant-context-strip {
+    display: grid;
+    grid-template-columns: 1fr;
+  }
+}

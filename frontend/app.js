@@ -2,6 +2,86 @@
 
 const API_BASE = '';
 
+const PAGE_WORKSPACE_CONFIG = {
+  overview: {
+    label: '数据总览',
+    kicker: 'Overview Workspace',
+    description: '把总量、建筑画像和系统状态拆开看，首屏先回答现在发生了什么。',
+    submodules: [
+      { key: 'kpi', label: '核心指标', desc: '总量、趋势与当前能耗态势' },
+      { key: 'profile', label: '建筑画像', desc: '当前建筑、范围与演示入口' },
+      { key: 'status', label: '系统状态', desc: '接口、知识库与 AI 就绪情况' },
+    ],
+  },
+  analysis: {
+    label: '能耗分析',
+    kicker: 'Analysis Workspace',
+    description: '围绕当前建筑和时间范围，把趋势、结构、对标和节能机会分成独立任务工作区。',
+    submodules: [
+      { key: 'trend', label: '趋势分析', desc: '趋势变化与天气联动' },
+      { key: 'structure', label: '结构分析', desc: '分时段与周内结构' },
+      { key: 'benchmark', label: '同类对标', desc: '同类样本对比与偏差解释' },
+      { key: 'opportunity', label: '节能机会', desc: '高耗窗口与优化动作' },
+    ],
+  },
+  anomaly: {
+    label: '运维处置',
+    kicker: 'Operations Workspace',
+    description: '把异常总览、事件处理和复盘拆开，形成更清晰的处置闭环。',
+    submodules: [
+      { key: 'board', label: '异常看板', desc: '异常分布与近期态势' },
+      { key: 'events', label: '事件列表', desc: '过滤、处理和导出' },
+      { key: 'review', label: '处理复盘', desc: '闭环事件与复盘入口' },
+    ],
+  },
+  assistant: {
+    label: '智能助手',
+    kicker: 'Smart O&M Workspace',
+    description: '不再让系统猜你的意图，先选任务子模块，再生成专用结果。',
+    submodules: [
+      { key: 'knowledge', label: '知识问答', desc: '知识检索与依据引用' },
+      { key: 'saving', label: '节能建议', desc: '针对当前范围输出优化动作' },
+      { key: 'diagnosis', label: '异常诊断', desc: '围绕异常定位原因与步骤' },
+      { key: 'interpretation', label: '分析解读', desc: '解释当前分析结论与动作' },
+    ],
+  },
+};
+
+const ASSISTANT_SUBMODULE_CONFIG = {
+  knowledge: {
+    label: '知识问答',
+    kicker: 'Knowledge Workspace',
+    title: '知识问答工作台',
+    placeholder: '输入运维制度、设备原理、排查规范等问题。Enter 发送，Shift+Enter 换行',
+    welcomeTitle: '先问知识，再看依据。',
+    welcomeDesc: '这里专门处理知识库问答。回答正文优先展示，引用依据统一收纳在回答下方折叠区。',
+  },
+  saving: {
+    label: '节能建议',
+    kicker: 'Energy Saving Workspace',
+    title: '节能建议工作台',
+    placeholder: '输入节能优化目标、重点时段或建筑对象。Enter 发送，Shift+Enter 换行',
+    welcomeTitle: '围绕当前分析，直接生成节能动作。',
+    welcomeDesc: '这里不再混入诊断和知识检索，只聚焦节能结论、优先动作和收益影响。',
+  },
+  diagnosis: {
+    label: '异常诊断',
+    kicker: 'Diagnosis Workspace',
+    title: '异常诊断工作台',
+    placeholder: '输入异常现象、时间或对象，生成原因、步骤和动作。Enter 发送，Shift+Enter 换行',
+    welcomeTitle: '围绕异常对象输出结构化诊断。',
+    welcomeDesc: '这里专门处理异常原因、排查步骤、立即动作和预防建议，适合从运维处置页直接进入。',
+  },
+  interpretation: {
+    label: '分析解读',
+    kicker: 'Interpretation Workspace',
+    title: '分析解读工作台',
+    placeholder: '输入你想解释的趋势、结构或对标问题。Enter 发送，Shift+Enter 换行',
+    welcomeTitle: '把分析结果翻译成能汇报、能执行的结论。',
+    welcomeDesc: '这里只解释当前图表和范围，不混入知识依据和诊断模板。',
+  },
+};
+
 function buildQuery(params) {
   const q = new URLSearchParams();
   Object.entries(params).forEach(([k, v]) => {
@@ -17,7 +97,7 @@ createApp({
       pages: [
         { key: 'overview', label: '数据总览' },
         { key: 'analysis', label: '能耗分析' },
-        { key: 'anomaly', label: '故障监控' },
+        { key: 'anomaly', label: '运维处置' },
         { key: 'assistant', label: '智能助手' },
       ],
       analysisMetrics: [
@@ -27,6 +107,13 @@ createApp({
         { value: 'environment', label: '环境' },
       ],
       activePage: 'overview',
+      activeSubmoduleMap: {
+        overview: 'kpi',
+        analysis: 'trend',
+        anomaly: 'board',
+        assistant: 'knowledge',
+      },
+      assistantSubmodule: 'knowledge',
       buildings: [],
       globalRangeText: '-',
       globalRange: { startTime: '', endTime: '' },
@@ -401,21 +488,128 @@ createApp({
       const map = { high: '高优先', medium: '中优先', low: '低优先' };
       return map[level] || '一般';
     },
+    pageWorkspaceConfig(pageKey = this.activePage) {
+      return PAGE_WORKSPACE_CONFIG[pageKey] || PAGE_WORKSPACE_CONFIG.overview;
+    },
+    currentPageTitle() {
+      return this.pageWorkspaceConfig().label;
+    },
+    currentPageKicker() {
+      return this.pageWorkspaceConfig().kicker;
+    },
+    currentPageDescription() {
+      return this.pageWorkspaceConfig().description;
+    },
+    currentPageSubmodules() {
+      return this.pageWorkspaceConfig().submodules || [];
+    },
+    currentSubmoduleKey(pageKey = this.activePage) {
+      return this.activeSubmoduleMap[pageKey];
+    },
+    currentSubmoduleConfig(pageKey = this.activePage) {
+      return this.pageWorkspaceConfig(pageKey).submodules.find((item) => item.key === this.currentSubmoduleKey(pageKey)) || null;
+    },
+    currentSubmoduleLabel(pageKey = this.activePage) {
+      return this.currentSubmoduleConfig(pageKey)?.label || '未选择';
+    },
+    assistantSubmoduleConfig() {
+      return ASSISTANT_SUBMODULE_CONFIG[this.assistantSubmodule] || ASSISTANT_SUBMODULE_CONFIG.knowledge;
+    },
+    assistantTitle() {
+      return this.assistantSubmoduleConfig().title;
+    },
+    assistantPlaceholder() {
+      return this.assistantSubmoduleConfig().placeholder;
+    },
+    assistantWelcomeTitle() {
+      return this.assistantSubmoduleConfig().welcomeTitle;
+    },
+    assistantWelcomeDescription() {
+      return this.assistantSubmoduleConfig().welcomeDesc;
+    },
+    assistantKnowledgeStatusText() {
+      return this.health.ragflowChatReady ? '知识库可用' : '知识库待配置';
+    },
     currentAssistantContextText() {
-      if (this.selectedAnomaly) {
-        return `${this.selectedAnomaly.building_name} · ${this.selectedAnomaly.anomaly_name} · ${this.formatCompactDateTime(this.selectedAnomaly.timestamp)}`;
+      if (this.assistantSubmodule === 'diagnosis') {
+        if (this.selectedAnomaly) {
+          return `${this.selectedAnomaly.building_name} · ${this.selectedAnomaly.anomaly_name} · ${this.formatCompactDateTime(this.selectedAnomaly.timestamp)}`;
+        }
+        return '等待从运维处置页带入异常对象，或直接输入异常现象。';
+      }
+      if (this.assistantSubmodule === 'knowledge') {
+        return `${this.currentAnalysisScopeText()} · ${this.assistantKnowledgeStatusText()}`;
+      }
+      if (this.assistantSubmodule === 'saving') {
+        return `${this.currentAnalysisScopeText()} · 聚焦节能机会和优先动作`;
       }
       return this.currentAnalysisScopeText();
     },
     assistantLiveStatusText() {
-      if (this.unifiedChat.streaming) return '正在生成回答';
-      if (this.unifiedChat.loading) return '正在检索知识与分析上下文';
-      return '等待输入问题';
+      const label = this.assistantSubmoduleConfig().label;
+      if (this.unifiedChat.streaming) return `正在生成${label}结果`;
+      if (this.unifiedChat.loading) return `正在准备${label}上下文`;
+      return `等待输入${label}问题`;
     },
     assistantCapabilityText() {
+      if (this.assistantSubmodule === 'knowledge') {
+        const knowledge = this.health.ragflowChatReady ? '知识库问答可用' : '知识库问答待配置';
+        const llm = this.health.aiConfigured ? 'DeepSeek 已接入' : 'DeepSeek 未配置';
+        return `${knowledge} · ${llm}`;
+      }
+      if (this.assistantSubmodule === 'diagnosis') {
+        return this.selectedAnomaly ? '已绑定异常对象，可直接诊断' : '可手动输入异常现象，也可从运维处置页带入';
+      }
+      if (this.assistantSubmodule === 'saving') {
+        return '基于当前分析快照生成节能动作，不复用诊断模板';
+      }
+      if (this.assistantSubmodule === 'interpretation') {
+        return '围绕趋势、结构和对标结论输出可汇报的解释';
+      }
       const knowledge = this.health.ragflowChatReady ? '知识库问答可用' : '知识库问答待配置';
       const llm = this.health.aiConfigured ? 'DeepSeek 已接入' : 'DeepSeek 未配置';
       return `${knowledge} · ${llm}`;
+    },
+    assistantContextFacts() {
+      const building = this.selectedBuildingMeta();
+      const scopeText = this.isCompleteRange(this.filters.range) ? `${this.filters.range[0]} ~ ${this.filters.range[1]}` : this.currentValidRangeText();
+      if (this.assistantSubmodule === 'diagnosis') {
+        return [
+          {
+            label: '当前异常',
+            value: this.selectedAnomaly ? this.selectedAnomaly.anomaly_name : '未绑定异常对象',
+          },
+          {
+            label: '异常上下文',
+            value: this.selectedAnomaly
+              ? `${this.selectedAnomaly.building_name} · 偏差 ${this.formatNumber(this.selectedAnomaly.deviation_pct, 1)}%`
+              : '可从事件列表进入，也可直接输入异常描述',
+          },
+          {
+            label: '时间窗口',
+            value: this.selectedAnomaly ? this.formatCompactDateTime(this.selectedAnomaly.timestamp) : scopeText,
+          },
+        ];
+      }
+      if (this.assistantSubmodule === 'knowledge') {
+        return [
+          { label: '当前建筑', value: building ? `${building.name} (${building.type})` : '全部建筑' },
+          { label: '时间范围', value: scopeText },
+          { label: '知识状态', value: this.assistantKnowledgeStatusText() },
+        ];
+      }
+      if (this.assistantSubmodule === 'saving') {
+        return [
+          { label: '当前对象', value: this.currentMetricLabel() },
+          { label: '当前范围', value: scopeText },
+          { label: '优化来源', value: `${this.analysisInsights.saving_opportunities.length} 个节能机会点` },
+        ];
+      }
+      return [
+        { label: '分析对象', value: this.currentMetricLabel() },
+        { label: '当前建筑', value: building ? `${building.name} (${building.type})` : '全部建筑' },
+        { label: '时间窗口', value: scopeText },
+      ];
     },
     isLikelyCompleteKnowledgeAnswer(text) {
       return /[。！？!?；;”’】）)]$/.test(String(text || '').trim());
@@ -485,6 +679,60 @@ createApp({
       const rangeText = this.isCompleteRange(this.filters.range) ? `${this.filters.range[0]} ~ ${this.filters.range[1]}` : '全量时间范围';
       return `${this.currentMetricLabel()} | ${buildingText} | ${rangeText}`;
     },
+    overviewSeveritySummary(level) {
+      return this.anomalyRows.filter((item) => item.severity === level).length;
+    },
+    anomalyCountByStatus(status) {
+      return this.anomalyRows.filter((item) => item.status === status).length;
+    },
+    recentAnomalyRows(limit = 5) {
+      return this.anomalyRows.slice(0, limit);
+    },
+    reviewableAnomalyRows(limit = 6) {
+      return this.anomalyRows.filter((item) => item.status === 'resolved' || item.status === 'acknowledged').slice(0, limit);
+    },
+    topSavingImpactItems(limit = 3) {
+      return (this.analysisInsights.saving_opportunities || [])
+        .slice(0, limit)
+        .map((item) => `${item.title}：影响估算 ${this.formatInsightKwh(item.estimated_loss_kwh)}`);
+    },
+    activateSubmodule(pageKey, submoduleKey) {
+      const currentKey = this.activeSubmoduleMap[pageKey];
+      this.activeSubmoduleMap = { ...this.activeSubmoduleMap, [pageKey]: submoduleKey };
+      if (pageKey === 'assistant') {
+        const changed = this.assistantSubmodule !== submoduleKey;
+        this.assistantSubmodule = submoduleKey;
+        if (changed) {
+          this.resetUnifiedConversation({ silent: true });
+          if (submoduleKey !== 'diagnosis') {
+            this.selectedAnomaly = null;
+          }
+        }
+      }
+      if (this.activePage !== pageKey) {
+        this.switchPage(pageKey);
+        return;
+      }
+      if (currentKey !== submoduleKey) {
+        this.$nextTick(() => {
+          this.syncVisibleCharts();
+          this.scrollAssistantToBottom();
+        });
+      }
+    },
+    navigateToAssistantSubmodule(submoduleKey, { question = '', send = false } = {}) {
+      this.activateSubmodule('assistant', submoduleKey);
+      if (question) this.unifiedChat.input = question;
+      if (send) {
+        this.$nextTick(() => this.sendUnifiedMessage(question || undefined));
+      }
+    },
+    handleUnifiedInputKeydown(event) {
+      if (event.key === 'Enter' && !event.shiftKey) {
+        event.preventDefault();
+        this.sendUnifiedMessage();
+      }
+    },
     switchAssistantMode(mode) {
       this.assistantMode = mode;
       if (mode === 'knowledge' && !String(this.assistantKnowledgeInput || '').trim()) {
@@ -493,22 +741,44 @@ createApp({
     },
     // ── Unified chat interface ────────────────────────────────────────────────
     unifiedQuickStarters() {
-      const starters = [];
-      if (this.selectedAnomaly) {
-        starters.push({
-          key: 'diagnose_current',
-          label: `诊断: ${this.selectedAnomaly.anomaly_name}`,
-          question: `请诊断 ${this.selectedAnomaly.building_name} 在 ${this.formatCompactDateTime(this.selectedAnomaly.timestamp)} 出现的${this.selectedAnomaly.anomaly_name}。`,
-        });
-        starters.push({
-          key: 'kb_current',
-          label: '查运维规范',
-          question: `针对${this.selectedAnomaly.building_type || ''}建筑"${this.selectedAnomaly.anomaly_name}"，从运维规范角度优先排查哪些设备系统？`,
-        });
+      if (this.assistantSubmodule === 'diagnosis') {
+        const starters = [];
+        if (this.selectedAnomaly) {
+          starters.push({
+            key: 'diagnose_current',
+            label: `诊断 ${this.selectedAnomaly.anomaly_name}`,
+            question: `请诊断 ${this.selectedAnomaly.building_name} 在 ${this.formatCompactDateTime(this.selectedAnomaly.timestamp)} 出现的${this.selectedAnomaly.anomaly_name}。`,
+          });
+        }
+        starters.push(
+          { key: 'spike', label: '排查能耗突增', question: '请结合当前范围，给出能耗突增的可能原因、排查步骤和立即动作。' },
+          { key: 'night', label: '排查夜间高负荷', question: '夜间基线负荷偏高时，应优先排查哪些设备和控制策略？' },
+          { key: 'offline', label: '排查设备离线', question: '如果出现设备离线或低负荷异常，应如何判断是传感器问题还是设备问题？' },
+        );
+        return starters.slice(0, 4);
       }
-      starters.push({ key: 'energy_saving', label: '节能建议', question: '针对当前建筑给出具体的节能优化建议。' });
-      starters.push({ key: 'analyze', label: '解读分析', question: '解读当前时段的能耗分析，给出主要发现和建议。' });
-      return starters.slice(0, 4);
+      if (this.assistantSubmodule === 'saving') {
+        return [
+          { key: 'peak', label: '优化峰时负荷', question: '请针对当前建筑峰时负荷给出节能优化建议，并说明优先动作。' },
+          { key: 'night', label: '降低夜间基线', question: '围绕夜间基线负荷偏高，给出可落地的节能动作和预估收益。' },
+          { key: 'schedule', label: '优化时段策略', question: '请结合当前时间范围，给出工作时段与非工作时段的节能策略。' },
+          { key: 'ops', label: '运维协同建议', question: '请把当前节能机会整理成运维可执行的优先动作清单。' },
+        ];
+      }
+      if (this.assistantSubmodule === 'interpretation') {
+        return [
+          { key: 'trend', label: '解读趋势变化', question: '请解读当前时段的能耗趋势变化，说明主要发现和可能原因。' },
+          { key: 'structure', label: '解释结构特征', question: '请解释当前时段的昼夜与周内结构特征，并指出关注点。' },
+          { key: 'compare', label: '说明同类偏差', question: '请解释当前建筑与同类样本的差距，并给出管理建议。' },
+          { key: 'brief', label: '生成汇报结论', question: '请把当前分析结果整理成适合汇报的主要发现、原因和运维建议。' },
+        ];
+      }
+      return [
+        { key: 'knowledge_standard', label: '查运维规范', question: '建筑能耗运维中，出现高负荷或突增时通常应优先排查哪些系统？' },
+        { key: 'knowledge_hvac', label: '查空调常识', question: '空调系统供回水温差异常通常意味着什么？运维上如何判断？' },
+        { key: 'knowledge_light', label: '查照明策略', question: '照明系统在教学楼或办公楼中，常见的节能控制策略有哪些？' },
+        { key: 'knowledge_process', label: '查处置流程', question: '建筑能源异常从发现到复盘，一般应包括哪些标准化处理步骤？' },
+      ];
     },
     routeUnifiedMessage(question) {
       const diagKw = ['诊断', '故障', '排查', '原因', '异常', '为什么', '突增', '高负荷', '离线', '排查步骤', '不正常'];
@@ -523,11 +793,12 @@ createApp({
       if (this.unifiedChat.loading) return;
       this.unifiedChat.input = '';
       this.unifiedChat.messages.push({ id: `${Date.now()}-user`, role: 'user', content: question });
-      const route = this.routeUnifiedMessage(question);
-      if (route === 'diagnosis') {
+      if (this.assistantSubmodule === 'diagnosis') {
         await this.sendStreamingDiagnosis({ question });
-      } else if (route === 'analysis') {
-        await this.sendUnifiedAnalysisMessage(question);
+      } else if (this.assistantSubmodule === 'saving') {
+        await this.sendUnifiedAnalysisMessage(question, 'saving');
+      } else if (this.assistantSubmodule === 'interpretation') {
+        await this.sendUnifiedAnalysisMessage(question, 'interpretation');
       } else {
         await this.sendUnifiedKnowledgeMessage(question);
       }
@@ -695,10 +966,11 @@ createApp({
         this.unifiedChat.loading = false;
       }
     },
-    async sendUnifiedAnalysisMessage(question) {
+    async sendUnifiedAnalysisMessage(question, mode = 'interpretation') {
       this.unifiedChat.loading = true;
       const msgId = `${Date.now()}-assistant`;
-      this.unifiedChat.messages.push({ id: msgId, role: 'assistant', type: 'analysis', pending: true, data: null });
+      const messageType = mode === 'saving' ? 'saving' : 'analysis';
+      this.unifiedChat.messages.push({ id: msgId, role: 'assistant', type: messageType, pending: true, data: null });
       await this.$nextTick();
       this.scrollAssistantToBottom();
       try {
@@ -716,7 +988,9 @@ createApp({
             night_base_load: this.analysisDistribution.night_base_load || {},
           },
           compare_snapshot: this.analysisCompare.peer_group || null,
-          message: question || `${this.currentAnalysisScopeText()}，请输出结构化分析结论。`,
+          message: question || (mode === 'saving'
+            ? `${this.currentAnalysisScopeText()}，请输出节能结论、优先动作和收益影响。`
+            : `${this.currentAnalysisScopeText()}，请输出结构化分析结论。`),
         };
         const data = await this.fetchJson(`${API_BASE}/api/ai/analyze`, {
           method: 'POST',
@@ -730,7 +1004,7 @@ createApp({
           this.unifiedChat.messages.splice(idx, 1, {
             id: msgId,
             role: 'assistant',
-            type: 'analysis',
+            type: messageType,
             pending: false,
             data: this.analysisInsight,
           });
@@ -743,10 +1017,10 @@ createApp({
           this.unifiedChat.messages.splice(idx, 1, {
             id: msgId,
             role: 'assistant',
-            type: 'analysis',
+            type: messageType,
             pending: false,
             data: {
-              summary: '分析结论生成失败，请稍后重试。',
+              summary: mode === 'saving' ? '节能建议生成失败，请稍后重试。' : '分析结论生成失败，请稍后重试。',
               findings: [],
               possible_causes: [],
               energy_saving_suggestions: [],
@@ -761,13 +1035,15 @@ createApp({
         this.unifiedChat.loading = false;
       }
     },
-    resetUnifiedConversation() {
+    resetUnifiedConversation(options = {}) {
+      const { silent = false } = options;
       this.unifiedChat.messages = [];
       this.unifiedChat.input = '';
       this.unifiedChat.sessionId = '';
       this.unifiedChat.loading = false;
       this.unifiedChat.streaming = false;
       this.unifiedChat.streamBuffer = '';
+      if (!silent) this.$message.success(`已切换到新的${this.assistantSubmoduleConfig().label}会话`);
     },
     scrollAssistantToBottom() {
       const el = this.$refs.assistantBody;
@@ -1492,7 +1768,12 @@ createApp({
     },
     async switchPage(key) {
       this.activePage = key;
+      if (key === 'assistant') {
+        this.assistantSubmodule = this.activeSubmoduleMap.assistant || this.assistantSubmodule;
+      }
       await this.refreshCurrentPage();
+      await this.$nextTick();
+      this.syncVisibleCharts();
     },
     statusLabel(v) {
       const map = { new: 'new', acknowledged: 'acknowledged', ignored: 'ignored', resolved: 'resolved' };
@@ -1605,6 +1886,9 @@ createApp({
       this.prepareAssistantPrompt('anomaly', row);
       this.assistantMode = 'diagnosis';
       this.diagnosis = null;
+      this.activeSubmoduleMap = { ...this.activeSubmoduleMap, assistant: 'diagnosis' };
+      this.assistantSubmodule = 'diagnosis';
+      this.resetUnifiedConversation({ silent: true });
       await this.switchPage('assistant');
       await nextTick();
       const userQuestion = `请诊断 ${row.building_name} 在 ${this.formatCompactDateTime(row.timestamp)} 出现的${row.anomaly_name}（偏差 ${this.formatNumber(row.deviation_pct, 1)}%）。`;
@@ -1720,11 +2004,35 @@ createApp({
         this.loading.analysisInsight = false;
       }
     },
+    launchAnalysisAssistant() {
+      if (this.activeSubmoduleMap.analysis === 'opportunity') {
+        this.navigateToAssistantSubmodule('saving', {
+          question: `请基于${this.currentAnalysisScopeText()}输出节能结论、优先动作和收益影响。`,
+          send: true,
+        });
+        return;
+      }
+      this.runAnalysisAssistant();
+    },
+    sendSavingOpportunityToAssistant(item) {
+      const title = item?.title || '当前节能机会';
+      const detail = item?.detail || '';
+      this.navigateToAssistantSubmodule('saving', {
+        question: `请围绕“${title}”给出节能建议、优先动作和收益影响。补充信息：${detail}`,
+        send: true,
+      });
+    },
+    openKnowledgeAssistant(question = '') {
+      this.navigateToAssistantSubmodule('knowledge', { question });
+    },
     async runAnalysisAssistant() {
       this.selectedAnomaly = null;
       this.prepareAssistantPrompt('analysis');
       this.assistantMode = 'diagnosis';
       this.analysisInsight = null;
+      this.activeSubmoduleMap = { ...this.activeSubmoduleMap, assistant: 'interpretation' };
+      this.assistantSubmodule = 'interpretation';
+      this.resetUnifiedConversation({ silent: true });
       await this.switchPage('assistant');
       await nextTick();
       const question = `请分析${this.currentAnalysisScopeText()}的能耗数据，生成可用于汇报的分析结论。`;
