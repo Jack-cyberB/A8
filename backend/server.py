@@ -928,6 +928,75 @@ class EnergyRepository:
             "latency_ms": latency_ms,
         }
 
+    def ragflow_chat_stream_events(self, payload: dict[str, Any]):
+        """Yield (event_name, data_dict) tuples streaming RAGFlow chat completion."""
+        question = str(payload.get("question", "")).strip()
+        if not question:
+            yield "error", {"message": "question is required"}
+            return
+        _sid = payload.get("session_id")
+        session_id = str(_sid).strip() if _sid and str(_sid).strip() not in ("None", "null") else None
+        settings = self._ragflow_settings()
+        if not settings["chat_ready"]:
+            yield "error", {"message": "RAGFlow chat not configured"}
+            return
+        try:
+            ensured_session_id = self._ensure_ragflow_session(session_id)
+        except Exception as exc:
+            yield "error", {"message": f"session error: {exc}"}
+            return
+        yield "start", {"session_id": ensured_session_id}
+        body = json.dumps({"question": question, "stream": True, "session_id": ensured_session_id}).encode("utf-8")
+        req = Request(
+            f"{settings['base_url']}/chats/{settings['chat_id']}/completions",
+            data=body,
+            method="POST",
+            headers=self._ragflow_headers(),
+        )
+        last_answer = ""
+        references: list[dict[str, str]] = []
+        message_id = ""
+        try:
+            with urlopen(req, timeout=settings["timeout_sec"]) as resp:
+                for raw_line in resp:
+                    line = raw_line.decode("utf-8").strip()
+                    if not line.startswith("data:"):
+                        continue
+                    try:
+                        chunk = json.loads(line[5:].strip())
+                    except json.JSONDecodeError:
+                        continue
+                    data = chunk.get("data") or {}
+                    if not isinstance(data, dict):
+                        continue
+                    answer = str(data.get("answer") or "")
+                    final = bool(data.get("final", False))
+                    message_id = str(data.get("id") or message_id)
+                    if final:
+                        ref = data.get("reference") if isinstance(data.get("reference"), dict) else {}
+                        references = self._normalize_ragflow_reference(ref, limit=6)
+                        last_answer = answer
+                        break
+                    if answer and answer != last_answer:
+                        delta = answer[len(last_answer):]
+                        last_answer = answer
+                        if delta:
+                            yield "token", {"text": delta}
+        except (URLError, TimeoutError, socket.timeout) as exc:
+            yield "error", {"message": f"RAGFlow timeout: {exc}"}
+            return
+        except Exception as exc:
+            yield "error", {"message": str(exc)}
+            return
+        yield "done", {
+            "answer": last_answer,
+            "session_id": ensured_session_id,
+            "message_id": message_id,
+            "chat_id": settings.get("chat_id", ""),
+            "references": references,
+            "knowledge_source": "ragflow",
+        }
+
     def _build_diagnose_knowledge_query(
         self,
         anomaly_name: str,
@@ -3530,6 +3599,16 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"code": 400, "message": str(exc), "data": None}, HTTPStatus.BAD_REQUEST)
                 return
             self._json({"code": 0, "message": "ok", "data": result})
+            return
+
+        if parsed.path == "/api/ragflow/chat/stream":
+            self._set_sse_headers()
+            try:
+                for event_name, event_data in REPO.ragflow_chat_stream_events(payload):
+                    if not self._send_sse(event_name, event_data):
+                        break
+            except Exception as exc:
+                self._send_sse("error", {"message": str(exc)})
             return
 
         if parsed.path == "/api/ragflow/chat":

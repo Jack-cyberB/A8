@@ -524,20 +524,37 @@ createApp({
       await this.$nextTick();
       this.scrollAssistantToBottom();
       try {
-        const data = await this.fetchJson(`${API_BASE}/api/ragflow/chat`, {
+        const response = await fetch(`${API_BASE}/api/ragflow/chat/stream`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ question, session_id: this.unifiedChat.sessionId || null }),
         });
-        const idx = this.unifiedChat.messages.findIndex(m => m.id === msgId);
-        if (idx >= 0) {
-          this.unifiedChat.messages.splice(idx, 1, {
-            id: msgId, role: 'assistant', type: 'knowledge', pending: false,
-            content: data.answer || '知识库未返回结果。',
-            references: Array.isArray(data.references) ? data.references : [],
-          });
+        if (!response.ok) throw new Error(response.status + ' ' + response.statusText);
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buf = '', accumulated = '';
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buf += decoder.decode(value, { stream: true });
+          const parts = buf.split('\n\n');
+          buf = parts.pop();
+          for (const part of parts) {
+            const em = part.match(/event: (\w+)/);
+            const dm = part.match(/data: (.+)/);
+            if (!em || !dm) continue;
+            let ed; try { ed = JSON.parse(dm[1]); } catch(e) { continue; }
+            if (em[1] === 'token') {
+              accumulated += ed.text || '';
+              const idx = this.unifiedChat.messages.findIndex(m => m.id === msgId);
+              if (idx >= 0) { const c = this.unifiedChat.messages[idx]; this.unifiedChat.messages.splice(idx, 1, { ...c, pending: false, content: accumulated }); this.scrollAssistantToBottom(); }
+            } else if (em[1] === 'done') {
+              const idx = this.unifiedChat.messages.findIndex(m => m.id === msgId);
+              if (idx >= 0) { const c = this.unifiedChat.messages[idx]; this.unifiedChat.messages.splice(idx, 1, { ...c, pending: false, content: ed.answer || accumulated, references: Array.isArray(ed.references) ? ed.references : [] }); }
+              this.unifiedChat.sessionId = ed.session_id || this.unifiedChat.sessionId;
+            } else if (em[1] === 'error') { throw new Error(ed.message || '知识库返回错误'); }
+          }
         }
-        this.unifiedChat.sessionId = data.session_id || this.unifiedChat.sessionId;
       } catch (err) {
         const idx = this.unifiedChat.messages.findIndex(m => m.id === msgId);
         if (idx >= 0) {
