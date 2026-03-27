@@ -672,10 +672,16 @@ class EnergyRepository:
         text = re.sub(r"\[\s*ID:\s*$", "", text, flags=re.IGNORECASE)
         text = re.sub(r"\[\s*\d+\s*$", "", text)
         text = re.sub(r"ID:\s*\d+\s*\]", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"\bID:\s*", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"\bD:\s*", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"\bD:\s*\d+\]", "", text, flags=re.IGNORECASE)
+        text = text.replace("**", "")
+        text = text.replace("[", "").replace("]", "")
         text = text.replace("\r", "")
         text = re.sub(r"[ \t]+\n", "\n", text)
         text = re.sub(r"\n{3,}", "\n\n", text)
         text = re.sub(r"[ \t]{2,}", " ", text)
+        text = re.sub(r"\s+([，。！？；：、])", r"\1", text)
         return text.strip()
 
     def _merge_ragflow_stream_text(self, full_text: str, incoming_text: Any) -> tuple[str, str]:

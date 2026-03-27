@@ -240,10 +240,18 @@ createApp({
         .replace(/\[\s*ID:\s*$/gi, '')
         .replace(/\[\s*\d+\s*$/g, '')
         .replace(/ID:\s*\d+\s*\]/gi, '')
+        .replace(/\bID:\s*/gi, '')
+        .replace(/\bD:\s*/gi, '')
+        .replace(/\bD:\s*\d+\]/gi, '')
+        .replace(/\*\*/g, '')
+        .replace(/[\[\]]/g, '')
         .replace(/\r/g, '')
         .replace(/[ \t]+\n/g, '\n')
         .replace(/\n{3,}/g, '\n\n')
         .replace(/[ \t]{2,}/g, ' ')
+        .replace(/\s+([，。！？；：、])/g, '$1')
+        .replace(/([（【“‘])\s+/g, '$1')
+        .replace(/\s+([）】”’])/g, '$1')
         .trim();
     },
     renderMarkdown(text) {
@@ -355,9 +363,19 @@ createApp({
       if (lower.includes('simulated llm failure')) return '当前为模拟失败场景，本次使用模板兜底。';
       return raw;
     },
+    healthToneClass(value) {
+      return value === 'ok' ? 'is-success' : 'is-warning';
+    },
+    regressionToneClass(value) {
+      return value === 'pass' ? 'is-success' : 'is-warning';
+    },
     severityLabel(value) {
       const map = { high: '高', medium: '中', low: '低' };
       return map[value] || value || '-';
+    },
+    severityToneClass(value) {
+      const map = { high: 'is-danger', medium: 'is-warning', low: 'is-success' };
+      return map[value] || 'is-info';
     },
     severityTagType(value) {
       const map = { high: 'danger', medium: 'warning', low: 'info' };
@@ -367,9 +385,71 @@ createApp({
       const map = { new: '新告警', acknowledged: '已确认', ignored: '已忽略', resolved: '已完成' };
       return map[value] || value || '-';
     },
+    statusToneClass(value) {
+      const map = { new: 'is-danger', acknowledged: 'is-warning', ignored: 'is-info', resolved: 'is-success' };
+      return map[value] || 'is-info';
+    },
     statusTagType(value) {
       const map = { new: 'danger', acknowledged: 'warning', ignored: 'info', resolved: 'success' };
       return map[value] || 'info';
+    },
+    priorityToneClass(level) {
+      const map = { high: 'is-danger', medium: 'is-warning', low: 'is-success' };
+      return map[level] || 'is-info';
+    },
+    priorityLabel(level) {
+      const map = { high: '高优先', medium: '中优先', low: '低优先' };
+      return map[level] || '一般';
+    },
+    currentAssistantContextText() {
+      if (this.selectedAnomaly) {
+        return `${this.selectedAnomaly.building_name} · ${this.selectedAnomaly.anomaly_name} · ${this.formatCompactDateTime(this.selectedAnomaly.timestamp)}`;
+      }
+      return this.currentAnalysisScopeText();
+    },
+    assistantLiveStatusText() {
+      if (this.unifiedChat.streaming) return '正在生成回答';
+      if (this.unifiedChat.loading) return '正在检索知识与分析上下文';
+      return '等待输入问题';
+    },
+    assistantCapabilityText() {
+      const knowledge = this.health.ragflowChatReady ? '知识库问答可用' : '知识库问答待配置';
+      const llm = this.health.aiConfigured ? 'DeepSeek 已接入' : 'DeepSeek 未配置';
+      return `${knowledge} · ${llm}`;
+    },
+    isLikelyCompleteKnowledgeAnswer(text) {
+      return /[。！？!?；;”’】）)]$/.test(String(text || '').trim());
+    },
+    choosePreferredKnowledgeAnswer(streamedText, finalText) {
+      const streamed = this.cleanRagflowAnswerText(streamedText);
+      const finalAnswer = this.cleanRagflowAnswerText(finalText);
+      if (!finalAnswer) return streamed;
+      if (!streamed) return finalAnswer;
+      if (streamed === finalAnswer) return finalAnswer;
+      if (streamed.includes(finalAnswer) && finalAnswer.length < streamed.length) {
+        return streamed;
+      }
+      const lengthRatio = finalAnswer.length / Math.max(streamed.length, 1);
+      if (streamed.length >= 24 && lengthRatio < 0.72) {
+        return streamed;
+      }
+      if (
+        streamed.length > finalAnswer.length &&
+        this.isLikelyCompleteKnowledgeAnswer(streamed) &&
+        !this.isLikelyCompleteKnowledgeAnswer(finalAnswer)
+      ) {
+        return streamed;
+      }
+      return finalAnswer.length >= streamed.length - 8 ? finalAnswer : streamed;
+    },
+    toggleKnowledgeReferences(messageId) {
+      const idx = this.unifiedChat.messages.findIndex((item) => item.id === messageId);
+      if (idx < 0) return;
+      const current = this.unifiedChat.messages[idx];
+      this.unifiedChat.messages.splice(idx, 1, {
+        ...current,
+        referencesExpanded: !current.referencesExpanded,
+      });
     },
     currentMetricLabel() {
       return this.analysisMetrics.find((item) => item.value === this.analysisMetric)?.label || '电力';
@@ -432,7 +512,7 @@ createApp({
     },
     routeUnifiedMessage(question) {
       const diagKw = ['诊断', '故障', '排查', '原因', '异常', '为什么', '突增', '高负荷', '离线', '排查步骤', '不正常'];
-      const analysisKw = ['分析', '解读', '结论', '节能建议', '运维建议', '主要发现', '能耗报告'];
+      const analysisKw = ['分析', '解读', '结论', '节能建议', '节能优化', '优化建议', '运维建议', '主要发现', '能耗报告'];
       if (diagKw.some(k => question.includes(k))) return 'diagnosis';
       if (analysisKw.some(k => question.includes(k))) return 'analysis';
       return 'knowledge';
@@ -446,6 +526,8 @@ createApp({
       const route = this.routeUnifiedMessage(question);
       if (route === 'diagnosis') {
         await this.sendStreamingDiagnosis({ question });
+      } else if (route === 'analysis') {
+        await this.sendUnifiedAnalysisMessage(question);
       } else {
         await this.sendUnifiedKnowledgeMessage(question);
       }
@@ -542,7 +624,15 @@ createApp({
     async sendUnifiedKnowledgeMessage(question) {
       this.unifiedChat.loading = true;
       const msgId = `${Date.now()}-assistant`;
-      this.unifiedChat.messages.push({ id: msgId, role: 'assistant', type: 'knowledge', pending: true, content: '正在检索知识库...', references: [] });
+      this.unifiedChat.messages.push({
+        id: msgId,
+        role: 'assistant',
+        type: 'knowledge',
+        pending: true,
+        content: '正在检索知识库...',
+        references: [],
+        referencesExpanded: false,
+      });
       await this.$nextTick();
       this.scrollAssistantToBottom();
       try {
@@ -570,11 +660,27 @@ createApp({
               accumulatedRaw += ed.text || '';
               const displayContent = this.cleanRagflowAnswerText(accumulatedRaw) || '正在检索知识库...';
               const idx = this.unifiedChat.messages.findIndex(m => m.id === msgId);
-              if (idx >= 0) { const c = this.unifiedChat.messages[idx]; this.unifiedChat.messages.splice(idx, 1, { ...c, pending: false, content: displayContent }); this.scrollAssistantToBottom(); }
+              if (idx >= 0) {
+                const c = this.unifiedChat.messages[idx];
+                this.unifiedChat.messages.splice(idx, 1, {
+                  ...c,
+                  pending: false,
+                  content: displayContent,
+                });
+                this.scrollAssistantToBottom();
+              }
             } else if (em[1] === 'done') {
               const idx = this.unifiedChat.messages.findIndex(m => m.id === msgId);
-              const finalContent = this.cleanRagflowAnswerText(ed.answer || accumulatedRaw) || 'RAGFlow 已返回，但当前没有可展示的文本结果。';
-              if (idx >= 0) { const c = this.unifiedChat.messages[idx]; this.unifiedChat.messages.splice(idx, 1, { ...c, pending: false, content: finalContent, references: Array.isArray(ed.references) ? ed.references : [] }); }
+              const finalContent = this.choosePreferredKnowledgeAnswer(accumulatedRaw, ed.answer) || 'RAGFlow 已返回，但当前没有可展示的文本结果。';
+              if (idx >= 0) {
+                const c = this.unifiedChat.messages[idx];
+                this.unifiedChat.messages.splice(idx, 1, {
+                  ...c,
+                  pending: false,
+                  content: finalContent,
+                  references: Array.isArray(ed.references) ? ed.references : [],
+                });
+              }
               this.unifiedChat.sessionId = ed.session_id || this.unifiedChat.sessionId;
             } else if (em[1] === 'error') { throw new Error(ed.message || '知识库返回错误'); }
           }
@@ -585,6 +691,72 @@ createApp({
           this.unifiedChat.messages.splice(idx, 1, { id: msgId, role: 'assistant', type: 'knowledge', pending: false, content: '知识问答失败，请稍后重试。', references: [] });
         }
         this.$message.error('知识问答失败：' + (err.message || '未知错误'));
+      } finally {
+        this.unifiedChat.loading = false;
+      }
+    },
+    async sendUnifiedAnalysisMessage(question) {
+      this.unifiedChat.loading = true;
+      const msgId = `${Date.now()}-assistant`;
+      this.unifiedChat.messages.push({ id: msgId, role: 'assistant', type: 'analysis', pending: true, data: null });
+      await this.$nextTick();
+      this.scrollAssistantToBottom();
+      try {
+        const payload = {
+          provider: this.aiProvider,
+          metric_type: this.analysisMetric,
+          building_id: this.filters.buildingId || null,
+          start_time: this.isCompleteRange(this.filters.range) ? this.filters.range[0] : null,
+          end_time: this.isCompleteRange(this.filters.range) ? this.filters.range[1] : null,
+          insights: this.analysisInsights,
+          summary_snapshot: this.analysisSummary,
+          trend_snapshot: this.analysisTrend.summary,
+          distribution_snapshot: {
+            weekday_peak_hours: this.analysisDistribution.weekday_peak_hours || [],
+            night_base_load: this.analysisDistribution.night_base_load || {},
+          },
+          compare_snapshot: this.analysisCompare.peer_group || null,
+          message: question || `${this.currentAnalysisScopeText()}，请输出结构化分析结论。`,
+        };
+        const data = await this.fetchJson(`${API_BASE}/api/ai/analyze`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        this.analysisInsight = data.analysis || null;
+        this.analysisFeedbackLabel = '';
+        const idx = this.unifiedChat.messages.findIndex((item) => item.id === msgId);
+        if (idx >= 0) {
+          this.unifiedChat.messages.splice(idx, 1, {
+            id: msgId,
+            role: 'assistant',
+            type: 'analysis',
+            pending: false,
+            data: this.analysisInsight,
+          });
+        }
+        await this.loadAiStats();
+        await this.loadAiEvaluate();
+      } catch (err) {
+        const idx = this.unifiedChat.messages.findIndex((item) => item.id === msgId);
+        if (idx >= 0) {
+          this.unifiedChat.messages.splice(idx, 1, {
+            id: msgId,
+            role: 'assistant',
+            type: 'analysis',
+            pending: false,
+            data: {
+              summary: '分析结论生成失败，请稍后重试。',
+              findings: [],
+              possible_causes: [],
+              energy_saving_suggestions: [],
+              operations_suggestions: [],
+              provider: 'template',
+              latency_ms: 0,
+            },
+          });
+        }
+        this.$message.error(`分析结论生成失败：${err.message || '未知错误'}`);
       } finally {
         this.unifiedChat.loading = false;
       }

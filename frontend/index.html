@@ -20,8 +20,16 @@
         <div class="topbar-sub">V2 交付版 | 电力深分析 + 运维闭环 + AI 诊断与分析</div>
       </div>
       <div class="topbar-status">
-        <el-tag size="small" effect="dark" :type="health.status === 'ok' ? 'success' : 'warning'">系统: {{ health.status }}</el-tag>
-        <el-tag size="small" effect="dark" :type="health.regression === 'pass' ? 'success' : 'warning'">回归: {{ health.regression }}</el-tag>
+        <div class="status-inline">
+          <span class="status-dot" :class="healthToneClass(health.status)"></span>
+          <span class="status-inline-label">系统</span>
+          <span class="status-inline-value">{{ health.status }}</span>
+        </div>
+        <div class="status-inline">
+          <span class="status-dot" :class="regressionToneClass(health.regression)"></span>
+          <span class="status-inline-label">回归</span>
+          <span class="status-inline-value">{{ health.regression }}</span>
+        </div>
         <div class="range-tip">数据范围：{{ globalRangeText }}</div>
       </div>
     </header>
@@ -310,7 +318,10 @@
                   <div v-for="item in analysisInsights.saving_opportunities" :key="item.title" class="opportunity-card">
                     <div class="opportunity-head">
                       <div class="opportunity-title">{{ item.title }}</div>
-                      <el-tag size="small" effect="light" :type="priorityTagType(item.priority)">{{ item.priority || 'info' }}</el-tag>
+                      <div class="subtle-state">
+                        <span class="status-dot" :class="priorityToneClass(item.priority)"></span>
+                        <span>{{ priorityLabel(item.priority) }}</span>
+                      </div>
                     </div>
                     <div class="opportunity-detail">{{ item.detail }}</div>
                     <div class="opportunity-meta">影响估算 {{ formatInsightKwh(item.estimated_loss_kwh) }}</div>
@@ -335,8 +346,11 @@
                         <div class="anomaly-window-time">{{ formatCompactDateTime(item.timestamp) }}</div>
                       </div>
                       <div class="anomaly-window-tags">
-                        <el-tag size="small" effect="light" :type="severityTagType(item.severity)">{{ severityLabel(item.severity) }}</el-tag>
-                        <el-tag size="small" effect="plain">{{ formatNumber(item.deviation_pct, 1) }}%</el-tag>
+                        <div class="subtle-state">
+                          <span class="status-dot" :class="severityToneClass(item.severity)"></span>
+                          <span>{{ severityLabel(item.severity) }}</span>
+                        </div>
+                        <div class="subtle-metric">偏差 {{ formatNumber(item.deviation_pct, 1) }}%</div>
                       </div>
                     </div>
                     <div class="anomaly-window-detail">影响估算 {{ formatInsightKwh(item.estimated_loss_kwh) }}，建议优先检查对应时间段内的设备工况与控制策略。</div>
@@ -401,12 +415,18 @@
               <el-table-column prop="anomaly_name" label="类型" min-width="140" show-overflow-tooltip></el-table-column>
               <el-table-column label="级别" width="90">
                 <template #default="scope">
-                  <el-tag size="small" effect="light" :type="severityTagType(scope.row.severity)">{{ severityLabel(scope.row.severity) }}</el-tag>
+                  <div class="table-state">
+                    <span class="status-dot" :class="severityToneClass(scope.row.severity)"></span>
+                    <span>{{ severityLabel(scope.row.severity) }}</span>
+                  </div>
                 </template>
               </el-table-column>
               <el-table-column label="状态" width="108">
                 <template #default="scope">
-                  <el-tag size="small" effect="light" :type="statusTagType(scope.row.status)">{{ statusDisplay(scope.row.status) }}</el-tag>
+                  <div class="table-state">
+                    <span class="status-dot" :class="statusToneClass(scope.row.status)"></span>
+                    <span>{{ statusDisplay(scope.row.status) }}</span>
+                  </div>
                 </template>
               </el-table-column>
               <el-table-column prop="assignee" label="处理人" width="110" show-overflow-tooltip></el-table-column>
@@ -435,149 +455,181 @@
         </section>
 
         <section v-show="activePage === 'assistant'" class="page assistant-page assistant-page--unified">
-          <!-- Status bar -->
           <div class="assistant-topbar">
-            <div class="assistant-topbar-left">
-              <span class="assistant-topbar-name">智能运维助手</span>
-              <el-tag v-if="selectedAnomaly" size="small" type="warning" effect="light">
-                {{ selectedAnomaly.building_name }} · {{ selectedAnomaly.anomaly_name }} · 偏差 {{ formatNumber(selectedAnomaly.deviation_pct, 1) }}%
-              </el-tag>
-              <el-tag v-else size="small" effect="plain">{{ currentAnalysisScopeText() }}</el-tag>
+            <div class="assistant-topbar-copy">
+              <div class="assistant-topbar-kicker">Smart O&M Workspace</div>
+              <div class="assistant-topbar-name">智能运维助手</div>
+              <div class="assistant-topbar-sub">{{ currentAssistantContextText() }}</div>
             </div>
-            <div class="assistant-topbar-right">
-              <el-tag size="small" :type="health.ragflowChatReady ? 'success' : 'info'" effect="light">
-                RAGFlow {{ health.ragflowChatReady ? '已接通' : '未连接' }}
-              </el-tag>
-              <el-tag size="small" :type="health.aiConfigured ? 'success' : 'info'" effect="light">
-                DeepSeek {{ health.aiConfigured ? '已就绪' : '未配置' }}
-              </el-tag>
-              <el-tag v-if="unifiedChat.streaming" size="small" type="primary" effect="dark">● 生成中</el-tag>
+            <div class="assistant-topbar-meta">
+              <div class="assistant-meta-line">
+                <span class="status-dot" :class="unifiedChat.streaming || unifiedChat.loading ? 'is-warning' : 'is-success'"></span>
+                <span>{{ assistantLiveStatusText() }}</span>
+              </div>
+              <div class="assistant-meta-line assistant-meta-line--muted">{{ assistantCapabilityText() }}</div>
             </div>
           </div>
 
-          <!-- Chat body -->
           <div class="assistant-body" ref="assistantBody">
-            <!-- Welcome state -->
-            <div v-if="!unifiedChat.messages.length" class="assistant-welcome-state">
-              <div class="assistant-welcome-title">我是你的智能运维助手</div>
-              <div class="assistant-welcome-desc">可以帮你诊断能源异常、解读分析报告、回答建筑节能运维问题。点击下方快捷提问，或直接输入问题。</div>
-              <div v-if="selectedAnomaly" class="assistant-welcome-context">
-                <el-tag effect="plain">当前异常：{{ selectedAnomaly.building_name }} / {{ selectedAnomaly.anomaly_name }} / {{ formatCompactDateTime(selectedAnomaly.timestamp) }}</el-tag>
-              </div>
-            </div>
-
-            <!-- Messages -->
-            <div v-for="msg in unifiedChat.messages" :key="msg.id" :class="['unified-msg', 'unified-msg--' + msg.role]">
-              <!-- User bubble -->
-              <div v-if="msg.role === 'user'" class="unified-user-bubble">{{ msg.content }}</div>
-
-              <!-- Diagnosis card -->
-              <div v-else-if="msg.type === 'diagnosis'" class="unified-assistant-card unified-assistant-card--diagnosis">
-                <div class="unified-card-header">
-                  <span class="unified-card-tag">{{ msg.data.anomaly_name }}</span>
-                  <span v-if="msg.pending" class="unified-streaming-badge">⟳ DeepSeek 正在生成...</span>
-                  <span v-else class="unified-card-meta">{{ resultSourceText(msg.data) }} · {{ msg.data.knowledge_source ? knowledgeSourceLabel(msg.data.knowledge_source) : '' }} · {{ msg.data.latency_ms || 0 }} ms</span>
-                </div>
-                <div class="assistant-summary-card" :class="{ 'assistant-summary-card--streaming': msg.pending }">{{ msg.data.conclusion }}</div>
-                <div class="assistant-section-grid">
-                  <div class="assistant-section">
-                    <div class="assistant-section-title">可能原因</div>
-                    <ul class="assistant-bullet-list">
-                      <li v-for="item in msg.data.causes" :key="item">{{ item }}</li>
-                    </ul>
+            <div class="assistant-thread">
+              <div v-if="!unifiedChat.messages.length" class="assistant-welcome-state">
+                <div class="assistant-welcome-kicker">问答、诊断、依据放在同一张工作台里</div>
+                <div class="assistant-welcome-title">把问题提给系统，再决定下一步运维动作</div>
+                <div class="assistant-welcome-desc">这里适合做三类任务：解读当前分析、追问运维知识、围绕异常给出排查建议。回答会优先给出正文，知识依据默认折叠在下方。</div>
+                <div class="assistant-welcome-facts">
+                  <div class="assistant-fact">
+                    <div class="assistant-fact-label">当前场景</div>
+                    <div class="assistant-fact-value">{{ currentAssistantContextText() }}</div>
                   </div>
-                  <div class="assistant-section">
-                    <div class="assistant-section-title">排查步骤</div>
-                    <ul class="assistant-bullet-list">
-                      <li v-for="item in msg.data.steps" :key="item">{{ item }}</li>
-                    </ul>
-                  </div>
-                  <div class="assistant-section">
-                    <div class="assistant-section-title">立即动作</div>
-                    <ul class="assistant-bullet-list">
-                      <li v-for="item in msg.data.recommended_actions" :key="item">{{ item }}</li>
-                    </ul>
-                  </div>
-                  <div class="assistant-section">
-                    <div class="assistant-section-title">预防建议</div>
-                    <ul class="assistant-bullet-list">
-                      <li v-for="item in msg.data.prevention" :key="item">{{ item }}</li>
-                    </ul>
-                  </div>
-                </div>
-                <div v-if="msg.data && msg.data.evidence && msg.data.evidence.length" class="unified-evidence-chips">
-                  <div v-for="ev in msg.data.evidence.slice(0,4)" :key="ev.chunk_id || ev.title" class="unified-evidence-chip">
-                    <span class="unified-evidence-chip-src">{{ knowledgeSourceLabel(ev.source_type) }}</span>
-                    <span class="unified-evidence-chip-title">{{ (ev.title || '').slice(0, 24) }}</span>
-                  </div>
-                </div>
-                <div v-if="!msg.pending" class="assistant-actions assistant-actions--start">
-                  <el-button size="small" @click="copyDiagnosisToActionNote">写入备注</el-button>
-                  <el-button size="small" :type="diagnosisFeedbackLabel === 'useful' ? 'primary' : 'default'" @click="submitDiagnosisFeedback('useful')">有帮助</el-button>
-                  <el-button size="small" :type="diagnosisFeedbackLabel === 'not_useful' ? 'danger' : 'default'" @click="submitDiagnosisFeedback('not_useful')">没帮助</el-button>
-                </div>
-              </div>
-
-              <!-- Knowledge answer -->
-              <div v-else-if="msg.type === 'knowledge'" class="unified-assistant-card unified-assistant-card--knowledge">
-                <div class="unified-knowledge-answer" :class="{ 'unified-knowledge-answer--pending': msg.pending }" v-html="msg.pending ? msg.content : renderMarkdown(msg.content)"></div>
-                <div v-if="msg.references && msg.references.length" class="unified-reference-list">
-                  <div v-for="ref in msg.references" :key="ref.id || ref.chunk_id" class="unified-reference-item">
-                    <div class="assistant-evidence-title">{{ ref.title }}</div>
-                    <div class="assistant-evidence-meta">{{ knowledgeSourceLabel(ref.sourceType || ref.source_type) }} | 相似度 {{ formatNumber((ref.similarity || 0) * 100, 1) }}%</div>
-                    <div class="assistant-evidence-text">{{ ref.excerpt }}</div>
+                  <div class="assistant-fact">
+                    <div class="assistant-fact-label">工作状态</div>
+                    <div class="assistant-fact-value">{{ assistantCapabilityText() }}</div>
                   </div>
                 </div>
               </div>
 
-              <!-- Analysis report -->
-              <div v-else-if="msg.type === 'analysis'" class="unified-assistant-card unified-assistant-card--analysis">
-                <div v-if="msg.pending" class="empty-tip empty-tip--emphasis">
-                  <div class="empty-tip-title">正在生成分析结论</div>
-                  <div class="empty-tip-desc">系统正在整合趋势、天气、同类对照和节能机会...</div>
+              <div v-for="msg in unifiedChat.messages" :key="msg.id" :class="['unified-msg', 'unified-msg--' + msg.role]">
+                <div v-if="msg.role === 'user'" class="unified-user-bubble">
+                  <div class="unified-user-label">你的问题</div>
+                  <div>{{ msg.content }}</div>
                 </div>
-                <template v-else-if="msg.data">
+
+                <div v-else-if="msg.type === 'diagnosis'" class="unified-assistant-card unified-assistant-card--diagnosis">
                   <div class="unified-card-header">
-                    <span class="unified-card-tag">分析结论</span>
-                    <span class="unified-card-meta">{{ resultSourceText(msg.data) }} · {{ msg.data.latency_ms || 0 }} ms</span>
-                  </div>
-                  <div class="assistant-summary-card">{{ msg.data.summary }}</div>
-                  <div class="assistant-section-grid">
-                    <div class="assistant-section">
-                      <div class="assistant-section-title">主要发现</div>
-                      <ul class="assistant-bullet-list">
-                        <li v-for="item in msg.data.findings" :key="item">{{ item }}</li>
-                      </ul>
+                    <div>
+                      <div class="unified-card-title">{{ msg.data.anomaly_name }}</div>
+                      <div class="unified-card-meta">
+                        <span>{{ resultSourceText(msg.data) }}</span>
+                        <span class="meta-separator"></span>
+                        <span>{{ msg.data.knowledge_source ? knowledgeSourceLabel(msg.data.knowledge_source) : '结构化诊断' }}</span>
+                        <span class="meta-separator"></span>
+                        <span>{{ msg.pending ? '生成中' : `${msg.data.latency_ms || 0} ms` }}</span>
+                      </div>
                     </div>
+                    <span v-if="msg.pending" class="unified-streaming-badge">正在整理诊断结论</span>
+                  </div>
+                  <div class="assistant-summary-card" :class="{ 'assistant-summary-card--streaming': msg.pending }">{{ msg.data.conclusion }}</div>
+                  <div class="assistant-section-grid">
                     <div class="assistant-section">
                       <div class="assistant-section-title">可能原因</div>
                       <ul class="assistant-bullet-list">
-                        <li v-for="item in msg.data.possible_causes" :key="item">{{ item }}</li>
+                        <li v-for="item in msg.data.causes" :key="item">{{ item }}</li>
                       </ul>
                     </div>
                     <div class="assistant-section">
-                      <div class="assistant-section-title">节能建议</div>
+                      <div class="assistant-section-title">排查步骤</div>
                       <ul class="assistant-bullet-list">
-                        <li v-for="item in msg.data.energy_saving_suggestions" :key="item">{{ item }}</li>
+                        <li v-for="item in msg.data.steps" :key="item">{{ item }}</li>
                       </ul>
                     </div>
                     <div class="assistant-section">
-                      <div class="assistant-section-title">运维建议</div>
+                      <div class="assistant-section-title">立即动作</div>
                       <ul class="assistant-bullet-list">
-                        <li v-for="item in msg.data.operations_suggestions" :key="item">{{ item }}</li>
+                        <li v-for="item in msg.data.recommended_actions" :key="item">{{ item }}</li>
+                      </ul>
+                    </div>
+                    <div class="assistant-section">
+                      <div class="assistant-section-title">预防建议</div>
+                      <ul class="assistant-bullet-list">
+                        <li v-for="item in msg.data.prevention" :key="item">{{ item }}</li>
                       </ul>
                     </div>
                   </div>
-                  <div class="assistant-actions assistant-actions--start">
-                    <el-button size="small" :type="analysisFeedbackLabel === 'useful' ? 'primary' : 'default'" @click="submitAnalysisFeedback('useful')">有帮助</el-button>
-                    <el-button size="small" :type="analysisFeedbackLabel === 'not_useful' ? 'danger' : 'default'" @click="submitAnalysisFeedback('not_useful')">没帮助</el-button>
+                  <div v-if="msg.data && msg.data.evidence && msg.data.evidence.length" class="assistant-evidence-summary">
+                    <span class="assistant-evidence-summary-label">引用依据</span>
+                    <span>{{ msg.data.evidence.slice(0, 3).map((ev) => ev.title).join(' · ') }}</span>
                   </div>
-                </template>
+                  <div v-if="!msg.pending" class="assistant-actions assistant-actions--start">
+                    <el-button size="small" @click="copyDiagnosisToActionNote">写入备注</el-button>
+                    <el-button size="small" :type="diagnosisFeedbackLabel === 'useful' ? 'primary' : 'default'" @click="submitDiagnosisFeedback('useful')">有帮助</el-button>
+                    <el-button size="small" :type="diagnosisFeedbackLabel === 'not_useful' ? 'danger' : 'default'" @click="submitDiagnosisFeedback('not_useful')">没帮助</el-button>
+                  </div>
+                </div>
+
+                <div v-else-if="msg.type === 'knowledge'" class="unified-assistant-card unified-assistant-card--knowledge">
+                  <div class="unified-card-header">
+                    <div>
+                      <div class="unified-card-title">知识问答结果</div>
+                      <div class="unified-card-meta">
+                        <span>{{ msg.pending ? '正在组织回答' : '回答已整理' }}</span>
+                        <span class="meta-separator"></span>
+                        <span>{{ assistantCapabilityText() }}</span>
+                      </div>
+                    </div>
+                  </div>
+                  <div class="unified-knowledge-answer" :class="{ 'unified-knowledge-answer--pending': msg.pending }" v-html="msg.pending ? msg.content : renderMarkdown(msg.content)"></div>
+                  <div v-if="msg.references && msg.references.length" class="assistant-reference-panel" :class="{ 'is-expanded': msg.referencesExpanded }">
+                    <button class="assistant-reference-toggle" @click="toggleKnowledgeReferences(msg.id)">
+                      <span>知识依据 {{ msg.references.length }} 条</span>
+                      <span>{{ msg.referencesExpanded ? '收起查看' : '展开查看' }}</span>
+                    </button>
+                    <div v-if="msg.referencesExpanded" class="unified-reference-list">
+                      <div v-for="ref in msg.references" :key="ref.id || ref.chunk_id" class="unified-reference-item">
+                        <div class="assistant-evidence-title">{{ ref.title }}</div>
+                        <div class="assistant-evidence-meta">
+                          <span>{{ knowledgeSourceLabel(ref.sourceType || ref.source_type) }}</span>
+                          <span class="meta-separator"></span>
+                          <span>相似度 {{ formatNumber((ref.similarity || 0) * 100, 1) }}%</span>
+                        </div>
+                        <div class="assistant-evidence-text">{{ ref.excerpt }}</div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <div v-else-if="msg.type === 'analysis'" class="unified-assistant-card unified-assistant-card--analysis">
+                  <div v-if="msg.pending" class="empty-tip empty-tip--emphasis">
+                    <div class="empty-tip-title">正在生成分析结论</div>
+                    <div class="empty-tip-desc">系统正在整合趋势、天气、同类对照和节能机会...</div>
+                  </div>
+                  <template v-else-if="msg.data">
+                    <div class="unified-card-header">
+                      <div>
+                        <div class="unified-card-title">分析结论</div>
+                        <div class="unified-card-meta">
+                          <span>{{ resultSourceText(msg.data) }}</span>
+                          <span class="meta-separator"></span>
+                          <span>{{ msg.data.latency_ms || 0 }} ms</span>
+                        </div>
+                      </div>
+                    </div>
+                    <div class="assistant-summary-card">{{ msg.data.summary }}</div>
+                    <div class="assistant-section-grid">
+                      <div class="assistant-section">
+                        <div class="assistant-section-title">主要发现</div>
+                        <ul class="assistant-bullet-list">
+                          <li v-for="item in msg.data.findings" :key="item">{{ item }}</li>
+                        </ul>
+                      </div>
+                      <div class="assistant-section">
+                        <div class="assistant-section-title">可能原因</div>
+                        <ul class="assistant-bullet-list">
+                          <li v-for="item in msg.data.possible_causes" :key="item">{{ item }}</li>
+                        </ul>
+                      </div>
+                      <div class="assistant-section">
+                        <div class="assistant-section-title">节能建议</div>
+                        <ul class="assistant-bullet-list">
+                          <li v-for="item in msg.data.energy_saving_suggestions" :key="item">{{ item }}</li>
+                        </ul>
+                      </div>
+                      <div class="assistant-section">
+                        <div class="assistant-section-title">运维建议</div>
+                        <ul class="assistant-bullet-list">
+                          <li v-for="item in msg.data.operations_suggestions" :key="item">{{ item }}</li>
+                        </ul>
+                      </div>
+                    </div>
+                    <div class="assistant-actions assistant-actions--start">
+                      <el-button size="small" :type="analysisFeedbackLabel === 'useful' ? 'primary' : 'default'" @click="submitAnalysisFeedback('useful')">有帮助</el-button>
+                      <el-button size="small" :type="analysisFeedbackLabel === 'not_useful' ? 'danger' : 'default'" @click="submitAnalysisFeedback('not_useful')">没帮助</el-button>
+                    </div>
+                  </template>
+                </div>
               </div>
             </div>
           </div>
 
-          <!-- Input area -->
           <div class="assistant-footer">
             <div class="assistant-quick-chips">
               <button v-for="chip in unifiedQuickStarters()" :key="chip.key" class="assistant-quick-chip" @click="sendUnifiedMessage(chip.question)">
