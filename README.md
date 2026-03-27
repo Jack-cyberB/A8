@@ -5,6 +5,38 @@ A8 建筑能源智能管理系统：
 - 后端：Python 轻量 API + 规则异常检测 + 闭环处理状态机
 - 数据：BDG2 电力时序 + 司空知识条目
 
+## BDG2 展示建筑决策
+
+当前项目的建筑展示策略固定为“前台少量代表建筑展示 + 后台全量同类样本对标”。
+
+- 前台展示建筑固定为：
+  - `Panther_education_Genevieve（教学楼）`
+  - `Panther_education_Jerome（实验楼）`
+  - `Panther_office_Patti（办公楼）`
+  - `Panther_lodging_Marisol（宿舍）`
+  - `Panther_assembly_Denice（体育馆）`
+  - `Fox_public_Martin（图书馆）`
+  - `Fox_food_Scott（食堂）`
+- 这组建筑用于页面展示、AI 问答上下文和答辩讲述，不再直接使用“教学楼 / 办公楼 / 实验楼”这类纯演示占位名。
+- 展示名称规则固定为：
+  - `原始 building_id + （中文类别）`
+  - 例如：`Panther_education_Genevieve（教学楼）`
+- “同类型建筑比较”功能不以前台这 7 栋建筑互相比，而是仍然基于 BDG2 后台样本池计算。
+- 对标池规则固定为：
+  - 教学楼：`Education + Classroom` 同类样本
+  - 实验楼：`Education + Laboratory / Research / Academic` 同类样本
+  - 办公楼：`Office + Office` 同类样本
+  - 宿舍：`Lodging/residential + Dormitory / Residence Hall` 同类样本
+  - 图书馆：`Public services + Library` 同类样本
+  - 体育馆：`Entertainment/public assembly + Gymnasium / Stadium / Fitness Center` 同类样本
+  - 食堂：`Food sales and service` 同类样本
+- 这样做的目标是同时满足：
+  - 前端展示简洁，适合比赛录屏和答辩
+  - 建筑身份保留 BDG2 原始来源
+  - 同类对标仍基于完整样本池，结果有统计意义
+
+如后续扩展水、空调、照明等维度，优先在这 7 栋展示建筑内扩展，不随意更换展示对象。
+
 ## 目录
 
 - `frontend/` 页面与交互
@@ -74,13 +106,13 @@ $env:OPENAI_MAX_RETRIES="2"
 
 `POST /api/ai/diagnose` / `POST /api/ai/analyze` 的 `provider` 参数行为：
 - `template`：只走模板兜底
-- `llm`：直连 DeepSeek，失败自动降级模板
-- `auto`：优先 DeepSeek，失败自动降级模板；当前前端默认使用这个模式
+- `llm`：直连 DeepSeek，失败直接返回真实错误
+- `auto`：优先 DeepSeek，当前默认也不再自动切本地模板；失败直接返回真实错误
 
 前端调用策略：
 - 页面刷新、切换建筑、切换时间范围时，不会自动请求在线 LLM
 - 只有点击“AI 生成分析结论”或“生成诊断”时，才会触发在线分析
-- 页面会明确显示本次结果来源是 `DeepSeek` 还是 `模板兜底`
+- 页面会明确显示本次结果来源或真实失败原因
 
 运行态会写入 `data/runtime/ai_calls.jsonl`，用于统计降级率与平均耗时；日志不落盘 API Key。
 `scripts/run_regression.py` 会输出 `data/runtime/regression_summary.json`，供系统健康接口读取。
@@ -99,5 +131,5 @@ $env:OPENAI_MAX_RETRIES="2"
 2. `npm run test:all` 全绿；`npm run test:acceptance` 全绿。
 3. 如配置 Key，`npm run test:llm-live` 返回 `status=pass`。
 4. 异常详情可保存复盘记录，且 `/api/anomaly/export` 可下载 CSV。
-5. 切换 `provider=llm/auto` 失败时仍可降级模板并继续完成处理流程。
+5. 切换 `provider=llm/auto` 失败时会返回真实错误，不再伪装为模板成功。
 
