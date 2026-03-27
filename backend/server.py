@@ -665,6 +665,33 @@ class EnergyRepository:
             return text
         return f"{text[:limit].rstrip()}..."
 
+    def _clean_ragflow_answer_text(self, value: Any) -> str:
+        text = str(value or "")
+        text = re.sub(r"\[ID:\s*\d+\]", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"\[\s*\d+\]", "", text)
+        text = re.sub(r"\[\s*ID:\s*$", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"\[\s*\d+\s*$", "", text)
+        text = re.sub(r"ID:\s*\d+\s*\]", "", text, flags=re.IGNORECASE)
+        text = text.replace("\r", "")
+        text = re.sub(r"[ \t]+\n", "\n", text)
+        text = re.sub(r"\n{3,}", "\n\n", text)
+        text = re.sub(r"[ \t]{2,}", " ", text)
+        return text.strip()
+
+    def _merge_ragflow_stream_text(self, full_text: str, incoming_text: Any) -> tuple[str, str]:
+        piece = str(incoming_text or "")
+        if not piece:
+            return full_text, ""
+        if piece.startswith(full_text):
+            delta = piece[len(full_text) :]
+            return piece, delta
+        if full_text.startswith(piece):
+            return full_text, ""
+        if piece in full_text:
+            return full_text, ""
+        merged = f"{full_text}{piece}"
+        return merged, piece
+
     def _normalize_evidence_item(
         self,
         *,
@@ -814,7 +841,7 @@ class EnergyRepository:
         if not isinstance(latest, dict):
             raise RuntimeError("RAGFlow chat returned no payload")
         return {
-            "answer": str(latest.get("answer", "")).strip(),
+            "answer": self._clean_ragflow_answer_text(latest.get("answer", "")),
             "reference": latest.get("reference") if isinstance(latest.get("reference"), dict) else {},
             "session_id": str(latest.get("session_id", "")).strip() or ensured_session_id,
             "message_id": str(latest.get("id", "")).strip(),
@@ -956,7 +983,7 @@ class EnergyRepository:
             method="POST",
             headers=self._ragflow_headers(),
         )
-        last_answer = ""
+        full_answer = ""
         references: list[dict[str, str]] = []
         message_id = ""
         try:
@@ -975,15 +1002,14 @@ class EnergyRepository:
                     answer = str(data.get("answer") or "")
                     final = bool(data.get("final", False))
                     message_id = str(data.get("id") or message_id)
+                    full_answer, delta = self._merge_ragflow_stream_text(full_answer, answer)
+                    cleaned_delta = self._clean_ragflow_answer_text(delta)
+                    if cleaned_delta:
+                        yield "token", {"text": cleaned_delta}
                     if final:
                         ref = data.get("reference") if isinstance(data.get("reference"), dict) else {}
                         references = self._normalize_ragflow_reference(ref, limit=6)
                         break
-                    if answer and answer != last_answer:
-                        delta = answer[len(last_answer):]
-                        last_answer = answer
-                        if delta:
-                            yield "token", {"text": delta}
         except (URLError, TimeoutError, socket.timeout) as exc:
             yield "error", {"message": f"RAGFlow timeout: {exc}"}
             return
@@ -991,7 +1017,7 @@ class EnergyRepository:
             yield "error", {"message": str(exc)}
             return
         yield "done", {
-            "answer": last_answer,
+            "answer": self._clean_ragflow_answer_text(full_answer),
             "session_id": ensured_session_id,
             "message_id": message_id,
             "chat_id": settings.get("chat_id", ""),

@@ -18,7 +18,18 @@ TESTS = [
     "backend.tests.test_repository.RepositoryTests.test_anomaly_note_upsert_and_detail",
     "backend.tests.test_repository.RepositoryTests.test_export_csv_and_health",
     "backend.tests.test_repository.RepositoryTests.test_ai_evaluate_and_feedback",
+    "backend.tests.test_repository.RepositoryTests.test_clean_ragflow_answer_text_removes_inline_citations",
+    "backend.tests.test_repository.RepositoryTests.test_merge_ragflow_stream_text_supports_incremental_and_cumulative_chunks",
+    "backend.tests.test_repository.RepositoryTests.test_ragflow_chat_stream_events_keeps_full_answer_when_final_chunk_is_empty",
 ]
+
+def _safe_print(text: str) -> None:
+    if not text:
+        return
+    stream = sys.stdout
+    encoding = getattr(stream, "encoding", None) or "utf-8"
+    safe = text.encode(encoding, errors="replace").decode(encoding, errors="replace")
+    print(safe)
 
 
 def main() -> int:
@@ -28,9 +39,9 @@ def main() -> int:
         print(f"[RUN] {test}")
         proc = subprocess.run([py, "-m", "unittest", test, "-v"], cwd=str(ROOT), capture_output=True, text=True, encoding="utf-8", errors="replace")
         if proc.stdout:
-            print(proc.stdout.strip())
+            _safe_print(proc.stdout.strip())
         if proc.stderr:
-            print(proc.stderr.strip())
+            _safe_print(proc.stderr.strip())
         ok = proc.returncode == 0
         print(f"[{'PASS' if ok else 'FAIL'}] {test}\n")
         if not ok:

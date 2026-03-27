@@ -272,7 +272,7 @@ class RepositoryTests(unittest.TestCase):
 
     def test_ragflow_chat_proxy_normalizes_response(self):
         fake_result = {
-            "answer": "这是来自 RAGFlow 的知识回答。",
+            "answer": "这是来自 RAGFlow 的知识回答。[ID:2]",
             "session_id": "rag-session-1",
             "message_id": "msg-1",
             "reference": {
@@ -292,8 +292,70 @@ class RepositoryTests(unittest.TestCase):
         self.assertEqual(result["provider"], "ragflow_chat")
         self.assertEqual(result["session_id"], "rag-session-1")
         self.assertEqual(result["knowledge_source"], "ragflow")
+        self.assertEqual(result["answer"], "这是来自 RAGFlow 的知识回答。")
         self.assertEqual(result["references"][0]["source_type"], "ragflow")
         self.assertIn("校园与教育建筑", result["references"][0]["title"])
+
+    def test_clean_ragflow_answer_text_removes_inline_citations(self):
+        cleaned = REPO._clean_ragflow_answer_text("建议先核查空调排程[ID:3][ID:0][1]。\n\n")
+        self.assertEqual(cleaned, "建议先核查空调排程。")
+
+    def test_merge_ragflow_stream_text_supports_incremental_and_cumulative_chunks(self):
+        full_text = ""
+        full_text, delta = REPO._merge_ragflow_stream_text(full_text, "第一段")
+        self.assertEqual(full_text, "第一段")
+        self.assertEqual(delta, "第一段")
+
+        full_text, delta = REPO._merge_ragflow_stream_text(full_text, "第二段")
+        self.assertEqual(full_text, "第一段第二段")
+        self.assertEqual(delta, "第二段")
+
+        full_text, delta = REPO._merge_ragflow_stream_text(full_text, "第一段第二段第三段")
+        self.assertEqual(full_text, "第一段第二段第三段")
+        self.assertEqual(delta, "第三段")
+
+    def test_ragflow_chat_stream_events_keeps_full_answer_when_final_chunk_is_empty(self):
+        chunks = iter(
+            [
+                'data:{"code":0,"data":{"answer":"建议先核查空调排程[ID:3]","reference":{"chunks":[]},"final":false,"id":"msg-1","session_id":"sid-1"}}\n'.encode("utf-8"),
+                b"\n",
+                'data:{"code":0,"data":{"answer":"，再检查新风联动。","reference":{"chunks":[]},"final":false,"id":"msg-1","session_id":"sid-1"}}\n'.encode("utf-8"),
+                b"\n",
+                'data:{"code":0,"data":{"answer":"","reference":{"chunks":[{"id":"chunk-1","document_name":"03-校园与教育建筑运维场景.md","content":"教学楼高温时段应优先核查空调与通风排程。","similarity":0.91}]},"final":true,"id":"msg-1","session_id":"sid-1"}}\n'.encode("utf-8"),
+                b"\n",
+            ]
+        )
+
+        class FakeResponse:
+            def __enter__(self_inner):
+                return self_inner
+
+            def __exit__(self_inner, exc_type, exc, tb):
+                return False
+
+            def __iter__(self_inner):
+                return chunks
+
+        with mock.patch.object(REPO, "_ensure_ragflow_session", return_value="sid-1"):
+            with mock.patch.object(
+                REPO,
+                "_ragflow_settings",
+                return_value={
+                    "base_url": "http://127.0.0.1:8088/api/v1",
+                    "chat_id": "chat-1",
+                    "timeout_sec": 12,
+                    "chat_ready": True,
+                    "api_key": "dummy",
+                },
+            ):
+                with mock.patch("backend.server.urlopen", return_value=FakeResponse()):
+                    events = list(REPO.ragflow_chat_stream_events({"question": "怎么处理当前高负荷？"}))
+
+        self.assertEqual([name for name, _ in events], ["start", "token", "token", "done"])
+        self.assertEqual(events[1][1]["text"], "建议先核查空调排程")
+        self.assertEqual(events[2][1]["text"], "，再检查新风联动。")
+        self.assertEqual(events[3][1]["answer"], "建议先核查空调排程，再检查新风联动。")
+        self.assertEqual(events[3][1]["references"][0]["source_type"], "ragflow")
 
     def test_ai_stats_shape(self):
         aid = self._first_anomaly_id()

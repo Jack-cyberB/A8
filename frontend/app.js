@@ -232,9 +232,23 @@ createApp({
       const num = Number(value || 0);
       return Number.isFinite(num) ? num.toFixed(digits) : '0.0';
     },
+    cleanRagflowAnswerText(text) {
+      if (text === undefined || text === null) return '';
+      return String(text)
+        .replace(/\[ID:\s*\d+\]/gi, '')
+        .replace(/\[\s*\d+\]/g, '')
+        .replace(/\[\s*ID:\s*$/gi, '')
+        .replace(/\[\s*\d+\s*$/g, '')
+        .replace(/ID:\s*\d+\s*\]/gi, '')
+        .replace(/\r/g, '')
+        .replace(/[ \t]+\n/g, '\n')
+        .replace(/\n{3,}/g, '\n\n')
+        .replace(/[ \t]{2,}/g, ' ')
+        .trim();
+    },
     renderMarkdown(text) {
       if (!text || typeof text !== 'string') return '';
-      const clean = text.replace(/\[ID:\d+\]/g, '');
+      const clean = this.cleanRagflowAnswerText(text);
       if (typeof marked !== 'undefined') {
         try { return marked.parse(clean); } catch(e) {}
       }
@@ -540,7 +554,7 @@ createApp({
         if (!response.ok) throw new Error(response.status + ' ' + response.statusText);
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
-        let buf = '', accumulated = '';
+        let buf = '', accumulatedRaw = '';
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
@@ -553,12 +567,14 @@ createApp({
             if (!em || !dm) continue;
             let ed; try { ed = JSON.parse(dm[1]); } catch(e) { continue; }
             if (em[1] === 'token') {
-              accumulated += ed.text || '';
+              accumulatedRaw += ed.text || '';
+              const displayContent = this.cleanRagflowAnswerText(accumulatedRaw) || '正在检索知识库...';
               const idx = this.unifiedChat.messages.findIndex(m => m.id === msgId);
-              if (idx >= 0) { const c = this.unifiedChat.messages[idx]; this.unifiedChat.messages.splice(idx, 1, { ...c, pending: false, content: accumulated }); this.scrollAssistantToBottom(); }
+              if (idx >= 0) { const c = this.unifiedChat.messages[idx]; this.unifiedChat.messages.splice(idx, 1, { ...c, pending: false, content: displayContent }); this.scrollAssistantToBottom(); }
             } else if (em[1] === 'done') {
               const idx = this.unifiedChat.messages.findIndex(m => m.id === msgId);
-              if (idx >= 0) { const c = this.unifiedChat.messages[idx]; this.unifiedChat.messages.splice(idx, 1, { ...c, pending: false, content: ed.answer || accumulated, references: Array.isArray(ed.references) ? ed.references : [] }); }
+              const finalContent = this.cleanRagflowAnswerText(ed.answer || accumulatedRaw) || 'RAGFlow 已返回，但当前没有可展示的文本结果。';
+              if (idx >= 0) { const c = this.unifiedChat.messages[idx]; this.unifiedChat.messages.splice(idx, 1, { ...c, pending: false, content: finalContent, references: Array.isArray(ed.references) ? ed.references : [] }); }
               this.unifiedChat.sessionId = ed.session_id || this.unifiedChat.sessionId;
             } else if (em[1] === 'error') { throw new Error(ed.message || '知识库返回错误'); }
           }
