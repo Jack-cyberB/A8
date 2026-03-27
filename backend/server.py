@@ -3320,6 +3320,7 @@ class EnergyRepository:
                 model = os.getenv("OPENAI_MODEL", "deepseek-chat").strip() or "deepseek-chat"
                 base_timeout_sec = float(os.getenv("OPENAI_TIMEOUT_SEC", "12"))
                 timeout_sec = float(os.getenv("OPENAI_ANALYZE_TIMEOUT_SEC", str(max(base_timeout_sec, 45.0))))
+                max_retries = int(os.getenv("OPENAI_MAX_RETRIES", "2"))
                 context = template_result["context"]
                 analysis_seed = template_result["analysis"]
                 user_question = str(payload.get("message", "")).strip() or "请围绕当前筛选范围输出一份可直接用于汇报的分析结论。"
@@ -3344,24 +3345,50 @@ class EnergyRepository:
                     "如果证据不足，请明确说明证据不足，但仍要给出最稳妥的建议。\n"
                     "请输出严格JSON。"
                 )
-                response = llm_provider._call_chat_completion(
-                    base_url=base_url,
-                    api_key=api_key,
-                    model=model,
-                    timeout_sec=timeout_sec,
-                    max_tokens=1100,
-                    messages=[
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_prompt},
-                    ],
-                )
-                content = response.get("choices", [{}])[0].get("message", {}).get("content", "")
-                if isinstance(content, list):
-                    content = "".join(
-                        str(part.get("text", "")) if isinstance(part, dict) else str(part)
-                        for part in content
-                    )
-                llm_obj = llm_provider._extract_json_object(str(content))
+                last_err: Exception | None = None
+                llm_obj: dict[str, Any] | None = None
+                for attempt in range(max_retries + 1):
+                    try:
+                        response = llm_provider._call_chat_completion(
+                            base_url=base_url,
+                            api_key=api_key,
+                            model=model,
+                            timeout_sec=timeout_sec,
+                            max_tokens=1100,
+                            messages=[
+                                {"role": "system", "content": system_prompt},
+                                {"role": "user", "content": user_prompt},
+                            ],
+                        )
+                        content = response.get("choices", [{}])[0].get("message", {}).get("content", "")
+                        if isinstance(content, list):
+                            content = "".join(
+                                str(part.get("text", "")) if isinstance(part, dict) else str(part)
+                                for part in content
+                            )
+                        llm_obj = llm_provider._extract_json_object(str(content))
+                        break
+                    except HTTPError as exc:
+                        retryable = exc.code == 429 or 500 <= exc.code < 600
+                        last_err = RuntimeError(f"llm http status {exc.code}")
+                        if retryable and attempt < max_retries:
+                            time.sleep(0.6 * (attempt + 1))
+                            continue
+                        break
+                    except (URLError, TimeoutError, socket.timeout, ConnectionResetError) as exc:
+                        last_err = RuntimeError(f"llm network error: {type(exc).__name__}")
+                        if attempt < max_retries:
+                            time.sleep(0.6 * (attempt + 1))
+                            continue
+                        break
+                    except Exception as exc:
+                        last_err = RuntimeError(str(exc) if str(exc) else f"llm parse error: {type(exc).__name__}")
+                        if attempt < max_retries:
+                            time.sleep(0.4 * (attempt + 1))
+                            continue
+                        break
+                if llm_obj is None:
+                    raise RuntimeError(str(last_err or "llm unknown error"))
                 result = {
                     "analysis": {
                         "summary": str(llm_obj.get("summary", "")).strip() or template_result["analysis"]["summary"],
