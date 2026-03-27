@@ -240,6 +240,7 @@ class LLMDiagnoseProvider(DiagnoseProvider):
         model: str,
         timeout_sec: float,
         messages: list[dict[str, str]],
+        max_tokens: int = 900,
     ) -> dict[str, Any]:
         endpoint = f"{base_url.rstrip('/')}/chat/completions"
         body = json.dumps(
@@ -247,6 +248,7 @@ class LLMDiagnoseProvider(DiagnoseProvider):
                 "model": model,
                 "messages": messages,
                 "temperature": 0.2,
+                "max_tokens": max(128, int(max_tokens)),
                 "response_format": {"type": "json_object"},
             }
         ).encode("utf-8")
@@ -2931,24 +2933,15 @@ class EnergyRepository:
     def diagnose_stream_events(
         self, payload: dict[str, Any]
     ) -> Generator[tuple[str, dict[str, Any]], None, None]:
-        """Yield (event_name, data_dict) tuples for SSE streaming diagnosis.
-
-        Flow:
-          1. Compute template result synchronously (~300ms incl. parallel knowledge retrieval).
-          2. Yield 'template' event immediately so the frontend renders a full answer.
-          3. Stream an LLM-enriched conclusion token-by-token ('token' events).
-          4. Yield 'done' or 'fallback' event to close the stream.
-        """
+        """Yield (event_name, data_dict) tuples for SSE streaming diagnosis."""
         template_result = self._diagnose_by_template(payload)
         diag = template_result["diagnosis"]
         context = template_result["context"]
         trace_id = uuid.uuid4().hex
 
-        yield "template", {**diag, "trace_id": trace_id, "provider": "template_provider", "pending": True}
-
         api_key = os.getenv("OPENAI_API_KEY", "").strip()
         if not api_key:
-            yield "done", {"provider": "template_provider", "trace_id": trace_id, "latency_ms": 0}
+            yield "error", {"message": "LLM provider not configured", "trace_id": trace_id}
             return
 
         base_url = os.getenv("OPENAI_BASE_URL", "https://api.deepseek.com").strip() or "https://api.deepseek.com"
@@ -2994,7 +2987,7 @@ class EnergyRepository:
             latency_ms = int((time.perf_counter() - start) * 1000)
             yield "done", {"provider": "llm_provider", "trace_id": trace_id, "latency_ms": latency_ms}
         except Exception as exc:
-            yield "fallback", {"reason": str(exc), "provider": "template_provider", "trace_id": trace_id}
+            yield "error", {"message": str(exc), "trace_id": trace_id}
 
     def _build_analysis_context(
         self,
@@ -3213,6 +3206,16 @@ class EnergyRepository:
         snap["saving_opportunities"] = snap.get("saving_opportunities", [])[:2]
         return _try(c)
 
+    def _llm_template_fallback_enabled(self) -> bool:
+        raw = str(os.getenv("LLM_ENABLE_TEMPLATE_FALLBACK", "0")).strip().lower()
+        return raw in {"1", "true", "yes", "on"}
+
+    def _raise_llm_failure(self, preferred: str, error_message: str | None) -> None:
+        if preferred == "template":
+            return
+        message = str(error_message or "").strip() or "LLM request failed"
+        raise RuntimeError(message)
+
     def _analyze_by_template(self, payload: dict[str, Any]) -> dict[str, Any]:
         context = self._build_analysis_context(payload)
         summary = context["summary"]
@@ -3302,6 +3305,7 @@ class EnergyRepository:
         template_result = self._analyze_by_template(payload)
         result = template_result
         provider_name = "template_provider"
+        fallback_enabled = self._llm_template_fallback_enabled()
 
         try:
             if preferred in {"llm", "auto"}:
@@ -3315,10 +3319,11 @@ class EnergyRepository:
                 base_url = os.getenv("OPENAI_BASE_URL", "https://api.deepseek.com").strip() or "https://api.deepseek.com"
                 model = os.getenv("OPENAI_MODEL", "deepseek-chat").strip() or "deepseek-chat"
                 base_timeout_sec = float(os.getenv("OPENAI_TIMEOUT_SEC", "12"))
-                timeout_sec = float(os.getenv("OPENAI_ANALYZE_TIMEOUT_SEC", str(max(base_timeout_sec, 20.0))))
+                timeout_sec = float(os.getenv("OPENAI_ANALYZE_TIMEOUT_SEC", str(max(base_timeout_sec, 45.0))))
                 context = template_result["context"]
                 analysis_seed = template_result["analysis"]
                 user_question = str(payload.get("message", "")).strip() or "请围绕当前筛选范围输出一份可直接用于汇报的分析结论。"
+                user_question = self._truncate_text(user_question, 180)
                 system_prompt = (
                     "你是建筑能源分析助手，面向楼宇能源管理和运维答辩场景。"
                     "你必须只输出一个JSON对象，不要输出任何解释、前后缀或Markdown。"
@@ -3329,13 +3334,12 @@ class EnergyRepository:
                 )
                 prompt_context = self._build_analysis_prompt_context(payload, context, analysis_seed)
                 prompt_context_str = json.dumps(prompt_context, ensure_ascii=False)
-                # Keep prompt within ~6000 chars to avoid context-length errors
-                if len(prompt_context_str) > 6000:
-                    prompt_context_str = self._compact_analysis_prompt(prompt_context, max_chars=6000)
+                if len(prompt_context_str) > 2800:
+                    prompt_context_str = self._compact_analysis_prompt(prompt_context, max_chars=2800)
                 user_prompt = (
                     f"当前分析上下文: {prompt_context_str}\n"
                     f"用户补充问题: {user_question}\n"
-                    "请基于当前建筑、筛选时间、KPI 摘要、趋势变化、温度关系、同类差距、节能机会和异常窗口生成结果。\n"
+                    "请提炼最重要的趋势、原因、节能动作和运维动作。\n"
                     "如果证据不足，请明确说明证据不足，但仍要给出最稳妥的建议。\n"
                     "请输出严格JSON。"
                 )
@@ -3344,6 +3348,7 @@ class EnergyRepository:
                     api_key=api_key,
                     model=model,
                     timeout_sec=timeout_sec,
+                    max_tokens=700,
                     messages=[
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": user_prompt},
@@ -3372,9 +3377,30 @@ class EnergyRepository:
                 }
                 provider_name = llm_provider.name
         except Exception as exc:
-            fallback_used = True
             error_message = str(exc)
-            result = template_result
+            if fallback_enabled:
+                fallback_used = True
+                result = template_result
+            else:
+                self._append_ai_event(
+                    {
+                        "timestamp": to_iso(dt.datetime.now()),
+                        "trace_id": trace_id,
+                        "requested_provider": preferred,
+                        "provider": provider_name,
+                        "fallback_used": False,
+                        "latency_ms": int((time.perf_counter() - start) * 1000),
+                        "error_type": "llm_error",
+                        "building_id": template_result.get("context", {}).get("building_id"),
+                        "event_type": "analysis",
+                        "field_complete": False,
+                        "result_risk_level": "",
+                        "knowledge_source": str(template_result.get("analysis", {}).get("knowledge_source", "")),
+                        "retrieval_hit_count": int(template_result.get("analysis", {}).get("retrieval_hit_count", 0) or 0),
+                        "retrieval_error_type": str(template_result.get("analysis", {}).get("retrieval_error_type", "")),
+                    }
+                )
+                self._raise_llm_failure(preferred, error_message)
 
         latency_ms = int((time.perf_counter() - start) * 1000)
         result["analysis"]["provider"] = provider_name
@@ -3435,6 +3461,7 @@ class EnergyRepository:
         fallback_used = False
         error_message = None
         trace_id = uuid.uuid4().hex
+        fallback_enabled = self._llm_template_fallback_enabled()
 
         try:
             if preferred in {"llm", "auto"}:
@@ -3444,10 +3471,32 @@ class EnergyRepository:
                 result = self.providers["template"].diagnose(self, payload)
                 provider_name = self.providers["template"].name
         except Exception as exc:
-            fallback_used = True
             error_message = str(exc)
-            result = self.providers["template"].diagnose(self, payload)
-            provider_name = self.providers["template"].name
+            if fallback_enabled:
+                fallback_used = True
+                result = self.providers["template"].diagnose(self, payload)
+                provider_name = self.providers["template"].name
+            else:
+                self._append_ai_event(
+                    {
+                        "timestamp": to_iso(dt.datetime.now()),
+                        "trace_id": trace_id,
+                        "requested_provider": preferred,
+                        "provider": "llm_provider",
+                        "fallback_used": False,
+                        "latency_ms": int((time.perf_counter() - start) * 1000),
+                        "error_type": "llm_error",
+                        "anomaly_id": None,
+                        "has_message": bool(str(payload.get("message", "")).strip()),
+                        "event_type": "diagnose",
+                        "field_complete": False,
+                        "result_risk_level": "",
+                        "knowledge_source": "",
+                        "retrieval_hit_count": 0,
+                        "retrieval_error_type": "",
+                    }
+                )
+                self._raise_llm_failure(preferred, error_message)
 
         latency_ms = int((time.perf_counter() - start) * 1000)
         result["diagnosis"]["provider"] = provider_name
@@ -3622,7 +3671,14 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if parsed.path == "/api/ai/diagnose":
-            result = REPO.diagnose(payload)
+            try:
+                result = REPO.diagnose(payload)
+            except ValueError as exc:
+                self._json({"code": 400, "message": str(exc), "data": None}, HTTPStatus.BAD_REQUEST)
+                return
+            except Exception as exc:
+                self._json({"code": 502, "message": str(exc), "data": None}, HTTPStatus.BAD_GATEWAY)
+                return
             self._json({"code": 0, "message": "ok", "data": result})
             return
 
@@ -3631,6 +3687,9 @@ class Handler(BaseHTTPRequestHandler):
                 result = REPO.analyze(payload)
             except ValueError as exc:
                 self._json({"code": 400, "message": str(exc), "data": None}, HTTPStatus.BAD_REQUEST)
+                return
+            except Exception as exc:
+                self._json({"code": 502, "message": str(exc), "data": None}, HTTPStatus.BAD_GATEWAY)
                 return
             self._json({"code": 0, "message": "ok", "data": result})
             return
