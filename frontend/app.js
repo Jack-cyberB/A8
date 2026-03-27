@@ -360,6 +360,7 @@ createApp({
         auto: '优先 DeepSeek（失败降级）',
         template_provider: '模板兜底',
         llm_provider: 'DeepSeek',
+        error: '请求失败',
       };
       return map[value] || value || '-';
     },
@@ -1020,13 +1021,17 @@ createApp({
             type: messageType,
             pending: false,
             data: {
-              summary: mode === 'saving' ? '节能建议生成失败，请稍后重试。' : '分析结论生成失败，请稍后重试。',
+              summary: mode === 'saving'
+                ? `节能建议生成失败：${err.message || '请稍后重试。'}`
+                : `分析结论生成失败：${err.message || '请稍后重试。'}`,
               findings: [],
               possible_causes: [],
               energy_saving_suggestions: [],
               operations_suggestions: [],
-              provider: 'template',
+              provider: 'error',
+              requested_provider: this.aiProvider,
               latency_ms: 0,
+              fallback_used: false,
             },
           });
         }

@@ -3329,8 +3329,9 @@ class EnergyRepository:
                     "你必须只输出一个JSON对象，不要输出任何解释、前后缀或Markdown。"
                     "JSON字段必须包含：summary, findings, possible_causes, energy_saving_suggestions, operations_suggestions, evidence。"
                     "findings/possible_causes/energy_saving_suggestions/operations_suggestions/evidence 必须是数组，每个数组至少包含1条内容，不允许空数组。"
+                    "findings 最多5条，possible_causes 最多4条，energy_saving_suggestions 最多3条，operations_suggestions 最多3条，evidence 最多3条。"
                     "请使用中文；不要输出空泛套话；summary必须引用建筑名称和时间范围；结论必须引用趋势、同类对比、天气联动或异常窗口中的具体数值。"
-                    "建议动作尽量落到具体时段、运行策略、夜间基线或异常事件。"
+                    "建议动作尽量落到具体时段、运行策略、夜间基线或异常事件。请尽量简洁，避免冗长重复。"
                 )
                 prompt_context = self._build_analysis_prompt_context(payload, context, analysis_seed)
                 prompt_context_str = json.dumps(prompt_context, ensure_ascii=False)
@@ -3348,7 +3349,7 @@ class EnergyRepository:
                     api_key=api_key,
                     model=model,
                     timeout_sec=timeout_sec,
-                    max_tokens=700,
+                    max_tokens=1100,
                     messages=[
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": user_prompt},
