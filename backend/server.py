@@ -46,6 +46,8 @@ AI_CALL_LOG_FILE = RUNTIME_DIR / "ai_calls.jsonl"
 NOTE_LOG_FILE = RUNTIME_DIR / "anomaly_notes.jsonl"
 REGRESSION_SUMMARY_FILE = RUNTIME_DIR / "regression_summary.json"
 FRONTEND_DIR = ROOT / "frontend"
+SCENE_KNOWLEDGE_DOC_DIR = resolve_project_path("docs", "ragflow", "sikong-kb-pack", "main-kb")
+STANDARD_KNOWLEDGE_DOC_DIR = resolve_project_path("docs", "ragflow", "standard-kb-pack", "main-kb")
 
 TIME_FMT = "%Y-%m-%d %H:%M:%S"
 CARBON_FACTOR = 0.785
@@ -864,6 +866,67 @@ class EnergyRepository:
             return text
         return f"{text[:limit].rstrip()}..."
 
+    def _sanitize_multiline_reference_text(self, value: Any) -> str:
+        text = str(value or "")
+        text = re.sub(r"</?p>", "\n\n", text, flags=re.IGNORECASE)
+        text = re.sub(r"<br\s*/?>", "\n", text, flags=re.IGNORECASE)
+        text = re.sub(r"</?em>", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"<[^>]+>", " ", text)
+        text = text.replace("\r", "\n")
+        lines = [re.sub(r"[ \t]{2,}", " ", line).strip() for line in text.split("\n")]
+        text = "\n".join(lines)
+        text = re.sub(r"\n{3,}", "\n\n", text).strip()
+        return text
+
+    def _strip_knowledge_document_suffix(self, value: Any) -> str:
+        text = str(value or "").strip()
+        text = re.sub(r"\.(md|markdown|txt|pdf)$", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"(?i)([-_\s]?part\d+)$", "", text)
+        return text.strip(" -_")
+
+    def _normalize_knowledge_document_lookup_key(self, value: Any) -> str:
+        text = self._strip_knowledge_document_suffix(value).lower()
+        return re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", text)
+
+    def _ragflow_document_key(self, chunk: dict[str, Any], fallback: str = "") -> str:
+        raw_title = (
+            chunk.get("document_name")
+            or chunk.get("document_keyword")
+            or chunk.get("docnm_kwd")
+            or chunk.get("doc_title")
+            or chunk.get("title")
+            or chunk.get("document_id")
+            or fallback
+        )
+        return self._strip_knowledge_document_suffix(raw_title)
+
+    def _extract_ragflow_snippet(self, chunk: dict[str, Any]) -> str:
+        raw = (
+            chunk.get("content_with_weight")
+            or chunk.get("content")
+            or chunk.get("highlight")
+            or chunk.get("text")
+            or ""
+        )
+        text = self._sanitize_multiline_reference_text(raw)
+        if not text:
+            return ""
+
+        question_match = re.search(r"Question:\s*(.+?)(?:\nAnswer:|\n|$)", text, flags=re.IGNORECASE | re.DOTALL)
+        answer_match = re.search(r"Answer:\s*(.+)$", text, flags=re.IGNORECASE | re.DOTALL)
+        if question_match or answer_match:
+            question = re.sub(r"\s+", " ", question_match.group(1)).strip() if question_match else ""
+            answer = re.sub(r"\s+", " ", answer_match.group(1)).strip() if answer_match else ""
+            if answer and re.fullmatch(r"共\s*\d+\s*条问答。?", answer):
+                return ""
+            parts: list[str] = []
+            if question:
+                parts.append(f"问题：{question}")
+            if answer:
+                parts.append(f"答案：{answer}")
+            return "\n\n".join(parts).strip()
+        return text
+
     def _normalize_ragflow_title(self, chunk: dict[str, Any], fallback: str = "RAGFlow 片段") -> str:
         raw_title = (
             chunk.get("document_name")
@@ -879,38 +942,10 @@ class EnergyRepository:
         return title or fallback
 
     def _extract_ragflow_excerpt(self, chunk: dict[str, Any]) -> str:
-        raw = (
-            chunk.get("content_with_weight")
-            or chunk.get("content")
-            or chunk.get("highlight")
-            or chunk.get("text")
-            or ""
-        )
-        text = str(raw or "")
-        if not text:
+        snippet = self._extract_ragflow_snippet(chunk)
+        if not snippet:
             return ""
-        text = re.sub(r"</?p>", "\n", text, flags=re.IGNORECASE)
-        text = re.sub(r"</?em>", "", text, flags=re.IGNORECASE)
-        text = re.sub(r"<[^>]+>", " ", text)
-        text = text.replace("\r", "\n")
-        text = re.sub(r"\n{3,}", "\n\n", text)
-        text = re.sub(r"[ \t]{2,}", " ", text).strip()
-
-        question_match = re.search(r"Question:\s*(.+?)(?:\n|$)", text, flags=re.IGNORECASE | re.DOTALL)
-        answer_match = re.search(r"Answer:\s*(.+)$", text, flags=re.IGNORECASE | re.DOTALL)
-        if question_match or answer_match:
-            question = re.sub(r"\s+", " ", question_match.group(1)).strip() if question_match else ""
-            answer = re.sub(r"\s+", " ", answer_match.group(1)).strip() if answer_match else ""
-            if answer and re.fullmatch(r"共\s*\d+\s*条问答。?", answer):
-                return ""
-            if question and answer:
-                return self._sanitize_excerpt(f"问题：{question} 答案：{answer}")
-            if answer:
-                return self._sanitize_excerpt(answer)
-            if question:
-                return self._sanitize_excerpt(f"问题：{question}")
-
-        return self._sanitize_excerpt(text)
+        return self._sanitize_excerpt(snippet)
 
     def _is_noisy_ragflow_chunk(self, chunk: dict[str, Any], excerpt: str) -> bool:
         text = str(excerpt or "")
@@ -988,14 +1023,70 @@ class EnergyRepository:
         excerpt: Any,
         source_type: str,
         similarity: float | None = None,
+        snippet_text: Any = "",
+        document_key: Any = "",
     ) -> dict[str, Any]:
         return {
             "chunk_id": str(chunk_id or "").strip() or f"{source_type}-chunk",
             "title": str(title or "").strip() or ("RAGFlow" if source_type == "ragflow" else "本地知识"),
             "section": str(section or "").strip(),
             "excerpt": self._sanitize_excerpt(excerpt),
+            "snippet_text": self._sanitize_multiline_reference_text(snippet_text or excerpt),
+            "document_key": self._strip_knowledge_document_suffix(document_key or title),
             "source_type": source_type,
             "similarity": round(float(similarity), 4) if similarity is not None else None,
+        }
+
+    def _knowledge_document_root_for_source(self, source_type: str) -> Path:
+        return STANDARD_KNOWLEDGE_DOC_DIR if str(source_type or "").strip() == "standard" else SCENE_KNOWLEDGE_DOC_DIR
+
+    def _read_text_file(self, path: Path) -> str:
+        last_error: Exception | None = None
+        for encoding in ("utf-8", "utf-8-sig", "gb18030", "gbk"):
+            try:
+                return path.read_text(encoding=encoding)
+            except Exception as exc:  # pragma: no cover - fallback branch depends on file encoding
+                last_error = exc
+        raise RuntimeError(f"无法读取原文文件：{path}") from last_error
+
+    def _locate_knowledge_document(self, source_type: str, title: Any, document_key: Any) -> Path:
+        root = self._knowledge_document_root_for_source(source_type)
+        if not root.exists():
+            raise LookupError(f"原文目录不存在：{root}")
+
+        candidate_keys = [
+            self._normalize_knowledge_document_lookup_key(document_key),
+            self._normalize_knowledge_document_lookup_key(title),
+        ]
+        candidate_keys = [item for item in candidate_keys if item]
+        if not candidate_keys:
+            raise LookupError("引用缺少可定位的原文标识")
+
+        files = [item for item in root.iterdir() if item.is_file()]
+        for candidate in candidate_keys:
+            for file_path in files:
+                if self._normalize_knowledge_document_lookup_key(file_path.stem) == candidate:
+                    return file_path
+        for candidate in candidate_keys:
+            for file_path in files:
+                normalized_name = self._normalize_knowledge_document_lookup_key(file_path.stem)
+                if normalized_name.endswith(candidate) or candidate.endswith(normalized_name):
+                    return file_path
+        raise LookupError("未找到对应原文")
+
+    def ask_ragflow_reference_document(self, payload: dict[str, Any]) -> dict[str, Any]:
+        source_type = str(payload.get("source_type", "")).strip() or "ragflow"
+        title = str(payload.get("title", "")).strip()
+        document_key = str(payload.get("document_key", "")).strip()
+        if not title and not document_key:
+            raise ValueError("title or document_key is required")
+        file_path = self._locate_knowledge_document(source_type, title, document_key)
+        return {
+            "title": file_path.stem,
+            "source_type": source_type,
+            "document_key": self._strip_knowledge_document_suffix(document_key or file_path.stem),
+            "content": self._read_text_file(file_path),
+            "format": "markdown",
         }
 
     def _knowledge_route_for_question(self, question: str) -> str:
@@ -1305,12 +1396,16 @@ class EnergyRepository:
             section = ""
             if similarity_value is not None:
                 section = f"相似度 {similarity_value:.2f}"
+            title = self._normalize_ragflow_title(chunk, "RAGFlow 文档")
+            snippet_text = self._extract_ragflow_snippet(chunk)
             items.append(
                 self._normalize_evidence_item(
                     chunk_id=chunk.get("id") or f"ragflow-chat-{idx}",
-                    title=self._normalize_ragflow_title(chunk, "RAGFlow 文档"),
+                    title=title,
                     section=section,
-                    excerpt=chunk.get("content") or chunk.get("highlight") or "",
+                    excerpt=snippet_text or chunk.get("content") or chunk.get("highlight") or "",
+                    snippet_text=snippet_text,
+                    document_key=self._ragflow_document_key(chunk, title),
                     source_type=self._ragflow_source_type_for_dataset(str(chunk.get("dataset_id") or ""), settings),
                     similarity=similarity_value,
                 )
@@ -4531,6 +4626,21 @@ class Handler(BaseHTTPRequestHandler):
                 result = REPO.ask_ragflow_chat(payload)
             except ValueError as exc:
                 self._json({"code": 400, "message": str(exc), "data": None}, HTTPStatus.BAD_REQUEST)
+                return
+            except Exception as exc:
+                self._json({"code": 502, "message": str(exc), "data": None}, HTTPStatus.BAD_GATEWAY)
+                return
+            self._json({"code": 0, "message": "ok", "data": result})
+            return
+
+        if parsed.path == "/api/ragflow/reference/document":
+            try:
+                result = REPO.ask_ragflow_reference_document(payload)
+            except ValueError as exc:
+                self._json({"code": 400, "message": str(exc), "data": None}, HTTPStatus.BAD_REQUEST)
+                return
+            except LookupError as exc:
+                self._json({"code": 404, "message": str(exc), "data": None}, HTTPStatus.NOT_FOUND)
                 return
             except Exception as exc:
                 self._json({"code": 502, "message": str(exc), "data": None}, HTTPStatus.BAD_GATEWAY)

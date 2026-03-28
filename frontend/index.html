@@ -757,8 +757,10 @@
             </div>
           </div>
 
-          <div class="assistant-body" ref="assistantBody">
-            <div class="assistant-thread">
+          <div class="assistant-body" ref="assistantBody" :class="{ 'assistant-body--knowledge': assistantSubmodule === 'knowledge' }">
+            <div class="assistant-thread-shell">
+              <div class="assistant-thread-scroll" ref="assistantThreadScroll">
+                <div class="assistant-thread">
               <div v-if="!unifiedChat.messages.length" class="assistant-welcome-state">
                 <div class="assistant-welcome-kicker">{{ assistantSubmoduleConfig().label }}</div>
                 <div class="assistant-welcome-title">{{ assistantWelcomeTitle() }}</div>
@@ -846,33 +848,6 @@
                     @click="handleKnowledgeAnswerClick($event, msg)"
                     v-html="renderKnowledgeAnswer(msg.content, msg.id, msg.references)"
                   ></div>
-                  <div v-if="msg.references && msg.references.length" class="assistant-reference-panel" :class="{ 'is-expanded': msg.referencesExpanded }">
-                    <button class="assistant-reference-toggle" @click="toggleKnowledgeReferences(msg.id)">
-                      <span>知识依据 {{ msg.references.length }} 条</span>
-                      <span>{{ msg.referencesExpanded ? '收起查看' : '展开查看' }}</span>
-                    </button>
-                    <div v-if="msg.referencesExpanded" class="unified-reference-list">
-                      <div
-                        v-for="ref in msg.references"
-                        :key="ref.id || ref.chunk_id"
-                        :id="referenceDomId(msg.id, ref.citation_index)"
-                        :data-ref-index="ref.citation_index"
-                        class="unified-reference-item"
-                      >
-                        <div class="assistant-evidence-title">{{ ref.title }}</div>
-                        <div class="assistant-evidence-meta">
-                          <span>ID:{{ ref.citation_index }}</span>
-                          <span class="meta-separator"></span>
-                          <span>{{ knowledgeSourceLabel(ref.sourceType || ref.source_type) }}</span>
-                          <template v-if="referenceSimilarityText(ref)">
-                            <span class="meta-separator"></span>
-                            <span>{{ referenceSimilarityText(ref) }}</span>
-                          </template>
-                        </div>
-                        <div class="assistant-evidence-text">{{ ref.excerpt }}</div>
-                      </div>
-                    </div>
-                  </div>
                 </div>
 
                 <div v-else-if="msg.type === 'analysis'" class="unified-assistant-card unified-assistant-card--analysis">
@@ -963,6 +938,54 @@
                     </div>
                   </template>
                 </div>
+                  </div>
+                </div>
+              </div>
+
+              <div v-if="assistantSubmodule === 'knowledge' && knowledgeSnippetOverlay.visible" class="knowledge-snippet-overlay">
+                <div class="knowledge-snippet-card">
+                  <div class="knowledge-snippet-head">
+                    <div>
+                      <div class="knowledge-snippet-title">{{ knowledgeSnippetOverlay.title }}</div>
+                      <div class="knowledge-snippet-meta">
+                        <span>ID:{{ knowledgeSnippetOverlay.citationIndex }}</span>
+                        <span class="meta-separator"></span>
+                        <span>{{ knowledgeSourceLabel(knowledgeSnippetOverlay.sourceType) }}</span>
+                        <template v-if="knowledgeSnippetOverlay.similarity !== null">
+                          <span class="meta-separator"></span>
+                          <span>{{ referenceSimilarityText(knowledgeSnippetOverlay) }}</span>
+                        </template>
+                      </div>
+                    </div>
+                    <button class="knowledge-snippet-close" type="button" @click="closeKnowledgeSnippetOverlay">×</button>
+                  </div>
+                  <div class="knowledge-snippet-content" v-html="renderKnowledgeDocument(knowledgeSnippetOverlay.content, 'markdown')"></div>
+                </div>
+              </div>
+            </div>
+
+            <div v-if="assistantSubmodule === 'knowledge'" class="knowledge-document-panel">
+              <div class="knowledge-document-head">
+                <div>
+                  <div class="knowledge-document-title">{{ knowledgeDocumentViewer.title || activeKnowledgeCitation.title || '原文' }}</div>
+                  <div v-if="activeKnowledgeCitation.citationIndex !== null || knowledgeDocumentViewer.sourceType" class="knowledge-document-meta">
+                    <span v-if="activeKnowledgeCitation.citationIndex !== null">ID:{{ activeKnowledgeCitation.citationIndex }}</span>
+                    <template v-if="knowledgeDocumentViewer.sourceType">
+                      <span v-if="activeKnowledgeCitation.citationIndex !== null" class="meta-separator"></span>
+                      <span>{{ knowledgeSourceLabel(knowledgeDocumentViewer.sourceType) }}</span>
+                    </template>
+                  </div>
+                </div>
+              </div>
+              <div class="knowledge-document-scroll" ref="knowledgeDocumentScroll">
+                <div v-if="knowledgeDocumentViewer.loading" class="knowledge-document-placeholder">正在加载原文...</div>
+                <div
+                  v-else-if="knowledgeDocumentViewer.content"
+                  class="knowledge-document-content"
+                  ref="knowledgeDocumentContent"
+                  v-html="renderKnowledgeDocument(knowledgeDocumentViewer.content, knowledgeDocumentViewer.format)"
+                ></div>
+                <div v-else class="knowledge-document-placeholder">原文</div>
               </div>
             </div>
           </div>

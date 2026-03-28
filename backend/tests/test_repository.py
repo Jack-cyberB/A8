@@ -1,5 +1,7 @@
 ﻿import json
+import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from backend.server import REPO
@@ -304,6 +306,8 @@ class RepositoryTests(unittest.TestCase):
         self.assertEqual(result["answer"], "结论：[ID:3]教育机构能耗定额应按分类和统计周期管理。")
         self.assertEqual(result["references"][0]["source_type"], "standard")
         self.assertEqual(result["references"][0]["title"], "DB37T 2671-2019 教育机构能源消耗定额标准")
+        self.assertEqual(result["references"][0]["document_key"], "DB37T 2671-2019 教育机构能源消耗定额标准")
+        self.assertEqual(result["references"][0]["snippet_text"], "教育机构能源消耗定额应按分类和统计周期管理。")
 
     def test_clean_ragflow_answer_text_removes_inline_citations(self):
         cleaned = REPO._clean_ragflow_answer_text("建议先核查空调排程[ID:3][ID:0][1]。\n\n")
@@ -464,6 +468,27 @@ class RepositoryTests(unittest.TestCase):
         self.assertEqual(events[3][1]["answer"], "结论：[ID:3]先核查运行管理制度，再结合监测数据复核设备状态。")
         self.assertEqual(events[3][1]["message_id"], "msg-stream-1")
         self.assertEqual(events[3][1]["references"][0]["source_type"], "standard")
+        self.assertEqual(events[3][1]["references"][0]["document_key"], "GB 50365-2019 空调通风系统运行管理标准")
+        self.assertEqual(events[3][1]["references"][0]["snippet_text"], "运行管理应结合设备状态和监测数据开展。")
+
+    def test_reference_document_lookup_resolves_main_kb_file(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            file_path = root / "07-车库与消防安全运行.md"
+            file_path.write_text("# 车库与消防安全运行\n\n原文内容。\n", encoding="utf-8")
+            with mock.patch.object(REPO, "_knowledge_document_root_for_source", return_value=root):
+                result = REPO.ask_ragflow_reference_document(
+                    {
+                        "title": "07-车库与消防安全运行-part03",
+                        "source_type": "ragflow",
+                        "document_key": "07-车库与消防安全运行-part03",
+                    }
+                )
+
+        self.assertEqual(result["title"], "07-车库与消防安全运行")
+        self.assertEqual(result["document_key"], "07-车库与消防安全运行")
+        self.assertEqual(result["format"], "markdown")
+        self.assertIn("原文内容。", result["content"])
 
     def test_retrieve_ragflow_knowledge_uses_readable_title_and_similarity(self):
         fake_payload = {

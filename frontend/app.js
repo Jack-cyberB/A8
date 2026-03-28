@@ -54,7 +54,7 @@ const ASSISTANT_SUBMODULE_CONFIG = {
     title: '知识问答工作台',
     placeholder: '输入运维制度、设备原理、排查规范等问题。Enter 发送，Shift+Enter 换行',
     welcomeTitle: '先问知识，再看依据。',
-    welcomeDesc: '这里专门处理知识库问答。回答正文优先展示，引用依据统一收纳在回答下方折叠区。',
+    welcomeDesc: '这里专门处理知识库问答。点击回答里的引用编号，可以先看片段，再看原文。',
   },
   saving: {
     label: '节能建议',
@@ -205,6 +205,33 @@ createApp({
         streamBuffer: '',
         sessionId: '',
       },
+      activeKnowledgeCitation: {
+        messageId: '',
+        citationIndex: null,
+        title: '',
+        sourceType: '',
+        documentKey: '',
+      },
+      knowledgeSnippetOverlay: {
+        visible: false,
+        messageId: '',
+        citationIndex: null,
+        title: '',
+        sourceType: '',
+        similarity: null,
+        content: '',
+      },
+      knowledgeDocumentViewer: {
+        loading: false,
+        messageId: '',
+        citationIndex: null,
+        title: '',
+        sourceType: '',
+        documentKey: '',
+        content: '',
+        format: 'markdown',
+      },
+      knowledgeDocumentCache: {},
       aiProvider: 'auto',
       aiStats: {
         windowHours: 24,
@@ -351,13 +378,31 @@ createApp({
         .map((block) => `<p>${block.replace(/\n/g, '<br>')}</p>`)
         .join('');
     },
+    renderKnowledgeDocument(text, format = 'markdown') {
+      const formatted = this.cleanRagflowAnswerText(text);
+      if (!formatted) return '';
+      const safeMarkdown = this.escapeHtml(formatted);
+      if (format === 'markdown' && typeof marked !== 'undefined') {
+        try {
+          return marked.parse(safeMarkdown, { breaks: true, gfm: true });
+        } catch (e) {}
+      }
+      return this.simpleMarkdownToHtml(safeMarkdown);
+    },
     decorateKnowledgeAnswerHtml(html, messageId = '', references = []) {
       const availableCount = Array.isArray(references) ? references.length : 0;
       const safeMessageId = this.escapeHtmlAttribute(messageId);
       return String(html || '').replace(/\[ID:\s*(\d+)\]/gi, (_, idxText) => {
         const idx = Number(idxText);
         const disabled = !Number.isInteger(idx) || idx < 0 || idx >= availableCount;
-        const className = disabled ? 'knowledge-citation knowledge-citation--disabled' : 'knowledge-citation';
+        const isActive =
+          this.activeKnowledgeCitation.messageId === messageId &&
+          this.activeKnowledgeCitation.citationIndex === idx;
+        const className = [
+          'knowledge-citation',
+          disabled ? 'knowledge-citation--disabled' : '',
+          isActive ? 'knowledge-citation--active' : '',
+        ].filter(Boolean).join(' ');
         const attrs = disabled
           ? `class="${className}" disabled`
           : `class="${className}" data-message-id="${safeMessageId}" data-ref-index="${idx}"`;
@@ -666,6 +711,8 @@ createApp({
           citation_index: index,
           title: String(item?.title || '知识片段').replace(/\.(md|markdown|txt|pdf)$/i, ''),
           excerpt: String(item?.excerpt || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n').trim(),
+          snippet_text: String(item?.snippet_text || item?.excerpt || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n').trim(),
+          document_key: String(item?.document_key || item?.title || '').replace(/\.(md|markdown|txt|pdf)$/i, '').trim(),
           source_type: item?.source_type || item?.sourceType || 'ragflow',
           similarity: Number.isFinite(similarityValue) ? similarityValue : null,
           section: item?.section || '',
@@ -677,32 +724,179 @@ createApp({
       if (!Number.isFinite(value)) return '';
       return `相似度 ${this.formatNumber(value * 100, 1)}%`;
     },
-    toggleKnowledgeReferences(messageId, options = {}) {
-      const idx = this.unifiedChat.messages.findIndex((item) => item.id === messageId);
-      if (idx < 0) return;
-      const current = this.unifiedChat.messages[idx];
-      const expanded = typeof options.expanded === 'boolean' ? options.expanded : !current.referencesExpanded;
-      this.unifiedChat.messages.splice(idx, 1, {
-        ...current,
-        referencesExpanded: expanded,
-      });
-    },
-    referenceDomId(messageId, citationIndex) {
-      return `knowledge-ref-${messageId}-${citationIndex}`;
-    },
-    focusKnowledgeReference(messageId, citationIndex) {
-      const target = document.getElementById(this.referenceDomId(messageId, citationIndex));
-      if (!target) return;
-      target.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-      target.classList.remove('is-citation-active');
-      void target.offsetWidth;
-      target.classList.add('is-citation-active');
-      if (this._knowledgeCitationTimer) {
-        clearTimeout(this._knowledgeCitationTimer);
+    resetKnowledgeReferenceState({ preserveCache = true } = {}) {
+      this.activeKnowledgeCitation = {
+        messageId: '',
+        citationIndex: null,
+        title: '',
+        sourceType: '',
+        documentKey: '',
+      };
+      this.knowledgeSnippetOverlay = {
+        visible: false,
+        messageId: '',
+        citationIndex: null,
+        title: '',
+        sourceType: '',
+        similarity: null,
+        content: '',
+      };
+      this.knowledgeDocumentViewer = {
+        loading: false,
+        messageId: '',
+        citationIndex: null,
+        title: '',
+        sourceType: '',
+        documentKey: '',
+        content: '',
+        format: 'markdown',
+      };
+      if (!preserveCache) {
+        this.knowledgeDocumentCache = {};
       }
-      this._knowledgeCitationTimer = setTimeout(() => {
-        target.classList.remove('is-citation-active');
-      }, 1800);
+    },
+    closeKnowledgeSnippetOverlay() {
+      this.knowledgeSnippetOverlay = {
+        ...this.knowledgeSnippetOverlay,
+        visible: false,
+      };
+    },
+    knowledgeDocumentCacheKey(ref) {
+      const sourceType = String(ref?.source_type || ref?.sourceType || 'ragflow').trim() || 'ragflow';
+      const documentKey = String(ref?.document_key || ref?.documentKey || ref?.title || '').trim();
+      return `${sourceType}:${documentKey}`;
+    },
+    normalizeKnowledgeSearchText(text) {
+      return String(text || '')
+        .replace(/\r\n/g, '\n')
+        .replace(/\r/g, '\n')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .toLowerCase();
+    },
+    async loadKnowledgeDocument(ref, messageId, citationIndex) {
+      const cacheKey = this.knowledgeDocumentCacheKey(ref);
+      const fallbackContent = ref?.snippet_text || ref?.excerpt || '';
+      if (cacheKey && this.knowledgeDocumentCache[cacheKey]) {
+        this.knowledgeDocumentViewer = {
+          ...this.knowledgeDocumentCache[cacheKey],
+          messageId,
+          citationIndex,
+        };
+        await this.$nextTick();
+        this.focusKnowledgeDocumentMatch(ref);
+        return;
+      }
+
+      this.knowledgeDocumentViewer = {
+        loading: true,
+        messageId,
+        citationIndex,
+        title: ref?.title || '原文',
+        sourceType: ref?.source_type || ref?.sourceType || 'ragflow',
+        documentKey: ref?.document_key || ref?.documentKey || '',
+        content: fallbackContent,
+        format: 'markdown',
+      };
+
+      try {
+        const data = await this.fetchJson(`${API_BASE}/api/ragflow/reference/document`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            title: ref?.title || '',
+            source_type: ref?.source_type || ref?.sourceType || 'ragflow',
+            document_key: ref?.document_key || ref?.documentKey || '',
+          }),
+        });
+        const viewer = {
+          loading: false,
+          messageId,
+          citationIndex,
+          title: data?.title || ref?.title || '原文',
+          sourceType: data?.source_type || ref?.source_type || ref?.sourceType || 'ragflow',
+          documentKey: data?.document_key || ref?.document_key || ref?.documentKey || '',
+          content: data?.content || fallbackContent,
+          format: data?.format || 'markdown',
+        };
+        this.knowledgeDocumentViewer = viewer;
+        if (cacheKey) {
+          this.knowledgeDocumentCache = {
+            ...this.knowledgeDocumentCache,
+            [cacheKey]: {
+              ...viewer,
+              messageId: '',
+              citationIndex: null,
+            },
+          };
+        }
+      } catch (_) {
+        this.knowledgeDocumentViewer = {
+          loading: false,
+          messageId,
+          citationIndex,
+          title: ref?.title || '原文',
+          sourceType: ref?.source_type || ref?.sourceType || 'ragflow',
+          documentKey: ref?.document_key || ref?.documentKey || '',
+          content: fallbackContent,
+          format: 'markdown',
+        };
+      }
+
+      await this.$nextTick();
+      this.focusKnowledgeDocumentMatch(ref);
+    },
+    focusKnowledgeDocumentMatch(ref) {
+      const scrollContainer = this.$refs.knowledgeDocumentScroll;
+      const contentContainer = this.$refs.knowledgeDocumentContent;
+      const scrollEl = Array.isArray(scrollContainer) ? scrollContainer[0] : scrollContainer;
+      const contentEl = Array.isArray(contentContainer) ? contentContainer[0] : contentContainer;
+      if (!contentEl) return;
+
+      contentEl.querySelectorAll('.is-knowledge-match').forEach((node) => node.classList.remove('is-knowledge-match'));
+
+      const needleSource = this.normalizeKnowledgeSearchText(ref?.snippet_text || ref?.excerpt || '');
+      const needle = needleSource.slice(0, 40);
+      if (!needle) {
+        if (scrollEl) scrollEl.scrollTop = 0;
+        return;
+      }
+
+      const candidates = Array.from(contentEl.querySelectorAll('p, li, h1, h2, h3, h4, h5, h6, blockquote, pre'));
+      const target = candidates.find((node) => this.normalizeKnowledgeSearchText(node.textContent).includes(needle));
+      if (!target) {
+        if (scrollEl) scrollEl.scrollTop = 0;
+        return;
+      }
+      target.classList.add('is-knowledge-match');
+      target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      if (this._knowledgeDocumentMatchTimer) {
+        clearTimeout(this._knowledgeDocumentMatchTimer);
+      }
+      this._knowledgeDocumentMatchTimer = setTimeout(() => {
+        target.classList.remove('is-knowledge-match');
+      }, 2200);
+    },
+    async openKnowledgeCitation(msg, citationIndex) {
+      const ref = Array.isArray(msg?.references) ? msg.references[citationIndex] : null;
+      if (!ref) return;
+      this.activeKnowledgeCitation = {
+        messageId: msg.id,
+        citationIndex,
+        title: ref.title || '知识片段',
+        sourceType: ref.source_type || ref.sourceType || 'ragflow',
+        documentKey: ref.document_key || ref.documentKey || '',
+      };
+      this.knowledgeSnippetOverlay = {
+        visible: true,
+        messageId: msg.id,
+        citationIndex,
+        title: ref.title || '知识片段',
+        sourceType: ref.source_type || ref.sourceType || 'ragflow',
+        similarity: ref.similarity,
+        content: ref.snippet_text || ref.excerpt || '',
+      };
+      await this.loadKnowledgeDocument(ref, msg.id, citationIndex);
     },
     handleKnowledgeAnswerClick(event, msg) {
       const target = event?.target instanceof Element
@@ -714,8 +908,7 @@ createApp({
       if (!Number.isInteger(citationIndex) || !Array.isArray(msg?.references) || !msg.references[citationIndex]) {
         return;
       }
-      this.toggleKnowledgeReferences(msg.id, { expanded: true });
-      this.$nextTick(() => this.focusKnowledgeReference(msg.id, citationIndex));
+      this.openKnowledgeCitation(msg, citationIndex);
     },
     currentMetricLabel() {
       return this.analysisMetrics.find((item) => item.value === this.analysisMetric)?.label || '电力';
@@ -974,7 +1167,6 @@ createApp({
         pending: true,
         content: '正在检索知识库...',
         references: [],
-        referencesExpanded: false,
       });
       await this.$nextTick();
       this.scrollAssistantToBottom();
@@ -1121,10 +1313,11 @@ createApp({
       this.unifiedChat.loading = false;
       this.unifiedChat.streaming = false;
       this.unifiedChat.streamBuffer = '';
+      this.resetKnowledgeReferenceState();
       if (!silent) this.$message.success(`已切换到新的${this.assistantSubmoduleConfig().label}会话`);
     },
     scrollAssistantToBottom() {
-      const el = this.$refs.assistantBody;
+      const el = this.$refs.assistantThreadScroll || this.$refs.assistantBody;
       if (el) el.scrollTop = el.scrollHeight;
     },
     // ── End unified chat ──────────────────────────────────────────────────────
