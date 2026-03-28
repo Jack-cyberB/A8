@@ -80,18 +80,6 @@
           </div>
         </section>
 
-        <section class="workspace-header">
-          <div class="workspace-header-copy">
-            <div class="panel-eyebrow">{{ currentPageKicker() }}</div>
-            <div class="workspace-header-title">{{ currentPageTitle() }}</div>
-            <div class="workspace-header-desc">{{ currentPageDescription() }}</div>
-          </div>
-          <div class="workspace-header-side">
-            <div class="workspace-header-side-label">当前子模块</div>
-            <div class="workspace-header-side-value">{{ currentSubmoduleLabel() }}</div>
-          </div>
-        </section>
-
         <section class="workspace-subnav">
           <button
             v-for="item in currentPageSubmodules()"

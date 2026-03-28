@@ -582,15 +582,6 @@ createApp({
     pageWorkspaceConfig(pageKey = this.activePage) {
       return PAGE_WORKSPACE_CONFIG[pageKey] || PAGE_WORKSPACE_CONFIG.overview;
     },
-    currentPageTitle() {
-      return this.pageWorkspaceConfig().label;
-    },
-    currentPageKicker() {
-      return this.pageWorkspaceConfig().kicker;
-    },
-    currentPageDescription() {
-      return this.pageWorkspaceConfig().description;
-    },
     currentPageSubmodules() {
       return this.pageWorkspaceConfig().submodules || [];
     },
