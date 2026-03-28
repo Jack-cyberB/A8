@@ -118,6 +118,48 @@ SCENE_QUERY_KEYWORDS = (
     "优先检查",
 )
 
+MIXED_QUERY_HINT_KEYWORDS = (
+    "因素",
+    "有关",
+    "原理",
+    "机理",
+    "要求",
+    "定义",
+    "区别",
+    "影响",
+)
+
+KNOWLEDGE_DOMAIN_TERMS = (
+    "教学楼",
+    "教室",
+    "实验楼",
+    "办公楼",
+    "宿舍",
+    "空调",
+    "通风",
+    "新风",
+    "排风",
+    "风机",
+    "热环境",
+    "热舒适",
+    "闷热",
+    "温度",
+    "湿度",
+    "太阳辐射",
+    "遮阳",
+    "外窗",
+    "过滤器",
+    "盘管",
+    "供回水",
+    "负荷",
+    "能耗",
+    "节能",
+    "照明",
+    "排查",
+    "检查",
+    "运维",
+)
+
 STATUS_NEW = "new"
 STATUS_ACK = "acknowledged"
 STATUS_IGNORED = "ignored"
@@ -816,6 +858,77 @@ class EnergyRepository:
             return text
         return f"{text[:limit].rstrip()}..."
 
+    def _normalize_ragflow_title(self, chunk: dict[str, Any], fallback: str = "RAGFlow 片段") -> str:
+        raw_title = (
+            chunk.get("document_name")
+            or chunk.get("document_keyword")
+            or chunk.get("docnm_kwd")
+            or chunk.get("doc_title")
+            or chunk.get("title")
+            or chunk.get("document_id")
+            or fallback
+        )
+        title = str(raw_title or "").strip()
+        title = re.sub(r"\.(md|markdown|txt|pdf)$", "", title, flags=re.IGNORECASE)
+        return title or fallback
+
+    def _extract_ragflow_excerpt(self, chunk: dict[str, Any]) -> str:
+        raw = (
+            chunk.get("content_with_weight")
+            or chunk.get("content")
+            or chunk.get("highlight")
+            or chunk.get("text")
+            or ""
+        )
+        text = str(raw or "")
+        if not text:
+            return ""
+        text = re.sub(r"</?p>", "\n", text, flags=re.IGNORECASE)
+        text = re.sub(r"</?em>", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"<[^>]+>", " ", text)
+        text = text.replace("\r", "\n")
+        text = re.sub(r"\n{3,}", "\n\n", text)
+        text = re.sub(r"[ \t]{2,}", " ", text).strip()
+
+        question_match = re.search(r"Question:\s*(.+?)(?:\n|$)", text, flags=re.IGNORECASE | re.DOTALL)
+        answer_match = re.search(r"Answer:\s*(.+)$", text, flags=re.IGNORECASE | re.DOTALL)
+        if question_match or answer_match:
+            question = re.sub(r"\s+", " ", question_match.group(1)).strip() if question_match else ""
+            answer = re.sub(r"\s+", " ", answer_match.group(1)).strip() if answer_match else ""
+            if answer and re.fullmatch(r"共\s*\d+\s*条问答。?", answer):
+                return ""
+            if question and answer:
+                return self._sanitize_excerpt(f"问题：{question} 答案：{answer}")
+            if answer:
+                return self._sanitize_excerpt(answer)
+            if question:
+                return self._sanitize_excerpt(f"问题：{question}")
+
+        return self._sanitize_excerpt(text)
+
+    def _is_noisy_ragflow_chunk(self, chunk: dict[str, Any], excerpt: str) -> bool:
+        text = str(excerpt or "")
+        if not text:
+            return True
+        if re.search(r"共\s*\d+\s*条问答", text):
+            return True
+        raw = str(
+            chunk.get("content_with_weight")
+            or chunk.get("content")
+            or chunk.get("highlight")
+            or chunk.get("text")
+            or ""
+        )
+        if raw.count("[fQTQT") >= 2:
+            return True
+        if len(re.findall(r"/G[0-9A-F]{2,3}", raw, flags=re.IGNORECASE)) >= 6:
+            return True
+        chinese_chars = len(re.findall(r"[\u4e00-\u9fff]", text))
+        weird_chars = len(re.findall(r"[/\\\\][A-Z0-9]{2,4}", raw))
+        if chinese_chars < 6 and weird_chars >= 6:
+            return True
+        return False
+
     def _clean_ragflow_answer_text(self, value: Any) -> str:
         text = str(value or "")
         text = re.sub(r"\[ID:\s*\d+\]", "", text, flags=re.IGNORECASE)
@@ -880,11 +993,21 @@ class EnergyRepository:
             return "standard"
         return "scene"
 
+    def _should_use_mixed_knowledge_route(self, question: str, settings: dict[str, Any]) -> bool:
+        if not settings.get("scene_dataset_ids") or not settings.get("standard_dataset_ids"):
+            return False
+        text = str(question or "").strip().lower()
+        if not text:
+            return False
+        return any(token.lower() in text for token in MIXED_QUERY_HINT_KEYWORDS)
+
     def _ragflow_dataset_route(self, question: str) -> tuple[str, list[str]]:
         settings = self._ragflow_settings()
         scene_ids = list(settings.get("scene_dataset_ids") or [])
         standard_ids = list(settings.get("standard_dataset_ids") or [])
         route = self._knowledge_route_for_question(question)
+        if route == "scene" and self._should_use_mixed_knowledge_route(question, settings):
+            route = "mixed"
         if route == "standard":
             return ("standard", standard_ids or scene_ids)
         if route == "mixed":
@@ -896,6 +1019,27 @@ class EnergyRepository:
         if dataset_id and dataset_id in set(settings.get("standard_dataset_ids") or []):
             return "standard"
         return "ragflow"
+
+    def _knowledge_query_terms(self, text: str) -> list[str]:
+        raw = str(text or "").strip().lower()
+        if not raw:
+            return []
+        terms = [term for term in KNOWLEDGE_DOMAIN_TERMS if term.lower() in raw]
+        if terms:
+            return terms
+        parts = re.split(r"[，。！？、；：\s“”‘’（）()]+", raw)
+        return [part for part in parts if len(part) >= 2][:8]
+
+    def _knowledge_relevance_score(self, question: str, title: str, excerpt: str, similarity: float | None) -> float:
+        haystack = f"{title}\n{excerpt}".lower()
+        score = float(similarity or 0.0) * 10.0
+        for term in self._knowledge_query_terms(question):
+            term_lower = term.lower()
+            if term_lower and term_lower in haystack:
+                score += max(1.0, min(len(term_lower), 4))
+        if "问题：" in excerpt and "答案：" in excerpt:
+            score += 0.6
+        return score
 
     def _llm_settings(self) -> dict[str, Any]:
         api_key = os.getenv("OPENAI_API_KEY", "").strip()
@@ -926,15 +1070,16 @@ class EnergyRepository:
                 evidence_lines.append(f"[{idx}] 位置：{section}")
             evidence_lines.append(f"[{idx}] 摘录：{excerpt}")
         scope_hint = {
-            "standard": "请优先给出规范依据、定额要求、标准术语或合规判断。",
-            "scene": "请优先给出适合建筑运维场景的直接回答。",
-            "mixed": "请先说明标准依据，再补充运维场景下的实际做法。",
+            "standard": "请按“结论 / 标准依据 / 执行提示”输出，若分点必须从 1 开始连续编号，不要跳号。",
+            "scene": "请按“结论 / 依据与分析 / 优先检查”输出，若分点必须从 1 开始连续编号，不要跳号。",
+            "mixed": "请按“结论 / 标准依据 / 运维建议”输出，若分点必须从 1 开始连续编号，不要跳号。",
         }.get(route, "请结合召回资料直接回答。")
         system_prompt = (
             "你是建筑能源与运维知识助手。请严格基于给定资料作答，不要编造未提供的标准条文。"
             "如果资料不足，请明确说明“当前检索到的资料不足以确认”。"
             "引用资料时用[1][2]这种编号内联引用，正文后不要额外输出参考文献列表。"
             "回答使用中文，优先给出简洁结论，再补充必要依据。"
+            "不要输出 Markdown 表格，不要输出跳号列表，不要把多条内容挤在同一行。"
         )
         user_prompt = (
             f"用户问题：{question}\n"
@@ -1105,7 +1250,7 @@ class EnergyRepository:
             {
                 "dataset_ids": active_dataset_ids,
                 "question": query_text,
-                "top_k": max(limit, settings["top_k"]),
+                "top_k": max(limit * 4, settings["top_k"], 12),
                 "similarity_threshold": settings["similarity_threshold"],
                 "vector_similarity_weight": settings["vector_similarity_weight"],
                 "highlight": False,
@@ -1139,11 +1284,11 @@ class EnergyRepository:
             retrieval_error_type = "http_error"
             payload = None
 
-        items: list[dict[str, str]] = []
+        scored_items: list[tuple[float, dict[str, Any]]] = []
         if payload is not None:
             data = payload.get("data") or {}
             chunks = data.get("chunks", []) if isinstance(data, dict) else []
-            for idx, chunk in enumerate(chunks[:limit], start=1):
+            for idx, chunk in enumerate(chunks, start=1):
                 if not isinstance(chunk, dict):
                     continue
                 similarity = chunk.get("similarity")
@@ -1153,15 +1298,26 @@ class EnergyRepository:
                         section = f"相似度 {float(similarity):.2f}"
                     except (TypeError, ValueError):
                         section = ""
-                items.append(
-                    self._normalize_evidence_item(
-                        chunk_id=chunk.get("id") or chunk.get("chunk_id") or f"ragflow-{idx}",
-                        title=chunk.get("document_name") or chunk.get("docnm_kwd") or chunk.get("document_id") or "RAGFlow 片段",
-                        section=section or chunk.get("dataset_id") or "",
-                        excerpt=chunk.get("content_with_weight") or chunk.get("content") or chunk.get("text") or "",
-                        source_type=self._ragflow_source_type_for_dataset(str(chunk.get("dataset_id") or ""), settings),
+                excerpt = self._extract_ragflow_excerpt(chunk)
+                if self._is_noisy_ragflow_chunk(chunk, excerpt):
+                    continue
+                title = self._normalize_ragflow_title(chunk)
+                item = self._normalize_evidence_item(
+                    chunk_id=chunk.get("id") or chunk.get("chunk_id") or f"ragflow-{idx}",
+                    title=title,
+                    section=section or chunk.get("dataset_id") or "",
+                    excerpt=excerpt,
+                    source_type=self._ragflow_source_type_for_dataset(str(chunk.get("dataset_id") or ""), settings),
+                    similarity=float(similarity) if similarity is not None else None,
+                )
+                scored_items.append(
+                    (
+                        self._knowledge_relevance_score(query_text, title, excerpt, float(similarity) if similarity is not None else None),
+                        item,
                     )
                 )
+
+        items = [item for _, item in sorted(scored_items, key=lambda pair: pair[0], reverse=True)[:limit]]
 
         if items:
             source_types = {str(item.get("source_type", "")) for item in items}

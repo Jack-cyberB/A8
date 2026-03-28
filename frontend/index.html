@@ -840,7 +840,7 @@
                       </div>
                     </div>
                   </div>
-                  <div class="unified-knowledge-answer" :class="{ 'unified-knowledge-answer--pending': msg.pending }" v-html="msg.pending ? msg.content : renderMarkdown(msg.content)"></div>
+                  <div class="unified-knowledge-answer" :class="{ 'unified-knowledge-answer--pending': msg.pending }" v-html="renderKnowledgeAnswer(msg.content)"></div>
                   <div v-if="msg.references && msg.references.length" class="assistant-reference-panel" :class="{ 'is-expanded': msg.referencesExpanded }">
                     <button class="assistant-reference-toggle" @click="toggleKnowledgeReferences(msg.id)">
                       <span>知识依据 {{ msg.references.length }} 条</span>
@@ -851,8 +851,10 @@
                         <div class="assistant-evidence-title">{{ ref.title }}</div>
                         <div class="assistant-evidence-meta">
                           <span>{{ knowledgeSourceLabel(ref.sourceType || ref.source_type) }}</span>
-                          <span class="meta-separator"></span>
-                          <span>相似度 {{ formatNumber((ref.similarity || 0) * 100, 1) }}%</span>
+                          <template v-if="referenceSimilarityText(ref)">
+                            <span class="meta-separator"></span>
+                            <span>{{ referenceSimilarityText(ref) }}</span>
+                          </template>
                         </div>
                         <div class="assistant-evidence-text">{{ ref.excerpt }}</div>
                       </div>

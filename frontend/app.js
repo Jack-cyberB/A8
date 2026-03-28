@@ -343,6 +343,26 @@ createApp({
         .replace(/\s+([）】”’])/g, '$1')
         .trim();
     },
+    formatKnowledgeAnswerText(text) {
+      const clean = this.cleanRagflowAnswerText(text);
+      if (!clean) return '';
+      return clean
+        .replace(/(结论[:：])/g, '\n$1 ')
+        .replace(/(依据与分析[:：]|标准依据[:：]|优先检查[:：]|运维建议[:：]|关键要求[:：]|执行提示[:：]|说明[:：])/g, '\n\n$1')
+        .replace(/([。！？；])\s*(\d+\.\s*)/g, '$1\n$2')
+        .replace(/\n{3,}/g, '\n\n')
+        .trim();
+    },
+    escapeHtml(text) {
+      return String(text || '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+    },
+    renderKnowledgeAnswer(text) {
+      const formatted = this.formatKnowledgeAnswerText(text);
+      return this.escapeHtml(formatted).replace(/\n/g, '<br>');
+    },
     renderMarkdown(text) {
       if (!text || typeof text !== 'string') return '';
       const clean = this.cleanRagflowAnswerText(text);
@@ -625,8 +645,8 @@ createApp({
       return /[。！？!?；;”’】）)]$/.test(String(text || '').trim());
     },
     choosePreferredKnowledgeAnswer(streamedText, finalText) {
-      const streamed = this.cleanRagflowAnswerText(streamedText);
-      const finalAnswer = this.cleanRagflowAnswerText(finalText);
+      const streamed = this.formatKnowledgeAnswerText(streamedText);
+      const finalAnswer = this.formatKnowledgeAnswerText(finalText);
       if (!finalAnswer) return streamed;
       if (!streamed) return finalAnswer;
       if (streamed === finalAnswer) return finalAnswer;
@@ -645,6 +665,25 @@ createApp({
         return streamed;
       }
       return finalAnswer.length >= streamed.length - 8 ? finalAnswer : streamed;
+    },
+    normalizeUnifiedKnowledgeReferences(references = []) {
+      return (Array.isArray(references) ? references : []).slice(0, 6).map((item, index) => {
+        const similarityValue = Number(item?.similarity);
+        return {
+          id: item?.id || item?.chunk_id || `knowledge-ref-${index}`,
+          chunk_id: item?.chunk_id || item?.id || `knowledge-ref-${index}`,
+          title: String(item?.title || '知识片段').replace(/\.(md|markdown|txt|pdf)$/i, ''),
+          excerpt: this.cleanRagflowAnswerText(item?.excerpt || ''),
+          source_type: item?.source_type || item?.sourceType || 'ragflow',
+          similarity: Number.isFinite(similarityValue) ? similarityValue : null,
+          section: item?.section || '',
+        };
+      });
+    },
+    referenceSimilarityText(ref) {
+      const value = Number(ref?.similarity);
+      if (!Number.isFinite(value)) return '';
+      return `相似度 ${this.formatNumber(value * 100, 1)}%`;
     },
     toggleKnowledgeReferences(messageId) {
       const idx = this.unifiedChat.messages.findIndex((item) => item.id === messageId);
@@ -939,7 +978,7 @@ createApp({
             let ed; try { ed = JSON.parse(dm[1]); } catch(e) { continue; }
             if (em[1] === 'token') {
               accumulatedRaw += ed.text || '';
-              const displayContent = this.cleanRagflowAnswerText(accumulatedRaw) || '正在检索知识库...';
+              const displayContent = this.formatKnowledgeAnswerText(accumulatedRaw) || '正在检索知识库...';
               const idx = this.unifiedChat.messages.findIndex(m => m.id === msgId);
               if (idx >= 0) {
                 const c = this.unifiedChat.messages[idx];
@@ -959,7 +998,7 @@ createApp({
                   ...c,
                   pending: false,
                   content: finalContent,
-                  references: Array.isArray(ed.references) ? ed.references : [],
+                  references: this.normalizeUnifiedKnowledgeReferences(ed.references),
                 });
               }
               this.unifiedChat.sessionId = ed.session_id || this.unifiedChat.sessionId;

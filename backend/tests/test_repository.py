@@ -1,4 +1,5 @@
-﻿import unittest
+﻿import json
+import unittest
 from unittest import mock
 
 from backend.server import REPO
@@ -302,10 +303,37 @@ class RepositoryTests(unittest.TestCase):
         cleaned = REPO._clean_ragflow_answer_text("建议先核查空调排程[ID:3][ID:0][1]。\n\n")
         self.assertEqual(cleaned, "建议先核查空调排程。")
 
+    def test_extract_ragflow_excerpt_prefers_useful_qa_content(self):
+        excerpt = REPO._extract_ragflow_excerpt(
+            {
+                "content": "Question: 教学楼空调系统夜间负荷偏高怎么办？\nAnswer: <p>应先检查排程、送风模式和新风阀状态。</p>",
+            }
+        )
+        self.assertIn("问题：教学楼空调系统夜间负荷偏高怎么办？", excerpt)
+        self.assertIn("答案：应先检查排程、送风模式和新风阀状态。", excerpt)
+
+    def test_noisy_ragflow_chunk_is_filtered(self):
+        noisy = REPO._extract_ragflow_excerpt({"content": "Question: 文化场馆与文保环境控制\nAnswer: <p>共 60 条问答。</p>"})
+        self.assertEqual(noisy, "")
+        self.assertTrue(REPO._is_noisy_ragflow_chunk({"content": "[fQTQT w w w . x u e t u t u . c o m\n" * 3}, ""))
+
     def test_knowledge_route_for_question_distinguishes_standard_and_scene(self):
         self.assertEqual(REPO._knowledge_route_for_question("教育机构能耗定额标准是什么？"), "standard")
         self.assertEqual(REPO._knowledge_route_for_question("教学楼夜间负荷偏高一般先排查什么？"), "scene")
         self.assertEqual(REPO._knowledge_route_for_question("公共建筑节能监测系统有哪些要求，实际运维该怎么做？"), "mixed")
+
+    def test_ragflow_dataset_route_promotes_conceptual_scene_question_to_mixed(self):
+        with mock.patch.object(
+            REPO,
+            "_ragflow_settings",
+            return_value={
+                "scene_dataset_ids": ["scene-a"],
+                "standard_dataset_ids": ["std-a"],
+            },
+        ):
+            route, dataset_ids = REPO._ragflow_dataset_route("教学楼夏季白天闷热可能与哪些热环境和通风因素有关？")
+        self.assertEqual(route, "mixed")
+        self.assertEqual(dataset_ids, ["scene-a", "std-a"])
 
     def test_merge_ragflow_stream_text_supports_incremental_and_cumulative_chunks(self):
         full_text = ""
@@ -348,6 +376,56 @@ class RepositoryTests(unittest.TestCase):
         self.assertEqual(events[2][1]["text"], "，再结合监测数据复核设备状态。")
         self.assertEqual(events[3][1]["answer"], "建议先核查运行管理制度，再结合监测数据复核设备状态。")
         self.assertEqual(events[3][1]["references"][0]["source_type"], "standard")
+
+    def test_retrieve_ragflow_knowledge_uses_readable_title_and_similarity(self):
+        fake_payload = {
+            "code": 0,
+            "data": {
+                "chunks": [
+                    {
+                        "id": "chunk-1",
+                        "dataset_id": "dataset-scene",
+                        "document_id": "doc-1",
+                        "document_keyword": "03-校园与教育建筑运维场景.md",
+                        "similarity": 0.8123,
+                        "content": "Question: 教学楼白天闷热怎么办？\nAnswer: <p>优先检查外窗开启、空调排程和新风阀。</p>",
+                    }
+                ]
+            },
+        }
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                return json.dumps(fake_payload).encode("utf-8")
+
+        with mock.patch("backend.server.urlopen", return_value=FakeResponse()):
+            with mock.patch.object(
+                REPO,
+                "_ragflow_settings",
+                return_value={
+                    "configured": True,
+                    "api_key": "test",
+                    "base_url": "http://127.0.0.1:8088/api/v1",
+                    "timeout_sec": 3.0,
+                    "dataset_ids": ["dataset-scene"],
+                    "scene_dataset_ids": ["dataset-scene"],
+                    "standard_dataset_ids": [],
+                    "top_k": 6,
+                    "similarity_threshold": 0.2,
+                    "vector_similarity_weight": 0.45,
+                },
+            ):
+                result = REPO._retrieve_ragflow_knowledge("教学楼白天闷热怎么办？", limit=3, dataset_ids=["dataset-scene"])
+
+        self.assertEqual(result["knowledge_source"], "ragflow")
+        self.assertEqual(result["items"][0]["title"], "03-校园与教育建筑运维场景")
+        self.assertEqual(result["items"][0]["similarity"], 0.8123)
 
     def test_ai_stats_shape(self):
         aid = self._first_anomaly_id()
