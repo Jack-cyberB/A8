@@ -340,17 +340,18 @@ class LLMDiagnoseProvider(DiagnoseProvider):
         timeout_sec: float,
         messages: list[dict[str, str]],
         max_tokens: int = 900,
+        response_format: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         endpoint = f"{base_url.rstrip('/')}/chat/completions"
-        body = json.dumps(
-            {
-                "model": model,
-                "messages": messages,
-                "temperature": 0.2,
-                "max_tokens": max(128, int(max_tokens)),
-                "response_format": {"type": "json_object"},
-            }
-        ).encode("utf-8")
+        payload: dict[str, Any] = {
+            "model": model,
+            "messages": messages,
+            "temperature": 0.2,
+            "max_tokens": max(128, int(max_tokens)),
+        }
+        if response_format:
+            payload["response_format"] = response_format
+        body = json.dumps(payload).encode("utf-8")
         req = Request(
             endpoint,
             data=body,
@@ -1236,6 +1237,7 @@ class EnergyRepository:
             timeout_sec=llm_settings["timeout_sec"],
             messages=messages,
             max_tokens=900,
+            response_format=None,
         )
         choices = response.get("choices", [])
         if not choices:
