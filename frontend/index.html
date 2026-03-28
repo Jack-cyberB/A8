@@ -434,19 +434,15 @@
                     <div class="panel-title">对标信息</div>
                   </div>
                 </div>
-                <div v-if="analysisCompare.peer_group" class="peer-summary">
-                  <div class="peer-summary-item">
-                    <span>偏离同类均值</span>
-                    <strong>{{ formatNumber(analysisCompare.peer_group.gap_pct, 1) }}%</strong>
+                <div class="compare-info-summary">
+                  <div class="compare-info-headline">{{ compareInfoHeadline() }}</div>
+                  <div v-if="compareInfoMetrics().length" class="compare-info-metrics">
+                    <div v-for="item in compareInfoMetrics()" :key="item.label" class="compare-info-metric">
+                      <span>{{ item.label }}</span>
+                      <strong>{{ item.value }}</strong>
+                    </div>
                   </div>
-                  <div class="peer-summary-item">
-                    <span>同类百分位</span>
-                    <strong>{{ formatNumber(analysisCompare.peer_group.peer_percentile, 1) }}</strong>
-                  </div>
-                  <div class="peer-summary-item">
-                    <span>排名位置</span>
-                    <strong>{{ analysisCompare.peer_group.ranking_position || '-' }}/{{ analysisCompare.peer_group.peer_count || '-' }}</strong>
-                  </div>
+                  <div class="compare-info-hint">{{ compareInfoHint() }}</div>
                 </div>
                 <div class="compare-info-block">
                   <div class="compare-info-title">同类偏差解释</div>
