@@ -36,9 +36,21 @@
 
     <div class="layout">
       <aside class="sidebar">
-        <button v-for="p in pages" :key="p.key" class="nav-btn" :class="{ active: activePage === p.key }" @click="switchPage(p.key)">
-          {{ p.label }}
-        </button>
+        <div v-for="p in pages" :key="p.key" class="sidebar-group" :class="{ active: activePage === p.key }">
+          <button class="nav-btn" :class="{ active: activePage === p.key }" @click="switchPage(p.key)">
+            {{ p.label }}
+          </button>
+          <div v-if="pageWorkspaceConfig(p.key).submodules.length" class="sidebar-subnav">
+            <button
+              v-for="item in pageWorkspaceConfig(p.key).submodules"
+              :key="`${p.key}-${item.key}`"
+              class="sidebar-subnav-btn"
+              :class="{ active: activePage === p.key && activeSubmoduleMap[p.key] === item.key }"
+              @click="activateSubmodule(p.key, item.key)">
+              {{ item.label }}
+            </button>
+          </div>
+        </div>
       </aside>
 
       <main class="content">
@@ -78,18 +90,6 @@
             <div class="filter-scope-value">{{ currentValidRangeText() }}</div>
             <el-button text type="primary" @click="applyValidRange">使用有效时间</el-button>
           </div>
-        </section>
-
-        <section class="workspace-subnav">
-          <button
-            v-for="item in currentPageSubmodules()"
-            :key="`${activePage}-${item.key}`"
-            class="workspace-subnav-btn"
-            :class="{ active: currentSubmoduleKey() === item.key }"
-            @click="activateSubmodule(activePage, item.key)">
-            <span>{{ item.label }}</span>
-            <small>{{ item.desc }}</small>
-          </button>
         </section>
 
         <section v-show="activePage === 'overview'" class="page">
