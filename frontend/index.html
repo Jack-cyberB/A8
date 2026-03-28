@@ -93,183 +93,38 @@
         </section>
 
         <section v-show="activePage === 'overview'" class="page">
-          <template v-if="activeSubmoduleMap.overview === 'kpi'">
-            <div class="cards cards--overview">
-              <div class="card">
-                <div class="card-title">总用电量</div>
-                <div class="card-value">{{ formatNumber(overview.totalKwh, 1) }} kWh</div>
-              </div>
-              <div class="card">
-                <div class="card-title">平均小时能耗</div>
-                <div class="card-value">{{ formatNumber(overview.avgKwh, 1) }} kWh</div>
-              </div>
-              <div class="card">
-                <div class="card-title">异常总数</div>
-                <div class="card-value">{{ overview.anomalyCount }}</div>
-              </div>
-              <div class="card">
-                <div class="card-title">节能潜力估算</div>
-                <div class="card-value">{{ formatNumber(overview.savingPct, 1) }}%</div>
-              </div>
-              <div class="card">
-                <div class="card-title">预计减排</div>
-                <div class="card-value">{{ formatNumber(overview.carbonKg, 1) }} kg</div>
+          <div class="cards cards--overview">
+            <div class="card">
+              <div class="card-title">总用电量</div>
+              <div class="card-value">{{ formatNumber(overview.totalKwh, 1) }} kWh</div>
+            </div>
+            <div class="card">
+              <div class="card-title">平均小时能耗</div>
+              <div class="card-value">{{ formatNumber(overview.avgKwh, 1) }} kWh</div>
+            </div>
+            <div class="card">
+              <div class="card-title">异常总数</div>
+              <div class="card-value">{{ overview.anomalyCount }}</div>
+            </div>
+            <div class="card">
+              <div class="card-title">节能潜力估算</div>
+              <div class="card-value">{{ formatNumber(overview.savingPct, 1) }}%</div>
+            </div>
+            <div class="card">
+              <div class="card-title">预计减排</div>
+              <div class="card-value">{{ formatNumber(overview.carbonKg, 1) }} kg</div>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="panel-head">
+              <div>
+                <div class="panel-eyebrow">Overview</div>
+                <div class="panel-title">最近 72 小时用电趋势</div>
               </div>
             </div>
-            <div class="panel">
-              <div class="panel-head">
-                <div>
-                  <div class="panel-eyebrow">Overview</div>
-                  <div class="panel-title">最近 72 小时用电趋势</div>
-                </div>
-              </div>
-              <div v-if="errors.overview" class="state-error">{{ errors.overview }}</div>
-              <div id="overviewChart" class="chart chart--overview"></div>
-            </div>
-          </template>
-
-          <template v-else-if="activeSubmoduleMap.overview === 'profile'">
-            <div class="workspace-grid workspace-grid--overview">
-              <div class="panel">
-                <div class="panel-head">
-                  <div>
-                    <div class="panel-eyebrow">Profile</div>
-                    <div class="panel-title">当前建筑画像</div>
-                  </div>
-                </div>
-                <div class="analysis-scope">
-                  <div class="analysis-scope-item">
-                    <div class="analysis-scope-label">当前建筑</div>
-                    <div class="analysis-scope-value">{{ selectedBuildingMeta() ? selectedBuildingMeta().name : '未选择建筑' }}</div>
-                    <div class="analysis-scope-note">作为当前全站筛选上下文</div>
-                  </div>
-                  <div class="analysis-scope-item">
-                    <div class="analysis-scope-label">有效时间</div>
-                    <div class="analysis-scope-value">{{ currentValidRangeText() }}</div>
-                    <div class="analysis-scope-note">后续分析与助手都沿用这组范围</div>
-                  </div>
-                  <div class="analysis-scope-item">
-                    <div class="analysis-scope-label">当前分析对象</div>
-                    <div class="analysis-scope-value">{{ currentMetricLabel() }}</div>
-                    <div class="analysis-scope-note">当前已支持电力深分析，其他域保留扩展位</div>
-                  </div>
-                  <div class="analysis-scope-item">
-                    <div class="analysis-scope-label">当前异常数</div>
-                    <div class="analysis-scope-value">{{ overview.anomalyCount }}</div>
-                    <div class="analysis-scope-note">高优先 {{ overviewSeveritySummary('high') }} 条</div>
-                  </div>
-                </div>
-              </div>
-
-              <div class="panel">
-                <div class="panel-head">
-                  <div>
-                    <div class="panel-eyebrow">Entry</div>
-                    <div class="panel-title">推荐演示入口</div>
-                  </div>
-                </div>
-                <div class="insight-list">
-                  <div class="insight-item is-info">
-                    <div class="insight-item-title">看趋势</div>
-                    <div class="insight-item-detail">进入能耗分析 > 趋势分析，先看当前范围的变化与天气联动。</div>
-                  </div>
-                  <div class="insight-item is-warning">
-                    <div class="insight-item-title">看异常</div>
-                    <div class="insight-item-detail">进入运维处置 > 异常看板，快速定位高优先异常和处置入口。</div>
-                  </div>
-                  <div class="insight-item is-success">
-                    <div class="insight-item-title">问知识</div>
-                    <div class="insight-item-detail">进入智能助手 > 知识问答，追问制度、原理和处置规范。</div>
-                  </div>
-                </div>
-                <div class="assistant-actions assistant-actions--start">
-                  <el-button @click="activateSubmodule('analysis', 'trend')">进入趋势分析</el-button>
-                  <el-button @click="activateSubmodule('anomaly', 'board')">查看异常看板</el-button>
-                  <el-button type="primary" @click="openKnowledgeAssistant('请结合当前建筑画像，说明后续演示应重点关注哪些用能问题？')">知识追问</el-button>
-                </div>
-              </div>
-            </div>
-          </template>
-
-          <template v-else>
-            <div class="cards cards--overview cards--status">
-              <div class="card">
-                <div class="card-title">系统状态</div>
-                <div class="card-value">{{ health.status }}</div>
-                <div class="card-note">回归 {{ health.regression }}</div>
-              </div>
-              <div class="card">
-                <div class="card-title">AI 调用量</div>
-                <div class="card-value">{{ aiStats.totalCalls }}</div>
-                <div class="card-note">近 {{ aiStats.windowHours }} 小时</div>
-              </div>
-              <div class="card">
-                <div class="card-title">平均延迟</div>
-                <div class="card-value">{{ formatNumber(aiStats.avgLatency, 0) }} ms</div>
-                <div class="card-note">演示稳定性观察项</div>
-              </div>
-              <div class="card">
-                <div class="card-title">知识库状态</div>
-                <div class="card-value">{{ health.ragflowChatReady ? '已接通' : '待配置' }}</div>
-                <div class="card-note">{{ health.ragflowDatasetCount || 0 }} 个数据集</div>
-              </div>
-            </div>
-            <div class="workspace-grid workspace-grid--overview">
-              <div class="panel">
-                <div class="panel-head">
-                  <div>
-                    <div class="panel-eyebrow">Health</div>
-                    <div class="panel-title">系统接口与模型就绪</div>
-                  </div>
-                </div>
-                <div class="analysis-scope">
-                  <div class="analysis-scope-item">
-                    <div class="analysis-scope-label">AI 服务</div>
-                    <div class="analysis-scope-value">{{ health.aiConfigured ? '已配置' : '未配置' }}</div>
-                    <div class="analysis-scope-note">{{ health.aiModelReady ? '模型可用' : '模型待校验' }}</div>
-                  </div>
-                  <div class="analysis-scope-item">
-                    <div class="analysis-scope-label">知识库</div>
-                    <div class="analysis-scope-value">{{ health.ragflowChatReady ? '已接通' : '未接通' }}</div>
-                    <div class="analysis-scope-note">Chat ID {{ health.ragflowChatId || '-' }}</div>
-                  </div>
-                  <div class="analysis-scope-item">
-                    <div class="analysis-scope-label">模板兜底率</div>
-                    <div class="analysis-scope-value">{{ formatNumber(aiStats.fallbackRate, 1) }}%</div>
-                    <div class="analysis-scope-note">用于比赛稳定性兜底</div>
-                  </div>
-                  <div class="analysis-scope-item">
-                    <div class="analysis-scope-label">反馈有效率</div>
-                    <div class="analysis-scope-value">{{ formatNumber(aiEvaluate.feedback.usefulRate || 0, 1) }}%</div>
-                    <div class="analysis-scope-note">已沉淀 AI 质量反馈</div>
-                  </div>
-                </div>
-              </div>
-
-              <div class="panel">
-                <div class="panel-head">
-                  <div>
-                    <div class="panel-eyebrow">Demo Readiness</div>
-                    <div class="panel-title">当前答辩可讲重点</div>
-                  </div>
-                </div>
-                <div class="insight-list">
-                  <div class="insight-item is-info">
-                    <div class="insight-item-title">电能分析闭环已形成</div>
-                    <div class="insight-item-detail">当前可以完整演示数据总览、分析、异常处置和 AI 辅助解释。</div>
-                  </div>
-                  <div class="insight-item is-warning">
-                    <div class="insight-item-title">多领域扩展位已预留</div>
-                    <div class="insight-item-detail">分析对象与助手上下文已为水、空调、环境等后续扩展保留位置。</div>
-                  </div>
-                  <div class="insight-item is-success">
-                    <div class="insight-item-title">知识依据可展示</div>
-                    <div class="insight-item-detail">知识问答正文与证据已分层展示，更适合答辩说明依据链路。</div>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </template>
+            <div v-if="errors.overview" class="state-error">{{ errors.overview }}</div>
+            <div id="overviewChart" class="chart chart--overview"></div>
+          </div>
         </section>
 
         <section v-show="activePage === 'analysis'" class="page analysis-page">

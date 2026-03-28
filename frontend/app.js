@@ -6,12 +6,8 @@ const PAGE_WORKSPACE_CONFIG = {
   overview: {
     label: '数据总览',
     kicker: 'Overview Workspace',
-    description: '把总量、建筑画像和系统状态拆开看，首屏先回答现在发生了什么。',
-    submodules: [
-      { key: 'kpi', label: '核心指标', desc: '总量、趋势与当前能耗态势' },
-      { key: 'profile', label: '建筑画像', desc: '当前建筑、范围与演示入口' },
-      { key: 'status', label: '系统状态', desc: '接口、知识库与 AI 就绪情况' },
-    ],
+    description: '首屏聚焦总量、趋势与当前能耗态势。',
+    submodules: [],
   },
   analysis: {
     label: '能耗分析',
@@ -2179,6 +2175,9 @@ createApp({
     },
     async switchPage(key) {
       this.activePage = key;
+      if (key === 'overview') {
+        this.activeSubmoduleMap = { ...this.activeSubmoduleMap, overview: 'kpi' };
+      }
       if (key === 'assistant') {
         this.assistantSubmodule = this.activeSubmoduleMap.assistant || this.assistantSubmodule;
       }
