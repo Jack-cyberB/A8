@@ -441,7 +441,12 @@ body {
 }
 
 .analysis-secondary-grid--merged {
-  grid-template-columns: minmax(0, 1.02fr) minmax(0, 0.98fr);
+  grid-template-columns: minmax(0, 1.28fr) minmax(300px, 0.72fr);
+  gap: 12px;
+}
+
+.analysis-merged-main {
+  display: grid;
   gap: 12px;
 }
 
@@ -609,15 +614,7 @@ body {
 }
 
 .compare-layout {
-  display: grid;
-  grid-template-columns: minmax(0, 1.36fr) minmax(280px, 0.64fr);
-  gap: 14px;
-  align-items: start;
-}
-
-.compare-visuals {
-  display: grid;
-  gap: 12px;
+  display: block;
 }
 
 .compare-visual-card {
@@ -625,6 +622,10 @@ body {
   border-radius: 18px;
   border: 1px solid rgba(98, 122, 162, 0.12);
   background: rgba(247, 251, 255, 0.8);
+}
+
+.compare-visual-card--single {
+  padding-bottom: 8px;
 }
 
 .compare-visual-title,
@@ -635,15 +636,8 @@ body {
   margin-bottom: 8px;
 }
 
-.compare-info {
-  display: grid;
-  gap: 12px;
-  min-width: 0;
-}
-
-.peer-list {
-  border-left: 1px solid rgba(97, 118, 154, 0.12);
-  padding-left: 14px;
+.compare-info-panel {
+  align-self: stretch;
 }
 
 .compare-info-block {
@@ -1332,7 +1326,6 @@ body {
   .assistant-hero-metrics,
   .assistant-starter-grid { grid-template-columns: 1fr; }
   .compare-layout { grid-template-columns: 1fr; }
-  .peer-list { border-left: 0; padding-left: 0; }
   .chart--compare { height: 320px; }
   .trend-tools {
     align-items: flex-start;

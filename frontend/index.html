@@ -390,71 +390,71 @@
             </div>
 
             <div v-if="activeSubmoduleMap.analysis === 'structure'" class="analysis-secondary-grid analysis-secondary-grid--merged">
-              <div class="panel">
-                <div class="panel-head">
-                  <div>
-                    <div class="panel-eyebrow">Structure</div>
-                    <div class="panel-title">分时段与周内结构</div>
+              <div class="analysis-merged-main">
+                <div class="panel">
+                  <div class="panel-head">
+                    <div>
+                      <div class="panel-eyebrow">Structure</div>
+                      <div class="panel-title">分时段与周内结构</div>
+                    </div>
+                  </div>
+                  <div v-if="errors.analysisDistribution" class="state-error">{{ errors.analysisDistribution }}</div>
+                  <div class="mini-grid">
+                    <div class="mini-panel">
+                      <div class="mini-panel-title">24 小时负荷轮廓</div>
+                      <div id="patternChart" class="chart chart--mini chart--mini-compact"></div>
+                    </div>
+                    <div class="mini-panel">
+                      <div class="mini-panel-title">工作日 / 周末 / 昼夜占比</div>
+                      <div id="splitChart" class="chart chart--mini chart--mini-compact"></div>
+                    </div>
                   </div>
                 </div>
-                <div v-if="errors.analysisDistribution" class="state-error">{{ errors.analysisDistribution }}</div>
-                <div class="mini-grid">
-                  <div class="mini-panel">
-                    <div class="mini-panel-title">24 小时负荷轮廓</div>
-                    <div id="patternChart" class="chart chart--mini chart--mini-compact"></div>
+
+                <div class="panel">
+                  <div class="panel-head">
+                    <div>
+                      <div class="panel-eyebrow">Compare</div>
+                      <div class="panel-title">当前建筑 vs 同类均值</div>
+                    </div>
+                    <div class="panel-meta">{{ analysisCompare.message || (analysisCompare.peer_group ? `同类样本 ${analysisCompare.peer_group.peer_count} 栋` : '请选择单体建筑') }}</div>
                   </div>
-                  <div class="mini-panel">
-                    <div class="mini-panel-title">工作日 / 周末 / 昼夜占比</div>
-                    <div id="splitChart" class="chart chart--mini chart--mini-compact"></div>
+                  <div v-if="errors.analysisCompare" class="state-error">{{ errors.analysisCompare }}</div>
+                  <div class="compare-visual-card compare-visual-card--single">
+                    <div class="compare-visual-title">当前值与同类均值</div>
+                    <div id="compareChart" class="chart chart--compare chart--compare-compact"></div>
                   </div>
                 </div>
               </div>
 
-              <div class="panel">
+              <div class="panel compare-info-panel">
                 <div class="panel-head">
                   <div>
-                    <div class="panel-eyebrow">Compare</div>
-                    <div class="panel-title">当前建筑 vs 同类均值</div>
+                    <div class="panel-eyebrow">Info</div>
+                    <div class="panel-title">对标信息</div>
                   </div>
-                  <div class="panel-meta">{{ analysisCompare.message || (analysisCompare.peer_group ? `同类样本 ${analysisCompare.peer_group.peer_count} 栋` : '请选择单体建筑') }}</div>
                 </div>
-                <div v-if="errors.analysisCompare" class="state-error">{{ errors.analysisCompare }}</div>
-                <div class="compare-layout">
-                  <div class="compare-visuals">
-                    <div class="compare-visual-card">
-                      <div class="compare-visual-title">当前值与同类均值</div>
-                      <div id="compareChart" class="chart chart--compare chart--compare-compact"></div>
-                    </div>
-                    <div class="compare-visual-card">
-                      <div class="compare-visual-title">同类样本前列均值</div>
-                      <div id="compareRankingChart" class="chart chart--compare chart--compare-compact"></div>
-                    </div>
+                <div v-if="analysisCompare.peer_group" class="peer-summary">
+                  <div class="peer-summary-item">
+                    <span>偏离同类均值</span>
+                    <strong>{{ formatNumber(analysisCompare.peer_group.gap_pct, 1) }}%</strong>
                   </div>
-                  <div class="compare-info">
-                    <div class="peer-list-title">对标信息</div>
-                    <div v-if="analysisCompare.peer_group" class="peer-summary">
-                      <div class="peer-summary-item">
-                        <span>偏离同类均值</span>
-                        <strong>{{ formatNumber(analysisCompare.peer_group.gap_pct, 1) }}%</strong>
-                      </div>
-                      <div class="peer-summary-item">
-                        <span>同类百分位</span>
-                        <strong>{{ formatNumber(analysisCompare.peer_group.peer_percentile, 1) }}</strong>
-                      </div>
-                      <div class="peer-summary-item">
-                        <span>排名位置</span>
-                        <strong>{{ analysisCompare.peer_group.ranking_position || '-' }}/{{ analysisCompare.peer_group.peer_count || '-' }}</strong>
-                      </div>
-                    </div>
-                    <div class="compare-info-block">
-                      <div class="compare-info-title">同类偏差解释</div>
-                      <div v-if="!analysisInsights.compare_findings.length" class="empty-tip">选择单体建筑后，这里会给出同类位置和差距解释。</div>
-                      <div v-else class="insight-list">
-                        <div v-for="item in analysisInsights.compare_findings" :key="`compare-inline-${item.title}`" class="insight-item" :class="insightToneClass(item.severity)">
-                          <div class="insight-item-title">{{ item.title }}</div>
-                          <div class="insight-item-detail">{{ item.detail }}</div>
-                        </div>
-                      </div>
+                  <div class="peer-summary-item">
+                    <span>同类百分位</span>
+                    <strong>{{ formatNumber(analysisCompare.peer_group.peer_percentile, 1) }}</strong>
+                  </div>
+                  <div class="peer-summary-item">
+                    <span>排名位置</span>
+                    <strong>{{ analysisCompare.peer_group.ranking_position || '-' }}/{{ analysisCompare.peer_group.peer_count || '-' }}</strong>
+                  </div>
+                </div>
+                <div class="compare-info-block">
+                  <div class="compare-info-title">同类偏差解释</div>
+                  <div v-if="!analysisInsights.compare_findings.length" class="empty-tip">选择单体建筑后，这里会给出同类位置和差距解释。</div>
+                  <div v-else class="insight-list">
+                    <div v-for="item in analysisInsights.compare_findings" :key="`compare-inline-${item.title}`" class="insight-item" :class="insightToneClass(item.severity)">
+                      <div class="insight-item-title">{{ item.title }}</div>
+                      <div class="insight-item-detail">{{ item.detail }}</div>
                     </div>
                   </div>
                 </div>
