@@ -291,53 +291,53 @@
           </div>
 
           <template v-else>
-            <div class="analysis-scope">
-              <div class="analysis-scope-item">
-                <div class="analysis-scope-label">当前建筑</div>
-                <div class="analysis-scope-value">{{ analysisInsights.scope_summary.building_name || '未选择建筑' }}</div>
-                <div class="analysis-scope-note" v-if="analysisInsights.scope_summary.building_type">{{ analysisInsights.scope_summary.building_type }}</div>
-              </div>
-              <div class="analysis-scope-item">
-                <div class="analysis-scope-label">筛选时间</div>
-                <div class="analysis-scope-value">{{ formatCompactDateTime(analysisInsights.scope_summary.selected_start_time) }} ~ {{ formatCompactDateTime(analysisInsights.scope_summary.selected_end_time) }}</div>
-                <div class="analysis-scope-note">顶部时间范围是唯一分析控制入口</div>
-              </div>
-              <div class="analysis-scope-item">
-                <div class="analysis-scope-label">有效数据</div>
-                <div class="analysis-scope-value">{{ formatCompactDateTime(analysisInsights.scope_summary.data_start_time) }} ~ {{ formatCompactDateTime(analysisInsights.scope_summary.data_end_time) }}</div>
-                <div class="analysis-scope-note">{{ analysisInsights.scope_summary.point_count || 0 }} 个点位 | {{ analysisInsights.scope_summary.granularity || 'hourly' }}</div>
-              </div>
-              <div class="analysis-scope-item">
-                <div class="analysis-scope-label">分析摘要</div>
-                <div class="analysis-scope-value">{{ currentMetricLabel() }} / {{ analysisSummary.unit || 'kWh' }}</div>
-                <div class="analysis-scope-note">异常窗口 {{ analysisInsights.scope_summary.anomaly_count || 0 }} 个</div>
-              </div>
-            </div>
-
-            <div class="cards cards--analysis">
-              <div class="card card--metric">
-                <div class="card-title">总量</div>
-                <div class="card-value">{{ formatNumber(analysisSummary.total_value, 1) }} {{ analysisSummary.unit || 'kWh' }}</div>
-                <div class="card-note">当前筛选范围累计</div>
-              </div>
-              <div class="card card--metric">
-                <div class="card-title">均值</div>
-                <div class="card-value">{{ formatNumber(analysisSummary.avg_value, 1) }} {{ analysisSummary.unit || 'kWh' }}</div>
-                <div class="card-note">平均小时负荷</div>
-              </div>
-              <div class="card card--metric">
-                <div class="card-title">峰值</div>
-                <div class="card-value">{{ formatNumber(analysisSummary.peak_value, 1) }} {{ analysisSummary.unit || 'kWh' }}</div>
-                <div class="card-note">峰时压力水平</div>
-              </div>
-              <div class="card card--metric">
-                <div class="card-title">波动率</div>
-                <div class="card-value">{{ formatNumber(analysisSummary.volatility_pct, 1) }}%</div>
-                <div class="card-note">越高越需要关注稳定性</div>
-              </div>
-            </div>
-
             <div v-if="activeSubmoduleMap.analysis === 'trend'" class="analysis-main-grid">
+              <div class="analysis-scope analysis-scope--trend">
+                <div class="analysis-scope-item">
+                  <div class="analysis-scope-label">当前建筑</div>
+                  <div class="analysis-scope-value">{{ analysisInsights.scope_summary.building_name || '未选择建筑' }}</div>
+                  <div class="analysis-scope-note" v-if="analysisInsights.scope_summary.building_type">{{ analysisInsights.scope_summary.building_type }}</div>
+                </div>
+                <div class="analysis-scope-item">
+                  <div class="analysis-scope-label">筛选时间</div>
+                  <div class="analysis-scope-value">{{ formatCompactDateTime(analysisInsights.scope_summary.selected_start_time) }} ~ {{ formatCompactDateTime(analysisInsights.scope_summary.selected_end_time) }}</div>
+                  <div class="analysis-scope-note">顶部时间范围是唯一分析控制入口</div>
+                </div>
+                <div class="analysis-scope-item">
+                  <div class="analysis-scope-label">有效数据</div>
+                  <div class="analysis-scope-value">{{ formatCompactDateTime(analysisInsights.scope_summary.data_start_time) }} ~ {{ formatCompactDateTime(analysisInsights.scope_summary.data_end_time) }}</div>
+                  <div class="analysis-scope-note">{{ analysisInsights.scope_summary.point_count || 0 }} 个点位 | {{ analysisInsights.scope_summary.granularity || 'hourly' }}</div>
+                </div>
+                <div class="analysis-scope-item">
+                  <div class="analysis-scope-label">分析摘要</div>
+                  <div class="analysis-scope-value">{{ currentMetricLabel() }} / {{ analysisSummary.unit || 'kWh' }}</div>
+                  <div class="analysis-scope-note">异常窗口 {{ analysisInsights.scope_summary.anomaly_count || 0 }} 个</div>
+                </div>
+              </div>
+
+              <div class="cards cards--analysis cards--analysis-compact">
+                <div class="card card--metric">
+                  <div class="card-title">总量</div>
+                  <div class="card-value">{{ formatNumber(analysisSummary.total_value, 1) }} {{ analysisSummary.unit || 'kWh' }}</div>
+                  <div class="card-note">当前筛选范围累计</div>
+                </div>
+                <div class="card card--metric">
+                  <div class="card-title">均值</div>
+                  <div class="card-value">{{ formatNumber(analysisSummary.avg_value, 1) }} {{ analysisSummary.unit || 'kWh' }}</div>
+                  <div class="card-note">平均小时负荷</div>
+                </div>
+                <div class="card card--metric">
+                  <div class="card-title">峰值</div>
+                  <div class="card-value">{{ formatNumber(analysisSummary.peak_value, 1) }} {{ analysisSummary.unit || 'kWh' }}</div>
+                  <div class="card-note">峰时压力水平</div>
+                </div>
+                <div class="card card--metric">
+                  <div class="card-title">波动率</div>
+                  <div class="card-value">{{ formatNumber(analysisSummary.volatility_pct, 1) }}%</div>
+                  <div class="card-note">越高越需要关注稳定性</div>
+                </div>
+              </div>
+
               <div class="panel panel--feature">
                 <div class="panel-head">
                   <div>

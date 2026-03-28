@@ -249,6 +249,10 @@ body {
   grid-template-columns: repeat(4, minmax(0, 1fr));
 }
 
+.cards--analysis-compact {
+  gap: 10px;
+}
+
 .card,
 .panel {
   background: var(--surface);
@@ -332,20 +336,20 @@ body {
 
 .chart { height: 320px; }
 .chart--overview { height: 320px; }
-.chart--trend { height: 400px; }
+.chart--trend { height: 340px; }
 .chart--mini { height: 240px; }
 .chart--compare { height: 280px; }
 
 .analysis-page {
-  gap: 18px;
+  gap: 14px;
 }
 
 .analysis-hero {
   display: flex;
   justify-content: space-between;
   align-items: flex-end;
-  gap: 18px;
-  padding: 20px 22px;
+  gap: 14px;
+  padding: 16px 18px;
   border-radius: 26px;
   border: 1px solid rgba(19, 96, 193, 0.12);
   background:
@@ -356,17 +360,17 @@ body {
 
 .analysis-hero-title {
   margin-top: 4px;
-  font-size: 30px;
+  font-size: 26px;
   font-weight: 800;
   letter-spacing: -0.03em;
 }
 
 .analysis-hero-sub {
-  margin-top: 8px;
+  margin-top: 6px;
   max-width: 760px;
   color: var(--muted);
-  line-height: 1.7;
-  font-size: 14px;
+  line-height: 1.55;
+  font-size: 13px;
 }
 
 .analysis-hero-actions {
@@ -382,8 +386,12 @@ body {
   gap: 12px;
 }
 
+.analysis-scope--trend {
+  gap: 10px;
+}
+
 .analysis-scope-item {
-  padding: 14px 16px;
+  padding: 12px 14px;
   border-radius: 20px;
   border: 1px solid rgba(91, 117, 162, 0.14);
   background: linear-gradient(180deg, rgba(255,255,255,0.96) 0%, rgba(244,248,255,0.9) 100%);
@@ -399,15 +407,15 @@ body {
 }
 
 .analysis-scope-value {
-  margin-top: 8px;
-  font-size: 17px;
-  line-height: 1.5;
+  margin-top: 6px;
+  font-size: 15px;
+  line-height: 1.4;
   font-weight: 700;
   color: #21314d;
 }
 
 .analysis-scope-note {
-  margin-top: 6px;
+  margin-top: 4px;
   font-size: 12px;
   color: #63748f;
 }
@@ -423,6 +431,7 @@ body {
 .analysis-main-grid {
   grid-template-columns: minmax(0, 1fr);
   align-items: start;
+  gap: 12px;
 }
 
 .analysis-secondary-grid {
