@@ -59,6 +59,7 @@ RAGFLOW_DEFAULT_TOP_K = 6
 RAGFLOW_DEFAULT_SIMILARITY_THRESHOLD = 0.2
 RAGFLOW_DEFAULT_VECTOR_SIMILARITY_WEIGHT = 0.45
 RAGFLOW_DEFAULT_TIMEOUT_SEC = 6.0
+RAGFLOW_DEFAULT_CHAT_TIMEOUT_SEC = 60.0
 
 SHOWCASE_BUILDINGS = {
     "Panther_education_Genevieve": {"display_category": "教学楼", "peer_category": "teaching_building"},
@@ -820,6 +821,10 @@ class EnergyRepository:
             timeout_sec = float(os.getenv("RAGFLOW_TIMEOUT_SEC", str(RAGFLOW_DEFAULT_TIMEOUT_SEC)))
         except ValueError:
             timeout_sec = RAGFLOW_DEFAULT_TIMEOUT_SEC
+        try:
+            chat_timeout_sec = float(os.getenv("RAGFLOW_CHAT_TIMEOUT_SEC", str(RAGFLOW_DEFAULT_CHAT_TIMEOUT_SEC)))
+        except ValueError:
+            chat_timeout_sec = RAGFLOW_DEFAULT_CHAT_TIMEOUT_SEC
 
         all_dataset_ids = dataset_ids + [item for item in standard_dataset_ids if item not in dataset_ids]
         enabled = bool(base_url and all_dataset_ids)
@@ -839,6 +844,7 @@ class EnergyRepository:
             "similarity_threshold": similarity_threshold,
             "vector_similarity_weight": vector_similarity_weight,
             "timeout_sec": timeout_sec,
+            "chat_timeout_sec": max(timeout_sec, chat_timeout_sec),
             "enabled": enabled,
             "configured": configured,
             "chat_id": chat_id,
@@ -1339,6 +1345,7 @@ class EnergyRepository:
             f"/chats/{settings['chat_id']}/completions",
             method="POST",
             payload=body,
+            timeout_sec=settings["chat_timeout_sec"],
         )
         latest = event.get("data") if isinstance(event.get("data"), dict) else event
         if not isinstance(latest, dict):
@@ -1370,7 +1377,7 @@ class EnergyRepository:
         )
 
         def event_iter():
-            with urlopen(req, timeout=settings["timeout_sec"]) as resp:
+            with urlopen(req, timeout=settings["chat_timeout_sec"]) as resp:
                 for raw_line in resp:
                     line = raw_line.decode("utf-8", errors="ignore").strip()
                     if not line.startswith("data:"):
