@@ -347,9 +347,11 @@ createApp({
       const clean = this.cleanRagflowAnswerText(text);
       if (!clean) return '';
       return clean
-        .replace(/(结论[:：])/g, '\n$1 ')
-        .replace(/(依据与分析[:：]|标准依据[:：]|优先检查[:：]|运维建议[:：]|关键要求[:：]|执行提示[:：]|说明[:：])/g, '\n\n$1')
-        .replace(/([。！？；])\s*(\d+\.\s*)/g, '$1\n$2')
+        .replace(/(?:^|\n)\s*(结论|依据与分析|标准依据|优先检查|运维建议|关键要求|执行提示|说明)\s*[:：]?\s*/g, '\n')
+        .replace(/(?<!\d)(\d+)\.\s*/g, '\n• ')
+        .replace(/(?<!\d)(\d+)、\s*/g, '\n• ')
+        .replace(/\(\s*\)\s*/g, '')
+        .replace(/([。！？；])(?=[^\n•])/g, '$1\n')
         .replace(/\n{3,}/g, '\n\n')
         .trim();
     },

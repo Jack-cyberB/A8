@@ -948,6 +948,23 @@ class EnergyRepository:
         text = re.sub(r"\s+([，。！？；：、])", r"\1", text)
         return text.strip()
 
+    def _postprocess_knowledge_answer(self, value: Any) -> str:
+        text = self._clean_ragflow_answer_text(value)
+        if not text:
+            return ""
+        text = text.replace("\r", "\n")
+        text = re.sub(r"(?:^|\n)\s*(结论|依据与分析|标准依据|优先检查|运维建议|执行提示|关键要求|说明)\s*[:：]?\s*", "\n", text)
+        text = re.sub(r"(?<!\d)(\d+)\.\s*", "\n• ", text)
+        text = re.sub(r"(?<!\d)(\d+)、\s*", "\n• ", text)
+        text = re.sub(r"\(\s*\)\s*", "", text)
+        text = re.sub(r"•\s*•\s*", "• ", text)
+        text = re.sub(r"\n{3,}", "\n\n", text)
+        text = re.sub(r"[ \t]+\n", "\n", text)
+        text = re.sub(r"\n[ \t]+", "\n", text)
+        text = re.sub(r"([。！？；])(?=[^\n•])", r"\1\n", text)
+        text = re.sub(r"\n{3,}", "\n\n", text)
+        return text.strip()
+
     def _merge_ragflow_stream_text(self, full_text: str, incoming_text: Any) -> tuple[str, str]:
         piece = str(incoming_text or "")
         if not piece:
@@ -1070,16 +1087,17 @@ class EnergyRepository:
                 evidence_lines.append(f"[{idx}] 位置：{section}")
             evidence_lines.append(f"[{idx}] 摘录：{excerpt}")
         scope_hint = {
-            "standard": "请按“结论 / 标准依据 / 执行提示”输出，若分点必须从 1 开始连续编号，不要跳号。",
-            "scene": "请按“结论 / 依据与分析 / 优先检查”输出，若分点必须从 1 开始连续编号，不要跳号。",
-            "mixed": "请按“结论 / 标准依据 / 运维建议”输出，若分点必须从 1 开始连续编号，不要跳号。",
+            "standard": "请直接输出自然中文答案，优先用 2 到 4 个短段落说明标准要点；不要写“结论”“依据与分析”等标题，不要编号。",
+            "scene": "请直接输出自然中文答案，先用一段回答核心判断，再用 1 到 3 个圆点项说明检查重点；不要写标题，不要数字编号。",
+            "mixed": "请直接输出自然中文答案，先说明标准或原理，再补充运维做法；不要写标题，不要数字编号。",
         }.get(route, "请结合召回资料直接回答。")
         system_prompt = (
             "你是建筑能源与运维知识助手。请严格基于给定资料作答，不要编造未提供的标准条文。"
             "如果资料不足，请明确说明“当前检索到的资料不足以确认”。"
             "引用资料时用[1][2]这种编号内联引用，正文后不要额外输出参考文献列表。"
             "回答使用中文，优先给出简洁结论，再补充必要依据。"
-            "不要输出 Markdown 表格，不要输出跳号列表，不要把多条内容挤在同一行。"
+            "不要输出 Markdown 表格，不要输出数字列表，不要输出“结论”“依据与分析”“标准依据”等小标题。"
+            "每句话都要完整，必须使用自然中文标点，不要把多条内容挤在同一行。"
         )
         user_prompt = (
             f"用户问题：{question}\n"
@@ -1407,7 +1425,7 @@ class EnergyRepository:
         return {
             "mode": "sync",
             "route": route,
-            "answer": self._clean_ragflow_answer_text(content),
+            "answer": self._postprocess_knowledge_answer(content),
             "references": references,
             "session_id": session_id,
             "latency_ms": int((time.perf_counter() - started) * 1000),
@@ -1461,7 +1479,7 @@ class EnergyRepository:
             yield "error", {"message": str(exc)}
             return
         yield "done", {
-            "answer": self._clean_ragflow_answer_text(full_answer),
+            "answer": self._postprocess_knowledge_answer(full_answer),
             "session_id": stream_result["session_id"],
             "message_id": "",
             "chat_id": self._ragflow_settings().get("chat_id", ""),
