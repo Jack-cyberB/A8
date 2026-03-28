@@ -840,16 +840,29 @@
                       </div>
                     </div>
                   </div>
-                  <div class="unified-knowledge-answer" :class="{ 'unified-knowledge-answer--pending': msg.pending }" v-html="renderKnowledgeAnswer(msg.content)"></div>
+                  <div
+                    class="unified-knowledge-answer"
+                    :class="{ 'unified-knowledge-answer--pending': msg.pending }"
+                    @click="handleKnowledgeAnswerClick($event, msg)"
+                    v-html="renderKnowledgeAnswer(msg.content, msg.id, msg.references)"
+                  ></div>
                   <div v-if="msg.references && msg.references.length" class="assistant-reference-panel" :class="{ 'is-expanded': msg.referencesExpanded }">
                     <button class="assistant-reference-toggle" @click="toggleKnowledgeReferences(msg.id)">
                       <span>知识依据 {{ msg.references.length }} 条</span>
                       <span>{{ msg.referencesExpanded ? '收起查看' : '展开查看' }}</span>
                     </button>
                     <div v-if="msg.referencesExpanded" class="unified-reference-list">
-                      <div v-for="ref in msg.references" :key="ref.id || ref.chunk_id" class="unified-reference-item">
+                      <div
+                        v-for="ref in msg.references"
+                        :key="ref.id || ref.chunk_id"
+                        :id="referenceDomId(msg.id, ref.citation_index)"
+                        :data-ref-index="ref.citation_index"
+                        class="unified-reference-item"
+                      >
                         <div class="assistant-evidence-title">{{ ref.title }}</div>
                         <div class="assistant-evidence-meta">
+                          <span>ID:{{ ref.citation_index }}</span>
+                          <span class="meta-separator"></span>
                           <span>{{ knowledgeSourceLabel(ref.sourceType || ref.source_type) }}</span>
                           <template v-if="referenceSimilarityText(ref)">
                             <span class="meta-separator"></span>

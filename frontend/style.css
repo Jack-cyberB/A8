@@ -2009,6 +2009,66 @@ body {
   border: 1px solid rgba(126, 158, 197, 0.14);
   background: rgba(247, 251, 255, 0.86);
   padding: 14px 16px;
+  scroll-margin-top: 18px;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease, background 0.2s ease;
+}
+
+.unified-reference-item.is-citation-active {
+  border-color: rgba(39, 118, 214, 0.3);
+  background: rgba(235, 244, 255, 0.96);
+  box-shadow: 0 14px 28px rgba(39, 118, 214, 0.12);
+}
+
+.unified-knowledge-answer {
+  white-space: normal;
+}
+
+.unified-knowledge-answer p,
+.unified-knowledge-answer ol,
+.unified-knowledge-answer ul {
+  margin: 0 0 14px;
+}
+
+.unified-knowledge-answer ol,
+.unified-knowledge-answer ul {
+  padding-left: 1.5em;
+}
+
+.unified-knowledge-answer li + li {
+  margin-top: 8px;
+}
+
+.unified-knowledge-answer strong {
+  font-weight: 700;
+  color: #17385e;
+}
+
+.knowledge-citation {
+  appearance: none;
+  border: 1px solid rgba(39, 118, 214, 0.16);
+  background: rgba(233, 243, 255, 0.92);
+  color: #2a69b9;
+  border-radius: 999px;
+  padding: 1px 7px;
+  margin: 0 2px;
+  font-size: 12px;
+  line-height: 1.5;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.2s ease, border-color 0.2s ease, transform 0.2s ease;
+}
+
+.knowledge-citation:hover {
+  border-color: rgba(39, 118, 214, 0.28);
+  background: rgba(223, 237, 255, 0.96);
+  transform: translateY(-1px);
+}
+
+.knowledge-citation--disabled,
+.knowledge-citation:disabled {
+  cursor: default;
+  opacity: 0.56;
+  transform: none;
 }
 
 .assistant-evidence-title {

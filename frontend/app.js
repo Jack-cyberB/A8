@@ -336,9 +336,48 @@ createApp({
         .replace(/</g, '&lt;')
         .replace(/>/g, '&gt;');
     },
-    renderKnowledgeAnswer(text) {
+    escapeHtmlAttribute(text) {
+      return String(text || '')
+        .replace(/&/g, '&amp;')
+        .replace(/"/g, '&quot;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+    },
+    simpleMarkdownToHtml(text) {
+      return String(text || '')
+        .split(/\n{2,}/)
+        .map((block) => block.trim())
+        .filter(Boolean)
+        .map((block) => `<p>${block.replace(/\n/g, '<br>')}</p>`)
+        .join('');
+    },
+    decorateKnowledgeAnswerHtml(html, messageId = '', references = []) {
+      const availableCount = Array.isArray(references) ? references.length : 0;
+      const safeMessageId = this.escapeHtmlAttribute(messageId);
+      return String(html || '').replace(/\[ID:\s*(\d+)\]/gi, (_, idxText) => {
+        const idx = Number(idxText);
+        const disabled = !Number.isInteger(idx) || idx < 0 || idx >= availableCount;
+        const className = disabled ? 'knowledge-citation knowledge-citation--disabled' : 'knowledge-citation';
+        const attrs = disabled
+          ? `class="${className}" disabled`
+          : `class="${className}" data-message-id="${safeMessageId}" data-ref-index="${idx}"`;
+        return `<button type="button" ${attrs}>[ID:${idx}]</button>`;
+      });
+    },
+    renderKnowledgeAnswer(text, messageId = '', references = []) {
       const formatted = this.formatKnowledgeAnswerText(text);
-      return this.escapeHtml(formatted).replace(/\n/g, '<br>');
+      if (!formatted) return '';
+      const safeMarkdown = this.escapeHtml(formatted);
+      let html = '';
+      if (typeof marked !== 'undefined') {
+        try {
+          html = marked.parse(safeMarkdown, { breaks: true, gfm: true });
+        } catch (e) {}
+      }
+      if (!html) {
+        html = this.simpleMarkdownToHtml(safeMarkdown);
+      }
+      return this.decorateKnowledgeAnswerHtml(html, messageId, references);
     },
     renderMarkdown(text) {
       if (!text || typeof text !== 'string') return '';
@@ -619,11 +658,12 @@ createApp({
       ];
     },
     normalizeUnifiedKnowledgeReferences(references = []) {
-      return (Array.isArray(references) ? references : []).slice(0, 6).map((item, index) => {
+      return (Array.isArray(references) ? references : []).map((item, index) => {
         const similarityValue = Number(item?.similarity);
         return {
           id: item?.id || item?.chunk_id || `knowledge-ref-${index}`,
           chunk_id: item?.chunk_id || item?.id || `knowledge-ref-${index}`,
+          citation_index: index,
           title: String(item?.title || '知识片段').replace(/\.(md|markdown|txt|pdf)$/i, ''),
           excerpt: String(item?.excerpt || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n').trim(),
           source_type: item?.source_type || item?.sourceType || 'ragflow',
@@ -637,14 +677,45 @@ createApp({
       if (!Number.isFinite(value)) return '';
       return `相似度 ${this.formatNumber(value * 100, 1)}%`;
     },
-    toggleKnowledgeReferences(messageId) {
+    toggleKnowledgeReferences(messageId, options = {}) {
       const idx = this.unifiedChat.messages.findIndex((item) => item.id === messageId);
       if (idx < 0) return;
       const current = this.unifiedChat.messages[idx];
+      const expanded = typeof options.expanded === 'boolean' ? options.expanded : !current.referencesExpanded;
       this.unifiedChat.messages.splice(idx, 1, {
         ...current,
-        referencesExpanded: !current.referencesExpanded,
+        referencesExpanded: expanded,
       });
+    },
+    referenceDomId(messageId, citationIndex) {
+      return `knowledge-ref-${messageId}-${citationIndex}`;
+    },
+    focusKnowledgeReference(messageId, citationIndex) {
+      const target = document.getElementById(this.referenceDomId(messageId, citationIndex));
+      if (!target) return;
+      target.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      target.classList.remove('is-citation-active');
+      void target.offsetWidth;
+      target.classList.add('is-citation-active');
+      if (this._knowledgeCitationTimer) {
+        clearTimeout(this._knowledgeCitationTimer);
+      }
+      this._knowledgeCitationTimer = setTimeout(() => {
+        target.classList.remove('is-citation-active');
+      }, 1800);
+    },
+    handleKnowledgeAnswerClick(event, msg) {
+      const target = event?.target instanceof Element
+        ? event.target.closest('.knowledge-citation[data-ref-index]')
+        : null;
+      if (!target) return;
+      event.preventDefault();
+      const citationIndex = Number(target.getAttribute('data-ref-index'));
+      if (!Number.isInteger(citationIndex) || !Array.isArray(msg?.references) || !msg.references[citationIndex]) {
+        return;
+      }
+      this.toggleKnowledgeReferences(msg.id, { expanded: true });
+      this.$nextTick(() => this.focusKnowledgeReference(msg.id, citationIndex));
     },
     currentMetricLabel() {
       return this.analysisMetrics.find((item) => item.value === this.analysisMetric)?.label || '电力';

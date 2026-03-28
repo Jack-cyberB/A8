@@ -404,6 +404,11 @@ class RepositoryTests(unittest.TestCase):
         self.assertEqual(full_text, "第一段第二段第三段")
         self.assertEqual(delta, "第三段")
 
+    def test_ragflow_reference_limit_for_answer_expands_to_max_citation(self):
+        self.assertEqual(REPO._ragflow_reference_limit_for_answer("说明见[ID:0][ID:7]。"), 8)
+        self.assertEqual(REPO._ragflow_reference_limit_for_answer("无引用。"), 6)
+        self.assertEqual(REPO._ragflow_reference_limit_for_answer("大量引用[ID:15]。"), 12)
+
     def test_ragflow_chat_stream_events_use_native_stream_and_preserve_full_answer(self):
         event_iter = iter(
             [

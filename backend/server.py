@@ -1329,6 +1329,16 @@ class EnergyRepository:
             return "mixed"
         return "ragflow"
 
+    def _ragflow_reference_limit_for_answer(self, answer: Any, default: int = 6, cap: int = 12) -> int:
+        text = str(answer or "")
+        citation_ids = [
+            int(match.group(1))
+            for match in re.finditer(r"\[ID:\s*(\d+)\]", text, flags=re.IGNORECASE)
+        ]
+        if not citation_ids:
+            return default
+        return min(max(default, max(citation_ids) + 1), cap)
+
     def _ragflow_chat_completion(self, question: str, session_id: str | None = None) -> dict[str, Any]:
         settings = self._ragflow_settings()
         if not settings["chat_ready"]:
@@ -1611,7 +1621,10 @@ class EnergyRepository:
         _sid = payload.get("session_id")
         session_id = str(_sid).strip() if _sid and str(_sid).strip() not in ("None", "null") else None
         result = self._ragflow_chat_completion(question, session_id=session_id)
-        references = self._normalize_ragflow_reference(result.get("reference"))
+        references = self._normalize_ragflow_reference(
+            result.get("reference"),
+            limit=self._ragflow_reference_limit_for_answer(result.get("answer", "")),
+        )
         return {
             "answer": str(result.get("answer", "")),
             "session_id": str(result.get("session_id", "")).strip(),
@@ -1652,7 +1665,10 @@ class EnergyRepository:
                 if delta:
                     yield "token", {"text": delta}
                 if bool(event_data.get("final")):
-                    references = self._normalize_ragflow_reference(latest_reference)
+                    references = self._normalize_ragflow_reference(
+                        latest_reference,
+                        limit=self._ragflow_reference_limit_for_answer(full_answer),
+                    )
                     yield "done", {
                         "answer": full_answer,
                         "session_id": final_session_id,
@@ -1668,7 +1684,10 @@ class EnergyRepository:
         except Exception as exc:
             yield "error", {"message": str(exc)}
             return
-        references = self._normalize_ragflow_reference(latest_reference)
+        references = self._normalize_ragflow_reference(
+            latest_reference,
+            limit=self._ragflow_reference_limit_for_answer(full_answer),
+        )
         yield "done", {
             "answer": full_answer,
             "session_id": final_session_id,
@@ -4402,6 +4421,9 @@ class Handler(BaseHTTPRequestHandler):
     def _set_file_headers(self, status: int, content_type: str) -> None:
         self.send_response(status)
         self.send_header("Content-Type", content_type)
+        self.send_header("Cache-Control", "no-store, no-cache, must-revalidate")
+        self.send_header("Pragma", "no-cache")
+        self.send_header("Expires", "0")
         self.send_header("Access-Control-Allow-Origin", "*")
         self.end_headers()
 
