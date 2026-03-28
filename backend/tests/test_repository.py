@@ -303,6 +303,50 @@ class RepositoryTests(unittest.TestCase):
         cleaned = REPO._clean_ragflow_answer_text("建议先核查空调排程[ID:3][ID:0][1]。\n\n")
         self.assertEqual(cleaned, "建议先核查空调排程。")
 
+    def test_postprocess_knowledge_answer_preserves_decimal_ranges(self):
+        text = "根据资料，通风窗下沿宜设在距室内楼地面以上0.10m~0.15m高度处，以利于通风。"
+        processed = REPO._postprocess_knowledge_answer(text)
+        self.assertIn("0.10m~0.15m高度处", processed)
+        self.assertNotIn("• 10m", processed)
+
+    def test_postprocess_knowledge_answer_only_converts_line_start_numbering(self):
+        text = "1. 先检查排程。\n2、再检查新风阀。\n室温建议控制在1.5℃波动范围内。"
+        processed = REPO._postprocess_knowledge_answer(text)
+        self.assertIn("• 先检查排程。", processed)
+        self.assertIn("• 再检查新风阀。", processed)
+        self.assertIn("1.5℃波动范围内", processed)
+
+    def test_merge_knowledge_retrieval_results_deduplicates_and_preserves_mixed_source(self):
+        merged = REPO._merge_knowledge_retrieval_results(
+            "教学楼通风要求",
+            {
+                "items": [
+                    {
+                        "chunk_id": "scene-1",
+                        "title": "校园运维场景",
+                        "excerpt": "教学楼空调运行时应检查新风与排风。",
+                        "source_type": "ragflow",
+                        "similarity": 0.71,
+                    }
+                ]
+            },
+            {
+                "items": [
+                    {
+                        "chunk_id": "std-1",
+                        "title": "GB 50365-2019 空调通风系统运行管理标准",
+                        "excerpt": "通风系统运行管理应结合监测数据进行调整。",
+                        "source_type": "standard",
+                        "similarity": 0.69,
+                    }
+                ]
+            },
+            limit=4,
+        )
+        self.assertEqual(merged["knowledge_source"], "mixed")
+        self.assertEqual(len(merged["items"]), 2)
+        self.assertEqual({item["source_type"] for item in merged["items"]}, {"ragflow", "standard"})
+
     def test_extract_ragflow_excerpt_prefers_useful_qa_content(self):
         excerpt = REPO._extract_ragflow_excerpt(
             {

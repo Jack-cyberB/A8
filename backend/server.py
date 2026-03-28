@@ -954,8 +954,7 @@ class EnergyRepository:
             return ""
         text = text.replace("\r", "\n")
         text = re.sub(r"(?:^|\n)\s*(结论|依据与分析|标准依据|优先检查|运维建议|执行提示|关键要求|说明)\s*[:：]?\s*", "\n", text)
-        text = re.sub(r"(?<!\d)(\d+)\.\s*", "\n• ", text)
-        text = re.sub(r"(?<!\d)(\d+)、\s*", "\n• ", text)
+        text = re.sub(r"(?m)^\s*\d+[\.、]\s*", "• ", text)
         text = re.sub(r"\(\s*\)\s*", "", text)
         text = re.sub(r"•\s*•\s*", "• ", text)
         text = re.sub(r"\n{3,}", "\n\n", text)
@@ -1050,13 +1049,105 @@ class EnergyRepository:
     def _knowledge_relevance_score(self, question: str, title: str, excerpt: str, similarity: float | None) -> float:
         haystack = f"{title}\n{excerpt}".lower()
         score = float(similarity or 0.0) * 10.0
+        overlap_count = 0
         for term in self._knowledge_query_terms(question):
             term_lower = term.lower()
             if term_lower and term_lower in haystack:
+                overlap_count += 1
                 score += max(1.0, min(len(term_lower), 4))
         if "问题：" in excerpt and "答案：" in excerpt:
             score += 0.6
+        if overlap_count == 0 and float(similarity or 0.0) < 0.65:
+            score -= 2.5
         return score
+
+    def _build_knowledge_retrieval_query(self, question: str, route: str) -> str:
+        raw = str(question or "").strip()
+        if not raw:
+            return ""
+        pieces = [raw]
+        terms = self._knowledge_query_terms(raw)[:6]
+        if terms:
+            pieces.append("关键词：" + "、".join(terms))
+        if route in {"standard", "mixed"}:
+            pieces.append("关注：标准要求、设计规范、运行管理")
+        if route in {"scene", "mixed"} and any(token in raw for token in ("排查", "检查", "优化", "闷热", "通风", "空调", "负荷", "能耗")):
+            pieces.append("场景：运维排查、运行优化")
+        return "\n".join(piece for piece in pieces if piece)
+
+    def _merge_knowledge_retrieval_results(self, question: str, *results: dict[str, Any], limit: int = 6) -> dict[str, Any]:
+        scored: list[tuple[float, dict[str, Any]]] = []
+        seen: set[tuple[str, str, str]] = set()
+        retrieval_error_types: list[str] = []
+        for result in results:
+            if not isinstance(result, dict):
+                continue
+            error_type = str(result.get("retrieval_error_type", "")).strip()
+            if error_type:
+                retrieval_error_types.append(error_type)
+            for item in list(result.get("items") or []):
+                if not isinstance(item, dict):
+                    continue
+                key = (
+                    str(item.get("chunk_id", "")).strip(),
+                    str(item.get("title", "")).strip(),
+                    str(item.get("excerpt", "")).strip(),
+                )
+                if key in seen:
+                    continue
+                seen.add(key)
+                similarity = item.get("similarity")
+                try:
+                    similarity_value = float(similarity) if similarity is not None else None
+                except (TypeError, ValueError):
+                    similarity_value = None
+                score = self._knowledge_relevance_score(
+                    question,
+                    str(item.get("title", "")),
+                    str(item.get("excerpt", "")),
+                    similarity_value,
+                )
+                scored.append((score, item))
+
+        sorted_scored = sorted(scored, key=lambda pair: pair[0], reverse=True)
+        items: list[dict[str, Any]] = []
+        if sorted_scored:
+            by_source: dict[str, list[dict[str, Any]]] = {}
+            for _, item in sorted_scored:
+                by_source.setdefault(str(item.get("source_type", "")), []).append(item)
+            if "standard" in by_source and "ragflow" in by_source:
+                for source_type in ("standard", "ragflow"):
+                    for item in by_source.get(source_type, [])[: max(1, min(2, limit // 2 or 1))]:
+                        if item not in items and len(items) < limit:
+                            items.append(item)
+            for _, item in sorted_scored:
+                if len(items) >= limit:
+                    break
+                if item not in items:
+                    items.append(item)
+        if items:
+            source_types = {str(item.get("source_type", "")) for item in items}
+            if source_types == {"standard"}:
+                knowledge_source = "standard"
+            elif "standard" in source_types and "ragflow" in source_types:
+                knowledge_source = "mixed"
+            else:
+                knowledge_source = "ragflow"
+            return {
+                "items": items,
+                "knowledge_source": knowledge_source,
+                "retrieval_hit_count": len(items),
+                "retrieval_error_type": "",
+                "ragflow_session_id": "",
+            }
+
+        return {
+            "items": [],
+            "knowledge_source": "none",
+            "retrieval_hit_count": 0,
+            "retrieval_error_type": retrieval_error_types[0] if retrieval_error_types else "empty_result",
+            "ragflow_session_id": "",
+        }
 
     def _llm_settings(self) -> dict[str, Any]:
         api_key = os.getenv("OPENAI_API_KEY", "").strip()
@@ -1087,24 +1178,25 @@ class EnergyRepository:
                 evidence_lines.append(f"[{idx}] 位置：{section}")
             evidence_lines.append(f"[{idx}] 摘录：{excerpt}")
         scope_hint = {
-            "standard": "请直接输出自然中文答案，优先用 2 到 4 个短段落说明标准要点；不要写“结论”“依据与分析”等标题，不要编号。",
-            "scene": "请直接输出自然中文答案，先用一段回答核心判断，再用 1 到 3 个圆点项说明检查重点；不要写标题，不要数字编号。",
-            "mixed": "请直接输出自然中文答案，先说明标准或原理，再补充运维做法；不要写标题，不要数字编号。",
+            "standard": "请直接输出自然中文答案，优先用2到4个完整短段落说明标准要点，不要写“结论”“依据与分析”等标题，不要编号。",
+            "scene": "请直接输出自然中文答案，先概括核心判断，再分两到三段说明重点检查项和优化方向，不要写标题，不要数字编号。",
+            "mixed": "请直接输出自然中文答案，先说明标准或原理，再补充运维做法，整体用2到4个完整短段落表达，不要写标题，不要数字编号。",
         }.get(route, "请结合召回资料直接回答。")
         system_prompt = (
             "你是建筑能源与运维知识助手。请严格基于给定资料作答，不要编造未提供的标准条文。"
             "如果资料不足，请明确说明“当前检索到的资料不足以确认”。"
             "引用资料时用[1][2]这种编号内联引用，正文后不要额外输出参考文献列表。"
-            "回答使用中文，优先给出简洁结论，再补充必要依据。"
+            "回答使用中文，优先给出完整判断，再补充必要依据。"
             "不要输出 Markdown 表格，不要输出数字列表，不要输出“结论”“依据与分析”“标准依据”等小标题。"
             "每句话都要完整，必须使用自然中文标点，不要把多条内容挤在同一行。"
+            "不要照抄零碎短句，不要输出残缺片段。若资料中出现数字范围、单位、条款编号或尺寸，请原样保留，不要改写或拆开。"
         )
         user_prompt = (
             f"用户问题：{question}\n"
             f"{scope_hint}\n\n"
             "已检索资料如下：\n"
             f"{chr(10).join(evidence_lines)}\n\n"
-            "请输出可直接展示的中文答案。"
+            "请输出可直接展示的中文答案。若资料支持多个判断点，请自然分段，不要使用1. 2. 3.编号。"
         )
         return [
             {"role": "system", "content": system_prompt},
@@ -1373,8 +1465,26 @@ class EnergyRepository:
         if not llm_settings["configured"]:
             raise RuntimeError("DeepSeek not configured for knowledge answer generation")
 
+        settings = self._ragflow_settings()
         route, dataset_ids = self._ragflow_dataset_route(question)
-        retrieval = self._retrieve_ragflow_knowledge(question, limit=limit, dataset_ids=dataset_ids)
+        retrieval_query = self._build_knowledge_retrieval_query(question, route)
+        if route == "mixed" and settings.get("scene_dataset_ids") and settings.get("standard_dataset_ids"):
+            retrieval = self._merge_knowledge_retrieval_results(
+                retrieval_query,
+                self._retrieve_ragflow_knowledge(
+                    retrieval_query,
+                    limit=max(limit, 4),
+                    dataset_ids=list(settings.get("scene_dataset_ids") or []),
+                ),
+                self._retrieve_ragflow_knowledge(
+                    retrieval_query,
+                    limit=max(limit, 4),
+                    dataset_ids=list(settings.get("standard_dataset_ids") or []),
+                ),
+                limit=limit,
+            )
+        else:
+            retrieval = self._retrieve_ragflow_knowledge(retrieval_query, limit=limit, dataset_ids=dataset_ids)
         references = list(retrieval.get("items") or [])
         if not references:
             raise RuntimeError("未从知识库检索到可用资料")

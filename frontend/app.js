@@ -348,8 +348,7 @@ createApp({
       if (!clean) return '';
       return clean
         .replace(/(?:^|\n)\s*(结论|依据与分析|标准依据|优先检查|运维建议|关键要求|执行提示|说明)\s*[:：]?\s*/g, '\n')
-        .replace(/(?<!\d)(\d+)\.\s*/g, '\n• ')
-        .replace(/(?<!\d)(\d+)、\s*/g, '\n• ')
+        .replace(/^\s*\d+[\.、]\s*/gm, '• ')
         .replace(/\(\s*\)\s*/g, '')
         .replace(/([。！？；])(?=[^\n•])/g, '$1\n')
         .replace(/\n{3,}/g, '\n\n')
