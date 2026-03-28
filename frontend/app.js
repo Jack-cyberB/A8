@@ -97,9 +97,9 @@ createApp({
       ],
       analysisMetrics: [
         { value: 'electricity', label: '电力' },
-        { value: 'water', label: '水' },
-        { value: 'hvac', label: '空调' },
-        { value: 'environment', label: '环境' },
+        { value: 'chilledwater', label: '冷冻水' },
+        { value: 'water', label: '用水' },
+        { value: 'gas', label: '燃气' },
       ],
       activePage: 'overview',
       activeSubmoduleMap: {
