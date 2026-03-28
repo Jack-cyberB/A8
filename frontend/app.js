@@ -230,6 +230,8 @@ createApp({
         ragflowConfigured: false,
         ragflowEnabled: false,
         ragflowDatasetCount: 0,
+        ragflowStandardDatasetCount: 0,
+        ragflowStandardConfigured: false,
         ragflowChatReady: false,
         ragflowChatId: '',
       },
@@ -386,9 +388,11 @@ createApp({
     },
     knowledgeSourceLabel(value) {
       const map = {
-        ragflow: 'RAGFlow',
-        local: '本地知识兜底',
-        local_knowledge: '本地知识兜底',
+        ragflow: '场景知识',
+        standard: '标准规范',
+        mixed: '双知识源',
+        local: '本地知识',
+        local_knowledge: '本地知识',
         none: '未命中知识',
         llm_generated: 'LLM生成',
       };
@@ -399,16 +403,20 @@ createApp({
     },
     aiAvailabilityText() {
       if (this.health.aiConfigured && this.health.ragflowConfigured && this.health.ragflowChatReady) {
-        return `DeepSeek 与 RAGFlow 已就绪。当前接入 ${this.health.ragflowDatasetCount || 0} 个知识库数据集，知识问答走本地 TEI 检索，诊断与分析会优先引用召回证据。`;
+        const standardText = this.health.ragflowStandardConfigured ? `，标准库 ${this.health.ragflowStandardDatasetCount || 0} 个数据集已接入` : '';
+        return `DeepSeek 与 RAGFlow 已就绪。当前场景库 ${this.health.ragflowDatasetCount || 0} 个数据集${standardText}，知识问答会按问题类型选择知识源。`;
       }
       if (this.health.aiConfigured) {
-        return 'DeepSeek 已就绪。当前知识检索若未完全接入 RAGFlow，会自动回退到本地知识兜底，不影响主流程演示。';
+        return 'DeepSeek 已就绪，但 RAGFlow 知识库尚未完整接通。';
       }
       return '当前环境尚未配置 DeepSeek API Key，点击后会自动使用模板兜底，不会影响主流程。';
     },
     ragflowStatusText() {
       if (this.health.ragflowConfigured && this.health.ragflowChatReady) {
-        return `RAGFlow 知识问答已就绪 · ${this.health.ragflowDatasetCount || 0} 个数据集`;
+        const standardText = this.health.ragflowStandardConfigured
+          ? ` · 标准库 ${this.health.ragflowStandardDatasetCount || 0} 个`
+          : '';
+        return `RAGFlow 知识问答已就绪 · 场景库 ${this.health.ragflowDatasetCount || 0} 个${standardText}`;
       }
       if (this.health.ragflowConfigured) {
         return `RAGFlow 检索已配置 · 会话待就绪`;
@@ -529,7 +537,8 @@ createApp({
       return this.assistantSubmoduleConfig().welcomeDesc;
     },
     assistantKnowledgeStatusText() {
-      return this.health.ragflowChatReady ? '知识库可用' : '知识库待配置';
+      if (this.health.ragflowChatReady && this.health.ragflowStandardConfigured) return '场景库 + 标准库可用';
+      return this.health.ragflowChatReady ? '场景知识库可用' : '知识库待配置';
     },
     currentAssistantContextText() {
       if (this.assistantSubmodule === 'diagnosis') {
@@ -1729,7 +1738,9 @@ createApp({
         this.health.aiModelReady = !!data.ai_provider?.model;
         this.health.ragflowConfigured = !!data.ragflow?.configured;
         this.health.ragflowEnabled = !!data.ragflow?.enabled;
-        this.health.ragflowDatasetCount = data.ragflow?.dataset_count ?? 0;
+        this.health.ragflowDatasetCount = data.ragflow?.scene_dataset_count ?? data.ragflow?.dataset_count ?? 0;
+        this.health.ragflowStandardDatasetCount = data.ragflow?.standard_dataset_count ?? 0;
+        this.health.ragflowStandardConfigured = !!data.ragflow?.standard_configured;
         this.health.ragflowChatReady = !!(data.ragflow?.chat_ready ?? data.ragflow?.assistant_ready);
         this.health.ragflowChatId = data.ragflow?.chat_id || '';
       } catch (err) {
@@ -1741,6 +1752,8 @@ createApp({
         this.health.ragflowConfigured = false;
         this.health.ragflowEnabled = false;
         this.health.ragflowDatasetCount = 0;
+        this.health.ragflowStandardDatasetCount = 0;
+        this.health.ragflowStandardConfigured = false;
         this.health.ragflowChatReady = false;
         this.health.ragflowChatId = '';
       }

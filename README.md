@@ -5,6 +5,35 @@ A8 建筑能源智能管理系统：
 - 后端：Python 轻量 API + 规则异常检测 + 闭环处理状态机
 - 数据：BDG2 电力时序 + 司空知识条目
 
+## 双知识源约定
+
+当前项目知识问答固定分为两套知识源：
+
+- `sikong`：场景运维库
+  - 用于建筑场景、设备常识、运维经验、排查建议类问答
+  - 上传包目录：`docs/ragflow/sikong-kb-pack/`
+- `standard-kb`：标准规范库
+  - 用于规范要求、定额标准、术语定义、合规依据类问答
+  - 上传包目录：`docs/ragflow/standard-kb-pack/`
+
+标准规范库首批纳入清单：
+
+- `GB 50365-2019 空调通风系统运行管理标准`
+- `GB 50736-2012 民用建筑供暖通风与空气调节设计规范`
+- `GB 51348-2019 民用建筑电气设计标准`
+- `GB/T 34913-2017 民用建筑能耗分类及表示方法`
+- `GB 55015-2021 建筑节能与可再生能源利用通用规范`
+- `GB/T 51140-2015 建筑节能基本术语标准`
+- `GB/T 40571-2021 智能服务 预测性维护 通用要求`
+- `DB37T 2671-2019 教育机构能源消耗定额标准`
+- `DB37 T 5197-2021 公共建筑节能监测系统技术标准`
+
+本轮明确排除：
+
+- 热泵彩页
+- 泵产品样本 PDF
+- PNG 图片资料
+
 ## BDG2 展示建筑决策
 
 当前项目的建筑展示策略固定为“前台少量代表建筑展示 + 后台全量同类样本对标”。
@@ -85,6 +114,7 @@ python backend/server.py
 ```powershell
 python scripts/run_backend_tests.py
 python scripts/smoke_test_api.py
+python scripts/prepare_standard_kb.py
 npm run test:e2e
 npm run test:acceptance
 npm run test:all
@@ -102,6 +132,7 @@ $env:OPENAI_MODEL="deepseek-chat"
 $env:OPENAI_API_KEY="你的Key"
 $env:OPENAI_TIMEOUT_SEC="20"
 $env:OPENAI_MAX_RETRIES="2"
+$env:RAGFLOW_STANDARD_DATASET_IDS="标准规范库dataset id，多个用逗号分隔"
 ```
 
 `POST /api/ai/diagnose` / `POST /api/ai/analyze` 的 `provider` 参数行为：

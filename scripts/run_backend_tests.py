@@ -19,8 +19,10 @@ TESTS = [
     "backend.tests.test_repository.RepositoryTests.test_export_csv_and_health",
     "backend.tests.test_repository.RepositoryTests.test_ai_evaluate_and_feedback",
     "backend.tests.test_repository.RepositoryTests.test_clean_ragflow_answer_text_removes_inline_citations",
+    "backend.tests.test_repository.RepositoryTests.test_knowledge_route_for_question_distinguishes_standard_and_scene",
     "backend.tests.test_repository.RepositoryTests.test_merge_ragflow_stream_text_supports_incremental_and_cumulative_chunks",
-    "backend.tests.test_repository.RepositoryTests.test_ragflow_chat_stream_events_keeps_full_answer_when_final_chunk_is_empty",
+    "backend.tests.test_repository.RepositoryTests.test_ragflow_chat_proxy_supports_standard_route",
+    "backend.tests.test_repository.RepositoryTests.test_ragflow_chat_stream_events_streams_llm_answer",
 ]
 
 def _safe_print(text: str) -> None:

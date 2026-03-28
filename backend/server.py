@@ -53,6 +53,7 @@ SEVERITY_SCORE = {"low": 1, "medium": 2, "high": 3}
 SUPPORTED_ANALYSIS_METRICS = {"electricity"}
 RAGFLOW_DEFAULT_BASE_URL = "http://127.0.0.1:8088/api/v1"
 RAGFLOW_DEFAULT_DATASET_IDS = ""
+RAGFLOW_DEFAULT_STANDARD_DATASET_IDS = ""
 RAGFLOW_DEFAULT_CHAT_ID = ""
 RAGFLOW_DEFAULT_TOP_K = 6
 RAGFLOW_DEFAULT_SIMILARITY_THRESHOLD = 0.2
@@ -78,6 +79,44 @@ PEER_CATEGORY_LABELS = {
     "gymnasium": "体育馆",
     "canteen": "食堂",
 }
+
+STANDARD_QUERY_KEYWORDS = (
+    "标准",
+    "规范",
+    "定额",
+    "术语",
+    "条文",
+    "国标",
+    "地标",
+    "行标",
+    "通用规范",
+    "设计规范",
+    "运行管理标准",
+    "能耗定额",
+    "依据",
+    "要求",
+    "是否符合",
+    "是否合规",
+)
+
+SCENE_QUERY_KEYWORDS = (
+    "排查",
+    "运维",
+    "怎么做",
+    "怎么办",
+    "建议",
+    "原因",
+    "为什么",
+    "处理",
+    "巡检",
+    "故障",
+    "异常",
+    "诊断",
+    "优化",
+    "策略",
+    "怎么排查",
+    "优先检查",
+)
 
 STATUS_NEW = "new"
 STATUS_ACK = "acknowledged"
@@ -713,6 +752,8 @@ class EnergyRepository:
         base_url = (os.getenv("RAGFLOW_BASE_URL", RAGFLOW_DEFAULT_BASE_URL).strip() or RAGFLOW_DEFAULT_BASE_URL).rstrip("/")
         dataset_ids_raw = os.getenv("RAGFLOW_DATASET_IDS", RAGFLOW_DEFAULT_DATASET_IDS).strip() or RAGFLOW_DEFAULT_DATASET_IDS
         dataset_ids = [item.strip() for item in dataset_ids_raw.split(",") if item.strip()]
+        standard_dataset_ids_raw = os.getenv("RAGFLOW_STANDARD_DATASET_IDS", RAGFLOW_DEFAULT_STANDARD_DATASET_IDS).strip() or RAGFLOW_DEFAULT_STANDARD_DATASET_IDS
+        standard_dataset_ids = [item.strip() for item in standard_dataset_ids_raw.split(",") if item.strip()]
         api_key = os.getenv("RAGFLOW_API_KEY", "").strip()
         web_base_url = (os.getenv("RAGFLOW_WEB_BASE_URL", "").strip() or infer_ragflow_web_base_url(base_url)).rstrip("/")
         chat_id = (
@@ -737,14 +778,19 @@ class EnergyRepository:
         except ValueError:
             timeout_sec = RAGFLOW_DEFAULT_TIMEOUT_SEC
 
-        enabled = bool(base_url and dataset_ids)
+        all_dataset_ids = dataset_ids + [item for item in standard_dataset_ids if item not in dataset_ids]
+        enabled = bool(base_url and all_dataset_ids)
         configured = bool(enabled and api_key)
-        chat_ready = bool(configured and chat_id)
+        chat_ready = bool(configured and all_dataset_ids)
         return {
             "base_url": base_url,
             "web_base_url": web_base_url,
             "dataset_ids": dataset_ids,
+            "scene_dataset_ids": dataset_ids,
+            "standard_dataset_ids": standard_dataset_ids,
             "dataset_count": len(dataset_ids),
+            "standard_dataset_count": len(standard_dataset_ids),
+            "all_dataset_count": len(all_dataset_ids),
             "api_key": api_key,
             "top_k": top_k,
             "similarity_threshold": similarity_threshold,
@@ -755,6 +801,8 @@ class EnergyRepository:
             "chat_id": chat_id,
             "chat_ready": chat_ready,
             "assistant_ready": chat_ready,
+            "standard_enabled": bool(base_url and standard_dataset_ids),
+            "standard_configured": bool(api_key and standard_dataset_ids),
         }
 
     def _sanitize_excerpt(self, value: Any, limit: int = 220) -> str:
@@ -818,6 +866,86 @@ class EnergyRepository:
             "source_type": source_type,
             "similarity": round(float(similarity), 4) if similarity is not None else None,
         }
+
+    def _knowledge_route_for_question(self, question: str) -> str:
+        text = str(question or "").strip().lower()
+        if not text:
+            return "scene"
+        standard_hits = sum(1 for token in STANDARD_QUERY_KEYWORDS if token.lower() in text)
+        scene_hits = sum(1 for token in SCENE_QUERY_KEYWORDS if token.lower() in text)
+        if standard_hits and scene_hits:
+            return "mixed"
+        if standard_hits:
+            return "standard"
+        return "scene"
+
+    def _ragflow_dataset_route(self, question: str) -> tuple[str, list[str]]:
+        settings = self._ragflow_settings()
+        scene_ids = list(settings.get("scene_dataset_ids") or [])
+        standard_ids = list(settings.get("standard_dataset_ids") or [])
+        route = self._knowledge_route_for_question(question)
+        if route == "standard":
+            return ("standard", standard_ids or scene_ids)
+        if route == "mixed":
+            merged = scene_ids + [item for item in standard_ids if item not in scene_ids]
+            return ("mixed", merged or scene_ids)
+        return ("scene", scene_ids)
+
+    def _ragflow_source_type_for_dataset(self, dataset_id: str, settings: dict[str, Any]) -> str:
+        if dataset_id and dataset_id in set(settings.get("standard_dataset_ids") or []):
+            return "standard"
+        return "ragflow"
+
+    def _llm_settings(self) -> dict[str, Any]:
+        api_key = os.getenv("OPENAI_API_KEY", "").strip()
+        base_url = os.getenv("OPENAI_BASE_URL", "https://api.deepseek.com").strip() or "https://api.deepseek.com"
+        model = os.getenv("OPENAI_MODEL", "deepseek-chat").strip() or "deepseek-chat"
+        try:
+            timeout_sec = float(os.getenv("OPENAI_TIMEOUT_SEC", "20"))
+        except ValueError:
+            timeout_sec = 20.0
+        return {
+            "configured": bool(api_key),
+            "api_key": api_key,
+            "base_url": base_url,
+            "model": model,
+            "timeout_sec": timeout_sec,
+        }
+
+    def _knowledge_prompt_messages(self, question: str, references: list[dict[str, Any]], route: str) -> list[dict[str, str]]:
+        evidence_lines: list[str] = []
+        for idx, item in enumerate(references, start=1):
+            title = str(item.get("title", "")).strip() or f"参考资料{idx}"
+            source_type = "标准规范" if str(item.get("source_type", "")) == "standard" else "场景知识"
+            section = str(item.get("section", "")).strip()
+            excerpt = str(item.get("excerpt", "")).strip()
+            evidence_lines.append(f"[{idx}] 来源类型：{source_type}")
+            evidence_lines.append(f"[{idx}] 文档：{title}")
+            if section:
+                evidence_lines.append(f"[{idx}] 位置：{section}")
+            evidence_lines.append(f"[{idx}] 摘录：{excerpt}")
+        scope_hint = {
+            "standard": "请优先给出规范依据、定额要求、标准术语或合规判断。",
+            "scene": "请优先给出适合建筑运维场景的直接回答。",
+            "mixed": "请先说明标准依据，再补充运维场景下的实际做法。",
+        }.get(route, "请结合召回资料直接回答。")
+        system_prompt = (
+            "你是建筑能源与运维知识助手。请严格基于给定资料作答，不要编造未提供的标准条文。"
+            "如果资料不足，请明确说明“当前检索到的资料不足以确认”。"
+            "引用资料时用[1][2]这种编号内联引用，正文后不要额外输出参考文献列表。"
+            "回答使用中文，优先给出简洁结论，再补充必要依据。"
+        )
+        user_prompt = (
+            f"用户问题：{question}\n"
+            f"{scope_hint}\n\n"
+            "已检索资料如下：\n"
+            f"{chr(10).join(evidence_lines)}\n\n"
+            "请输出可直接展示的中文答案。"
+        )
+        return [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
 
     def _parse_ragflow_stream_payload(self, raw_text: str) -> list[dict[str, Any]]:
         events: list[dict[str, Any]] = []
@@ -955,9 +1083,16 @@ class EnergyRepository:
             "message_id": str(latest.get("id", "")).strip(),
         }
 
-    def _retrieve_ragflow_knowledge(self, query_text: str, limit: int = 3) -> dict[str, Any]:
+    def _retrieve_ragflow_knowledge(
+        self,
+        query_text: str,
+        limit: int = 3,
+        *,
+        dataset_ids: list[str] | None = None,
+    ) -> dict[str, Any]:
         settings = self._ragflow_settings()
-        if not settings["configured"]:
+        active_dataset_ids = list(dataset_ids or settings["scene_dataset_ids"] or settings["dataset_ids"] or [])
+        if not settings["configured"] or not active_dataset_ids:
             return {
                 "items": [],
                 "knowledge_source": "none",
@@ -967,7 +1102,7 @@ class EnergyRepository:
 
         body = json.dumps(
             {
-                "dataset_ids": settings["dataset_ids"],
+                "dataset_ids": active_dataset_ids,
                 "question": query_text,
                 "top_k": max(limit, settings["top_k"]),
                 "similarity_threshold": settings["similarity_threshold"],
@@ -1023,14 +1158,21 @@ class EnergyRepository:
                         title=chunk.get("document_name") or chunk.get("docnm_kwd") or chunk.get("document_id") or "RAGFlow 片段",
                         section=section or chunk.get("dataset_id") or "",
                         excerpt=chunk.get("content_with_weight") or chunk.get("content") or chunk.get("text") or "",
-                        source_type="ragflow",
+                        source_type=self._ragflow_source_type_for_dataset(str(chunk.get("dataset_id") or ""), settings),
                     )
                 )
 
         if items:
+            source_types = {str(item.get("source_type", "")) for item in items}
+            if source_types == {"standard"}:
+                knowledge_source = "standard"
+            elif "standard" in source_types and "ragflow" in source_types:
+                knowledge_source = "mixed"
+            else:
+                knowledge_source = "ragflow"
             return {
                 "items": items,
-                "knowledge_source": "ragflow",
+                "knowledge_source": knowledge_source,
                 "retrieval_hit_count": len(items),
                 "retrieval_error_type": "",
                 "ragflow_session_id": "",
@@ -1044,6 +1186,76 @@ class EnergyRepository:
             "ragflow_session_id": "",
         }
 
+    def _answer_knowledge_question(
+        self,
+        question: str,
+        *,
+        limit: int = 6,
+        stream: bool = False,
+        session_id: str | None = None,
+    ):
+        llm_settings = self._llm_settings()
+        if not llm_settings["configured"]:
+            raise RuntimeError("DeepSeek not configured for knowledge answer generation")
+
+        route, dataset_ids = self._ragflow_dataset_route(question)
+        retrieval = self._retrieve_ragflow_knowledge(question, limit=limit, dataset_ids=dataset_ids)
+        references = list(retrieval.get("items") or [])
+        if not references:
+            raise RuntimeError("未从知识库检索到可用资料")
+
+        messages = self._knowledge_prompt_messages(question, references, route)
+        llm_provider = self.providers.get("llm")
+        if not isinstance(llm_provider, LLMDiagnoseProvider):
+            raise RuntimeError("LLM provider unavailable")
+
+        session_id = str(session_id or "").strip() or f"kb-{uuid.uuid4().hex[:12]}"
+        started = time.perf_counter()
+        if stream:
+            token_iter = llm_provider._call_chat_completion_stream(
+                base_url=llm_settings["base_url"],
+                api_key=llm_settings["api_key"],
+                model=llm_settings["model"],
+                timeout_sec=llm_settings["timeout_sec"],
+                messages=messages,
+            )
+            return {
+                "mode": "stream",
+                "route": route,
+                "references": references,
+                "session_id": session_id,
+                "latency_ms": lambda: int((time.perf_counter() - started) * 1000),
+                "token_iter": token_iter,
+                "knowledge_source": retrieval.get("knowledge_source", "ragflow"),
+            }
+
+        response = llm_provider._call_chat_completion(
+            base_url=llm_settings["base_url"],
+            api_key=llm_settings["api_key"],
+            model=llm_settings["model"],
+            timeout_sec=llm_settings["timeout_sec"],
+            messages=messages,
+            max_tokens=900,
+        )
+        choices = response.get("choices", [])
+        if not choices:
+            raise RuntimeError("knowledge answer missing choices")
+        content = choices[0].get("message", {}).get("content", "")
+        if isinstance(content, list):
+            content = "".join(
+                str(part.get("text", "")) if isinstance(part, dict) else str(part)
+                for part in content
+            )
+        return {
+            "mode": "sync",
+            "route": route,
+            "answer": self._clean_ragflow_answer_text(content),
+            "references": references,
+            "session_id": session_id,
+            "latency_ms": int((time.perf_counter() - started) * 1000),
+            "knowledge_source": retrieval.get("knowledge_source", "ragflow"),
+        }
+
     def ask_ragflow_chat(self, payload: dict[str, Any]) -> dict[str, Any]:
         question = str(payload.get("question", "")).strip()
         if not question:
@@ -1051,19 +1263,16 @@ class EnergyRepository:
 
         _sid = payload.get("session_id")
         session_id = str(_sid).strip() if _sid and str(_sid).strip() not in ("None", "null") else None
-        started = time.perf_counter()
-        result = self._ragflow_chat_completion(question, session_id=session_id)
-        latency_ms = int((time.perf_counter() - started) * 1000)
-        references = self._normalize_ragflow_reference(result.get("reference"), limit=6)
+        result = self._answer_knowledge_question(question, limit=6, stream=False, session_id=session_id)
         return {
             "answer": str(result.get("answer", "")).strip(),
             "session_id": str(result.get("session_id", "")).strip(),
-            "message_id": str(result.get("message_id", "")).strip(),
+            "message_id": "",
             "chat_id": self._ragflow_settings().get("chat_id", ""),
-            "references": references,
-            "knowledge_source": "ragflow",
+            "references": result.get("references", []),
+            "knowledge_source": result.get("knowledge_source", "ragflow"),
             "provider": "ragflow_chat",
-            "latency_ms": latency_ms,
+            "latency_ms": result.get("latency_ms", 0),
         }
 
     def ragflow_chat_stream_events(self, payload: dict[str, Any]):
@@ -1072,65 +1281,34 @@ class EnergyRepository:
         if not question:
             yield "error", {"message": "question is required"}
             return
-        _sid = payload.get("session_id")
-        session_id = str(_sid).strip() if _sid and str(_sid).strip() not in ("None", "null") else None
-        settings = self._ragflow_settings()
-        if not settings["chat_ready"]:
-            yield "error", {"message": "RAGFlow chat not configured"}
-            return
         try:
-            ensured_session_id = self._ensure_ragflow_session(session_id)
+            _sid = payload.get("session_id")
+            session_id = str(_sid).strip() if _sid and str(_sid).strip() not in ("None", "null") else None
+            stream_result = self._answer_knowledge_question(question, limit=6, stream=True, session_id=session_id)
         except Exception as exc:
-            yield "error", {"message": f"session error: {exc}"}
+            yield "error", {"message": str(exc)}
             return
-        yield "start", {"session_id": ensured_session_id}
-        body = json.dumps({"question": question, "stream": True, "session_id": ensured_session_id}).encode("utf-8")
-        req = Request(
-            f"{settings['base_url']}/chats/{settings['chat_id']}/completions",
-            data=body,
-            method="POST",
-            headers=self._ragflow_headers(),
-        )
+        yield "start", {"session_id": stream_result["session_id"]}
         full_answer = ""
-        references: list[dict[str, str]] = []
-        message_id = ""
         try:
-            with urlopen(req, timeout=settings["timeout_sec"]) as resp:
-                for raw_line in resp:
-                    line = raw_line.decode("utf-8").strip()
-                    if not line.startswith("data:"):
-                        continue
-                    try:
-                        chunk = json.loads(line[5:].strip())
-                    except json.JSONDecodeError:
-                        continue
-                    data = chunk.get("data") or {}
-                    if not isinstance(data, dict):
-                        continue
-                    answer = str(data.get("answer") or "")
-                    final = bool(data.get("final", False))
-                    message_id = str(data.get("id") or message_id)
-                    full_answer, delta = self._merge_ragflow_stream_text(full_answer, answer)
-                    cleaned_delta = self._clean_ragflow_answer_text(delta)
-                    if cleaned_delta:
-                        yield "token", {"text": cleaned_delta}
-                    if final:
-                        ref = data.get("reference") if isinstance(data.get("reference"), dict) else {}
-                        references = self._normalize_ragflow_reference(ref, limit=6)
-                        break
+            for token in stream_result["token_iter"]:
+                full_answer, delta = self._merge_ragflow_stream_text(full_answer, token)
+                cleaned_delta = self._clean_ragflow_answer_text(delta)
+                if cleaned_delta:
+                    yield "token", {"text": cleaned_delta}
         except (URLError, TimeoutError, socket.timeout) as exc:
-            yield "error", {"message": f"RAGFlow timeout: {exc}"}
+            yield "error", {"message": f"DeepSeek timeout: {exc}"}
             return
         except Exception as exc:
             yield "error", {"message": str(exc)}
             return
         yield "done", {
             "answer": self._clean_ragflow_answer_text(full_answer),
-            "session_id": ensured_session_id,
-            "message_id": message_id,
-            "chat_id": settings.get("chat_id", ""),
-            "references": references,
-            "knowledge_source": "ragflow",
+            "session_id": stream_result["session_id"],
+            "message_id": "",
+            "chat_id": self._ragflow_settings().get("chat_id", ""),
+            "references": stream_result["references"],
+            "knowledge_source": stream_result.get("knowledge_source", "ragflow"),
         }
 
     def _build_diagnose_knowledge_query(
@@ -1689,6 +1867,10 @@ class EnergyRepository:
                 "base_url": ragflow["base_url"],
                 "web_base_url": ragflow["web_base_url"],
                 "dataset_count": ragflow["dataset_count"],
+                "scene_dataset_count": ragflow["dataset_count"],
+                "standard_dataset_count": ragflow["standard_dataset_count"],
+                "standard_configured": ragflow["standard_configured"],
+                "standard_enabled": ragflow["standard_enabled"],
                 "enabled": ragflow["enabled"],
                 "chat_ready": ragflow["chat_ready"],
                 "chat_id": ragflow["chat_id"],

@@ -269,35 +269,43 @@ class RepositoryTests(unittest.TestCase):
         self.assertEqual(diagnosis["retrieval_error_type"], "empty_result")
         self.assertEqual(diagnosis["evidence"][0]["source_type"], "local_knowledge")
 
-    def test_ragflow_chat_proxy_normalizes_response(self):
-        fake_result = {
-            "answer": "这是来自 RAGFlow 的知识回答。[ID:2]",
-            "session_id": "rag-session-1",
-            "message_id": "msg-1",
-            "reference": {
-                "chunks": [
-                    {
-                        "id": "chunk-1",
-                        "document_name": "03-校园与教育建筑运维场景.md",
-                        "content": "教学楼高温时段应优先核查空调与通风排程。",
-                        "similarity": 0.91,
-                    }
-                ]
-            },
-        }
-        with mock.patch.object(REPO, "_ragflow_chat_completion", return_value=fake_result):
-            result = REPO.ask_ragflow_chat({"question": "教学楼夏季白天空调用电偏高怎么办？"})
+    def test_ragflow_chat_proxy_supports_standard_route(self):
+        ragflow_items = [
+            {
+                "chunk_id": "std-1",
+                "title": "DB37T 2671-2019 教育机构能源消耗定额标准",
+                "section": "4 总则",
+                "excerpt": "教育机构能源消耗定额应按分类和统计周期管理。",
+                "source_type": "standard",
+            }
+        ]
+        fake_response = {"choices": [{"message": {"content": "教育机构能耗定额应按分类和统计周期管理。[1]"}}]}
+        with mock.patch.dict("os.environ", {"OPENAI_API_KEY": "dummy-key"}, clear=False):
+            with mock.patch.object(REPO, "_retrieve_ragflow_knowledge", return_value={
+                "items": ragflow_items,
+                "knowledge_source": "standard",
+                "retrieval_hit_count": 1,
+                "retrieval_error_type": "",
+            }):
+                with mock.patch("backend.server.uuid.uuid4", return_value=type("FakeUuid", (), {"hex": "abc123def456"})()):
+                    with mock.patch("backend.server.LLMDiagnoseProvider._call_chat_completion", return_value=fake_response):
+                        result = REPO.ask_ragflow_chat({"question": "教育机构能耗定额标准是什么？"})
 
         self.assertEqual(result["provider"], "ragflow_chat")
-        self.assertEqual(result["session_id"], "rag-session-1")
-        self.assertEqual(result["knowledge_source"], "ragflow")
-        self.assertEqual(result["answer"], "这是来自 RAGFlow 的知识回答。")
-        self.assertEqual(result["references"][0]["source_type"], "ragflow")
-        self.assertIn("校园与教育建筑", result["references"][0]["title"])
+        self.assertEqual(result["session_id"], "kb-abc123def456")
+        self.assertEqual(result["knowledge_source"], "standard")
+        self.assertEqual(result["answer"], "教育机构能耗定额应按分类和统计周期管理。")
+        self.assertEqual(result["references"][0]["source_type"], "standard")
+        self.assertIn("教育机构能源消耗定额标准", result["references"][0]["title"])
 
     def test_clean_ragflow_answer_text_removes_inline_citations(self):
         cleaned = REPO._clean_ragflow_answer_text("建议先核查空调排程[ID:3][ID:0][1]。\n\n")
         self.assertEqual(cleaned, "建议先核查空调排程。")
+
+    def test_knowledge_route_for_question_distinguishes_standard_and_scene(self):
+        self.assertEqual(REPO._knowledge_route_for_question("教育机构能耗定额标准是什么？"), "standard")
+        self.assertEqual(REPO._knowledge_route_for_question("教学楼夜间负荷偏高一般先排查什么？"), "scene")
+        self.assertEqual(REPO._knowledge_route_for_question("公共建筑节能监测系统有哪些要求，实际运维该怎么做？"), "mixed")
 
     def test_merge_ragflow_stream_text_supports_incremental_and_cumulative_chunks(self):
         full_text = ""
@@ -313,48 +321,33 @@ class RepositoryTests(unittest.TestCase):
         self.assertEqual(full_text, "第一段第二段第三段")
         self.assertEqual(delta, "第三段")
 
-    def test_ragflow_chat_stream_events_keeps_full_answer_when_final_chunk_is_empty(self):
-        chunks = iter(
-            [
-                'data:{"code":0,"data":{"answer":"建议先核查空调排程[ID:3]","reference":{"chunks":[]},"final":false,"id":"msg-1","session_id":"sid-1"}}\n'.encode("utf-8"),
-                b"\n",
-                'data:{"code":0,"data":{"answer":"，再检查新风联动。","reference":{"chunks":[]},"final":false,"id":"msg-1","session_id":"sid-1"}}\n'.encode("utf-8"),
-                b"\n",
-                'data:{"code":0,"data":{"answer":"","reference":{"chunks":[{"id":"chunk-1","document_name":"03-校园与教育建筑运维场景.md","content":"教学楼高温时段应优先核查空调与通风排程。","similarity":0.91}]},"final":true,"id":"msg-1","session_id":"sid-1"}}\n'.encode("utf-8"),
-                b"\n",
-            ]
-        )
-
-        class FakeResponse:
-            def __enter__(self_inner):
-                return self_inner
-
-            def __exit__(self_inner, exc_type, exc, tb):
-                return False
-
-            def __iter__(self_inner):
-                return chunks
-
-        with mock.patch.object(REPO, "_ensure_ragflow_session", return_value="sid-1"):
-            with mock.patch.object(
-                REPO,
-                "_ragflow_settings",
-                return_value={
-                    "base_url": "http://127.0.0.1:8088/api/v1",
-                    "chat_id": "chat-1",
-                    "timeout_sec": 12,
-                    "chat_ready": True,
-                    "api_key": "dummy",
-                },
-            ):
-                with mock.patch("backend.server.urlopen", return_value=FakeResponse()):
-                    events = list(REPO.ragflow_chat_stream_events({"question": "怎么处理当前高负荷？"}))
+    def test_ragflow_chat_stream_events_streams_llm_answer(self):
+        ragflow_items = [
+            {
+                "chunk_id": "std-1",
+                "title": "GB 50365-2019 空调通风系统运行管理标准",
+                "section": "5.1",
+                "excerpt": "运行管理应结合设备状态和监测数据开展。",
+                "source_type": "standard",
+            }
+        ]
+        token_iter = iter(["建议先核查运行管理制度[1]", "，再结合监测数据复核设备状态。"])
+        with mock.patch.dict("os.environ", {"OPENAI_API_KEY": "dummy-key"}, clear=False):
+            with mock.patch.object(REPO, "_retrieve_ragflow_knowledge", return_value={
+                "items": ragflow_items,
+                "knowledge_source": "standard",
+                "retrieval_hit_count": 1,
+                "retrieval_error_type": "",
+            }):
+                with mock.patch("backend.server.uuid.uuid4", return_value=type("FakeUuid", (), {"hex": "streamabcdef0"})()):
+                    with mock.patch("backend.server.LLMDiagnoseProvider._call_chat_completion_stream", return_value=token_iter):
+                        events = list(REPO.ragflow_chat_stream_events({"question": "空调通风系统运行管理有哪些要求？"}))
 
         self.assertEqual([name for name, _ in events], ["start", "token", "token", "done"])
-        self.assertEqual(events[1][1]["text"], "建议先核查空调排程")
-        self.assertEqual(events[2][1]["text"], "，再检查新风联动。")
-        self.assertEqual(events[3][1]["answer"], "建议先核查空调排程，再检查新风联动。")
-        self.assertEqual(events[3][1]["references"][0]["source_type"], "ragflow")
+        self.assertEqual(events[1][1]["text"], "建议先核查运行管理制度")
+        self.assertEqual(events[2][1]["text"], "，再结合监测数据复核设备状态。")
+        self.assertEqual(events[3][1]["answer"], "建议先核查运行管理制度，再结合监测数据复核设备状态。")
+        self.assertEqual(events[3][1]["references"][0]["source_type"], "standard")
 
     def test_ai_stats_shape(self):
         aid = self._first_anomaly_id()
@@ -390,6 +383,7 @@ class RepositoryTests(unittest.TestCase):
             {
                 "RAGFLOW_BASE_URL": "http://127.0.0.1:8088/api/v1",
                 "RAGFLOW_DATASET_IDS": "dataset-a,dataset-b",
+                "RAGFLOW_STANDARD_DATASET_IDS": "dataset-std-1,dataset-std-2",
                 "RAGFLOW_API_KEY": "rag-key",
                 "RAGFLOW_CHAT_ID": "chat-1",
             },
@@ -401,6 +395,8 @@ class RepositoryTests(unittest.TestCase):
         self.assertIn("ragflow", health)
         self.assertTrue(health["ragflow"]["configured"])
         self.assertEqual(health["ragflow"]["dataset_count"], 2)
+        self.assertEqual(health["ragflow"]["standard_dataset_count"], 2)
+        self.assertTrue(health["ragflow"]["standard_configured"])
         self.assertTrue(health["ragflow"]["chat_ready"])
         self.assertEqual(health["ragflow"]["chat_id"], "chat-1")
 
