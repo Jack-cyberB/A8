@@ -270,34 +270,40 @@ class RepositoryTests(unittest.TestCase):
         self.assertEqual(diagnosis["retrieval_error_type"], "empty_result")
         self.assertEqual(diagnosis["evidence"][0]["source_type"], "local_knowledge")
 
-    def test_ragflow_chat_proxy_supports_standard_route(self):
-        ragflow_items = [
-            {
-                "chunk_id": "std-1",
-                "title": "DB37T 2671-2019 教育机构能源消耗定额标准",
-                "section": "4 总则",
-                "excerpt": "教育机构能源消耗定额应按分类和统计周期管理。",
-                "source_type": "standard",
-            }
-        ]
-        fake_response = {"choices": [{"message": {"content": "教育机构能耗定额应按分类和统计周期管理。[1]"}}]}
-        with mock.patch.dict("os.environ", {"OPENAI_API_KEY": "dummy-key"}, clear=False):
-            with mock.patch.object(REPO, "_retrieve_ragflow_knowledge", return_value={
-                "items": ragflow_items,
-                "knowledge_source": "standard",
-                "retrieval_hit_count": 1,
-                "retrieval_error_type": "",
-            }):
-                with mock.patch("backend.server.uuid.uuid4", return_value=type("FakeUuid", (), {"hex": "abc123def456"})()):
-                    with mock.patch("backend.server.LLMDiagnoseProvider._call_chat_completion", return_value=fake_response):
-                        result = REPO.ask_ragflow_chat({"question": "教育机构能耗定额标准是什么？"})
+    def test_ragflow_chat_proxy_uses_native_chat_completion(self):
+        native_result = {
+            "answer": "结论：[ID:3]教育机构能耗定额应按分类和统计周期管理。",
+            "reference": {
+                "chunks": [
+                    {
+                        "id": "std-ref-1",
+                        "dataset_id": "dataset-std-1",
+                        "document_name": "DB37T 2671-2019 教育机构能源消耗定额标准.md",
+                        "content": "教育机构能源消耗定额应按分类和统计周期管理。",
+                        "similarity": 0.9132,
+                    }
+                ]
+            },
+            "session_id": "ragflow-session-1",
+            "message_id": "ragflow-message-1",
+            "latency_ms": 420,
+        }
+        with mock.patch.object(REPO, "_answer_knowledge_question", side_effect=AssertionError("should not use DeepSeek rewrite path")):
+            with mock.patch.object(REPO, "_ragflow_chat_completion", return_value=native_result):
+                with mock.patch.object(
+                    REPO,
+                    "_ragflow_settings",
+                    return_value={"chat_id": "chat-native-1", "standard_dataset_ids": ["dataset-std-1"]},
+                ):
+                    result = REPO.ask_ragflow_chat({"question": "教育机构能耗定额标准是什么？"})
 
         self.assertEqual(result["provider"], "ragflow_chat")
-        self.assertEqual(result["session_id"], "kb-abc123def456")
+        self.assertEqual(result["session_id"], "ragflow-session-1")
+        self.assertEqual(result["message_id"], "ragflow-message-1")
         self.assertEqual(result["knowledge_source"], "standard")
-        self.assertEqual(result["answer"], "教育机构能耗定额应按分类和统计周期管理。")
+        self.assertEqual(result["answer"], "结论：[ID:3]教育机构能耗定额应按分类和统计周期管理。")
         self.assertEqual(result["references"][0]["source_type"], "standard")
-        self.assertIn("教育机构能源消耗定额标准", result["references"][0]["title"])
+        self.assertEqual(result["references"][0]["title"], "DB37T 2671-2019 教育机构能源消耗定额标准")
 
     def test_clean_ragflow_answer_text_removes_inline_citations(self):
         cleaned = REPO._clean_ragflow_answer_text("建议先核查空调排程[ID:3][ID:0][1]。\n\n")
@@ -398,32 +404,60 @@ class RepositoryTests(unittest.TestCase):
         self.assertEqual(full_text, "第一段第二段第三段")
         self.assertEqual(delta, "第三段")
 
-    def test_ragflow_chat_stream_events_streams_llm_answer(self):
-        ragflow_items = [
-            {
-                "chunk_id": "std-1",
-                "title": "GB 50365-2019 空调通风系统运行管理标准",
-                "section": "5.1",
-                "excerpt": "运行管理应结合设备状态和监测数据开展。",
-                "source_type": "standard",
-            }
-        ]
-        token_iter = iter(["建议先核查运行管理制度[1]", "，再结合监测数据复核设备状态。"])
-        with mock.patch.dict("os.environ", {"OPENAI_API_KEY": "dummy-key"}, clear=False):
-            with mock.patch.object(REPO, "_retrieve_ragflow_knowledge", return_value={
-                "items": ragflow_items,
-                "knowledge_source": "standard",
-                "retrieval_hit_count": 1,
-                "retrieval_error_type": "",
-            }):
-                with mock.patch("backend.server.uuid.uuid4", return_value=type("FakeUuid", (), {"hex": "streamabcdef0"})()):
-                    with mock.patch("backend.server.LLMDiagnoseProvider._call_chat_completion_stream", return_value=token_iter):
-                        events = list(REPO.ragflow_chat_stream_events({"question": "空调通风系统运行管理有哪些要求？"}))
+    def test_ragflow_chat_stream_events_use_native_stream_and_preserve_full_answer(self):
+        event_iter = iter(
+            [
+                {
+                    "answer": "结论：[ID:3]先核查运行管理制度",
+                    "reference": {"chunks": []},
+                    "final": False,
+                    "id": "msg-stream-1",
+                    "session_id": "stream-session-1",
+                },
+                {
+                    "answer": "结论：[ID:3]先核查运行管理制度，再结合监测数据复核设备状态。",
+                    "reference": {"chunks": []},
+                    "final": False,
+                    "id": "msg-stream-1",
+                    "session_id": "stream-session-1",
+                },
+                {
+                    "answer": "",
+                    "reference": {
+                        "chunks": [
+                            {
+                                "id": "std-ref-1",
+                                "dataset_id": "dataset-std-1",
+                                "document_name": "GB 50365-2019 空调通风系统运行管理标准.md",
+                                "content": "运行管理应结合设备状态和监测数据开展。",
+                                "similarity": 0.8765,
+                            }
+                        ]
+                    },
+                    "final": True,
+                    "id": "msg-stream-1",
+                    "session_id": "stream-session-1",
+                },
+            ]
+        )
+        with mock.patch.object(REPO, "_answer_knowledge_question", side_effect=AssertionError("should not use DeepSeek rewrite path")):
+            with mock.patch.object(
+                REPO,
+                "_ragflow_chat_stream_completion",
+                return_value={"session_id": "stream-session-1", "event_iter": event_iter},
+            ):
+                with mock.patch.object(
+                    REPO,
+                    "_ragflow_settings",
+                    return_value={"chat_id": "chat-native-1", "standard_dataset_ids": ["dataset-std-1"]},
+                ):
+                    events = list(REPO.ragflow_chat_stream_events({"question": "空调通风系统运行管理有哪些要求？"}))
 
         self.assertEqual([name for name, _ in events], ["start", "token", "token", "done"])
-        self.assertEqual(events[1][1]["text"], "建议先核查运行管理制度")
+        self.assertEqual(events[1][1]["text"], "结论：[ID:3]先核查运行管理制度")
         self.assertEqual(events[2][1]["text"], "，再结合监测数据复核设备状态。")
-        self.assertEqual(events[3][1]["answer"], "建议先核查运行管理制度，再结合监测数据复核设备状态。")
+        self.assertEqual(events[3][1]["answer"], "结论：[ID:3]先核查运行管理制度，再结合监测数据复核设备状态。")
+        self.assertEqual(events[3][1]["message_id"], "msg-stream-1")
         self.assertEqual(events[3][1]["references"][0]["source_type"], "standard")
 
     def test_retrieve_ragflow_knowledge_uses_readable_title_and_similarity(self):

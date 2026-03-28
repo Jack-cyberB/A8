@@ -324,32 +324,11 @@ createApp({
     cleanRagflowAnswerText(text) {
       if (text === undefined || text === null) return '';
       return String(text)
-        .replace(/\[ID:\s*\d+\]/gi, '')
-        .replace(/\[\s*\d+\]/g, '')
-        .replace(/\[\s*ID:\s*$/gi, '')
-        .replace(/\[\s*\d+\s*$/g, '')
-        .replace(/ID:\s*\d+\s*\]/gi, '')
-        .replace(/\bID:\s*/gi, '')
-        .replace(/\bD:\s*/gi, '')
-        .replace(/\bD:\s*\d+\]/gi, '')
-        .replace(/\*\*/g, '')
-        .replace(/[\[\]]/g, '')
-        .replace(/\r/g, '')
-        .replace(/[ \t]+\n/g, '\n')
-        .replace(/\n{3,}/g, '\n\n')
-        .replace(/[ \t]{2,}/g, ' ')
-        .replace(/\s+([，。！？；：、])/g, '$1')
-        .replace(/([（【“‘])\s+/g, '$1')
-        .replace(/\s+([）】”’])/g, '$1')
-        .trim();
+        .replace(/\r\n/g, '\n')
+        .replace(/\r/g, '\n');
     },
     formatKnowledgeAnswerText(text) {
-      const clean = this.cleanRagflowAnswerText(text);
-      if (!clean) return '';
-      return clean
-        .replace(/(?:^|\n)\s*(结论|依据与分析|标准依据|优先检查|运维建议|关键要求|执行提示|说明)\s*[:：]?\s*/g, '\n')
-        .replace(/\n{3,}/g, '\n\n')
-        .trim();
+      return this.cleanRagflowAnswerText(text);
     },
     escapeHtml(text) {
       return String(text || '')
@@ -639,31 +618,6 @@ createApp({
         { label: '时间窗口', value: scopeText },
       ];
     },
-    isLikelyCompleteKnowledgeAnswer(text) {
-      return /[。！？!?；;”’】）)]$/.test(String(text || '').trim());
-    },
-    choosePreferredKnowledgeAnswer(streamedText, finalText) {
-      const streamed = this.formatKnowledgeAnswerText(streamedText);
-      const finalAnswer = this.formatKnowledgeAnswerText(finalText);
-      if (!finalAnswer) return streamed;
-      if (!streamed) return finalAnswer;
-      if (streamed === finalAnswer) return finalAnswer;
-      if (streamed.includes(finalAnswer) && finalAnswer.length < streamed.length) {
-        return streamed;
-      }
-      const lengthRatio = finalAnswer.length / Math.max(streamed.length, 1);
-      if (streamed.length >= 24 && lengthRatio < 0.72) {
-        return streamed;
-      }
-      if (
-        streamed.length > finalAnswer.length &&
-        this.isLikelyCompleteKnowledgeAnswer(streamed) &&
-        !this.isLikelyCompleteKnowledgeAnswer(finalAnswer)
-      ) {
-        return streamed;
-      }
-      return finalAnswer.length >= streamed.length - 8 ? finalAnswer : streamed;
-    },
     normalizeUnifiedKnowledgeReferences(references = []) {
       return (Array.isArray(references) ? references : []).slice(0, 6).map((item, index) => {
         const similarityValue = Number(item?.similarity);
@@ -671,7 +625,7 @@ createApp({
           id: item?.id || item?.chunk_id || `knowledge-ref-${index}`,
           chunk_id: item?.chunk_id || item?.id || `knowledge-ref-${index}`,
           title: String(item?.title || '知识片段').replace(/\.(md|markdown|txt|pdf)$/i, ''),
-          excerpt: this.cleanRagflowAnswerText(item?.excerpt || ''),
+          excerpt: String(item?.excerpt || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n').trim(),
           source_type: item?.source_type || item?.sourceType || 'ragflow',
           similarity: Number.isFinite(similarityValue) ? similarityValue : null,
           section: item?.section || '',
@@ -989,7 +943,9 @@ createApp({
               }
             } else if (em[1] === 'done') {
               const idx = this.unifiedChat.messages.findIndex(m => m.id === msgId);
-              const finalContent = this.choosePreferredKnowledgeAnswer(accumulatedRaw, ed.answer) || 'RAGFlow 已返回，但当前没有可展示的文本结果。';
+              const finalContent = this.formatKnowledgeAnswerText(
+                ed.answer !== undefined && ed.answer !== null && String(ed.answer) !== '' ? ed.answer : accumulatedRaw
+              ) || 'RAGFlow 已返回，但当前没有可展示的文本结果。';
               if (idx >= 0) {
                 const c = this.unifiedChat.messages[idx];
                 this.unifiedChat.messages.splice(idx, 1, {

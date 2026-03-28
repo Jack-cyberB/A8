@@ -824,7 +824,7 @@ class EnergyRepository:
         all_dataset_ids = dataset_ids + [item for item in standard_dataset_ids if item not in dataset_ids]
         enabled = bool(base_url and all_dataset_ids)
         configured = bool(enabled and api_key)
-        chat_ready = bool(configured and all_dataset_ids)
+        chat_ready = bool(configured and all_dataset_ids and chat_id)
         return {
             "base_url": base_url,
             "web_base_url": web_base_url,
@@ -1285,28 +1285,43 @@ class EnergyRepository:
 
     def _normalize_ragflow_reference(self, reference: dict[str, Any] | None, limit: int = 6) -> list[dict[str, str]]:
         chunks = reference.get("chunks", []) if isinstance(reference, dict) else []
+        settings = self._ragflow_settings()
         items: list[dict[str, str]] = []
         for idx, chunk in enumerate(chunks[:limit], start=1):
             if not isinstance(chunk, dict):
                 continue
             similarity = chunk.get("similarity")
+            similarity_value: float | None
+            try:
+                similarity_value = float(similarity) if similarity is not None else None
+            except (TypeError, ValueError):
+                similarity_value = None
             section = ""
-            if similarity is not None:
-                try:
-                    section = f"相似度 {float(similarity):.2f}"
-                except (TypeError, ValueError):
-                    section = ""
+            if similarity_value is not None:
+                section = f"相似度 {similarity_value:.2f}"
             items.append(
                 self._normalize_evidence_item(
                     chunk_id=chunk.get("id") or f"ragflow-chat-{idx}",
-                    title=chunk.get("document_name") or "RAGFlow 文档",
+                    title=self._normalize_ragflow_title(chunk, "RAGFlow 文档"),
                     section=section,
                     excerpt=chunk.get("content") or chunk.get("highlight") or "",
-                    source_type="ragflow",
-                    similarity=float(similarity) if similarity is not None else None,
+                    source_type=self._ragflow_source_type_for_dataset(str(chunk.get("dataset_id") or ""), settings),
+                    similarity=similarity_value,
                 )
             )
         return items
+
+    def _knowledge_source_from_references(self, references: list[dict[str, Any]] | None) -> str:
+        source_types = {
+            str(item.get("source_type", "")).strip()
+            for item in (references or [])
+            if isinstance(item, dict) and str(item.get("source_type", "")).strip()
+        }
+        if source_types == {"standard"}:
+            return "standard"
+        if "standard" in source_types and "ragflow" in source_types:
+            return "mixed"
+        return "ragflow"
 
     def _ragflow_chat_completion(self, question: str, session_id: str | None = None) -> dict[str, Any]:
         settings = self._ragflow_settings()
@@ -1314,6 +1329,7 @@ class EnergyRepository:
             raise RuntimeError("RAGFlow chat not configured")
 
         ensured_session_id = self._ensure_ragflow_session(session_id)
+        started = time.perf_counter()
         body: dict[str, Any] = {
             "question": question,
             "stream": False,
@@ -1328,10 +1344,53 @@ class EnergyRepository:
         if not isinstance(latest, dict):
             raise RuntimeError("RAGFlow chat returned no payload")
         return {
-            "answer": self._clean_ragflow_answer_text(latest.get("answer", "")),
+            "answer": str(latest.get("answer", "") or ""),
             "reference": latest.get("reference") if isinstance(latest.get("reference"), dict) else {},
             "session_id": str(latest.get("session_id", "")).strip() or ensured_session_id,
             "message_id": str(latest.get("id", "")).strip(),
+            "latency_ms": int((time.perf_counter() - started) * 1000),
+        }
+
+    def _ragflow_chat_stream_completion(self, question: str, session_id: str | None = None) -> dict[str, Any]:
+        settings = self._ragflow_settings()
+        if not settings["chat_ready"]:
+            raise RuntimeError("RAGFlow chat not configured")
+
+        ensured_session_id = self._ensure_ragflow_session(session_id)
+        body: dict[str, Any] = {
+            "question": question,
+            "stream": True,
+            "session_id": ensured_session_id,
+        }
+        req = Request(
+            f"{settings['base_url']}/chats/{settings['chat_id']}/completions",
+            data=json.dumps(body).encode("utf-8"),
+            method="POST",
+            headers=self._ragflow_headers(),
+        )
+
+        def event_iter():
+            with urlopen(req, timeout=settings["timeout_sec"]) as resp:
+                for raw_line in resp:
+                    line = raw_line.decode("utf-8", errors="ignore").strip()
+                    if not line.startswith("data:"):
+                        continue
+                    payload = line[5:].strip()
+                    if not payload or payload == "[DONE]":
+                        continue
+                    try:
+                        event = json.loads(payload)
+                    except json.JSONDecodeError:
+                        continue
+                    if not isinstance(event, dict):
+                        continue
+                    data = event.get("data")
+                    if isinstance(data, dict):
+                        yield data
+
+        return {
+            "session_id": ensured_session_id,
+            "event_iter": event_iter(),
         }
 
     def _retrieve_ragflow_knowledge(
@@ -1544,14 +1603,15 @@ class EnergyRepository:
 
         _sid = payload.get("session_id")
         session_id = str(_sid).strip() if _sid and str(_sid).strip() not in ("None", "null") else None
-        result = self._answer_knowledge_question(question, limit=6, stream=False, session_id=session_id)
+        result = self._ragflow_chat_completion(question, session_id=session_id)
+        references = self._normalize_ragflow_reference(result.get("reference"))
         return {
-            "answer": str(result.get("answer", "")).strip(),
+            "answer": str(result.get("answer", "")),
             "session_id": str(result.get("session_id", "")).strip(),
-            "message_id": "",
+            "message_id": str(result.get("message_id", "")).strip(),
             "chat_id": self._ragflow_settings().get("chat_id", ""),
-            "references": result.get("references", []),
-            "knowledge_source": result.get("knowledge_source", "ragflow"),
+            "references": references,
+            "knowledge_source": self._knowledge_source_from_references(references),
             "provider": "ragflow_chat",
             "latency_ms": result.get("latency_ms", 0),
         }
@@ -1565,31 +1625,50 @@ class EnergyRepository:
         try:
             _sid = payload.get("session_id")
             session_id = str(_sid).strip() if _sid and str(_sid).strip() not in ("None", "null") else None
-            stream_result = self._answer_knowledge_question(question, limit=6, stream=True, session_id=session_id)
+            stream_result = self._ragflow_chat_stream_completion(question, session_id=session_id)
         except Exception as exc:
             yield "error", {"message": str(exc)}
             return
         yield "start", {"session_id": stream_result["session_id"]}
         full_answer = ""
+        latest_reference: dict[str, Any] = {}
+        final_session_id = str(stream_result["session_id"]).strip()
+        message_id = ""
         try:
-            for token in stream_result["token_iter"]:
-                full_answer, delta = self._merge_ragflow_stream_text(full_answer, token)
-                cleaned_delta = self._clean_ragflow_answer_text(delta)
-                if cleaned_delta:
-                    yield "token", {"text": cleaned_delta}
+            for event_data in stream_result["event_iter"]:
+                final_session_id = str(event_data.get("session_id", "")).strip() or final_session_id
+                message_id = str(event_data.get("id", "")).strip() or message_id
+                reference = event_data.get("reference")
+                if isinstance(reference, dict) and reference:
+                    latest_reference = reference
+                full_answer, delta = self._merge_ragflow_stream_text(full_answer, event_data.get("answer", ""))
+                if delta:
+                    yield "token", {"text": delta}
+                if bool(event_data.get("final")):
+                    references = self._normalize_ragflow_reference(latest_reference)
+                    yield "done", {
+                        "answer": full_answer,
+                        "session_id": final_session_id,
+                        "message_id": message_id,
+                        "chat_id": self._ragflow_settings().get("chat_id", ""),
+                        "references": references,
+                        "knowledge_source": self._knowledge_source_from_references(references),
+                    }
+                    return
         except (URLError, TimeoutError, socket.timeout) as exc:
-            yield "error", {"message": f"DeepSeek timeout: {exc}"}
+            yield "error", {"message": f"RAGFlow timeout: {exc}"}
             return
         except Exception as exc:
             yield "error", {"message": str(exc)}
             return
+        references = self._normalize_ragflow_reference(latest_reference)
         yield "done", {
-            "answer": self._postprocess_knowledge_answer(full_answer),
-            "session_id": stream_result["session_id"],
-            "message_id": "",
+            "answer": full_answer,
+            "session_id": final_session_id,
+            "message_id": message_id,
             "chat_id": self._ragflow_settings().get("chat_id", ""),
-            "references": stream_result["references"],
-            "knowledge_source": stream_result.get("knowledge_source", "ragflow"),
+            "references": references,
+            "knowledge_source": self._knowledge_source_from_references(references),
         }
 
     def _build_diagnose_knowledge_query(
