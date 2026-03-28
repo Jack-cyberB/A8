@@ -19,6 +19,8 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlencode, urlparse
 from urllib.request import Request, urlopen
 
+from backend.mysql_support import MySQLCLIClient, sql_literal
+
 
 ROOT = Path(__file__).resolve().parents[1]
 PROJECT_ROOT_FALLBACK = Path(r"D:/Project/2026/A8")
@@ -62,6 +64,7 @@ RAGFLOW_DEFAULT_SIMILARITY_THRESHOLD = 0.2
 RAGFLOW_DEFAULT_VECTOR_SIMILARITY_WEIGHT = 0.45
 RAGFLOW_DEFAULT_TIMEOUT_SEC = 6.0
 RAGFLOW_DEFAULT_CHAT_TIMEOUT_SEC = 60.0
+STORAGE_BACKEND_DEFAULT = "file"
 
 SHOWCASE_BUILDINGS = {
     "Panther_education_Genevieve": {"display_category": "教学楼", "peer_category": "teaching_building"},
@@ -2342,6 +2345,9 @@ class EnergyRepository:
         return {
             "status": "ok" if all(data_source.values()) else "degraded",
             "data_source": data_source,
+            "storage": {
+                "backend": getattr(self, "storage_backend", "file"),
+            },
             "ai_provider": ai_status,
             "ragflow": {
                 "configured": ragflow["configured"],
@@ -2417,6 +2423,7 @@ class EnergyRepository:
         event = {
             "anomaly_id": anomaly_id,
             "action": action,
+            "status_before": current_status,
             "status": target_status,
             "assignee": assignee,
             "note": note,
@@ -4488,18 +4495,438 @@ class EnergyRepository:
         return "在线模型暂时不可用，系统已切换到模板兜底。"
 
 
-REPO = EnergyRepository(
-    DEMO_DATA_FILE,
-    NORMALIZED_DATA_FILE,
-    METADATA_FILE,
-    WEATHER_FILE,
-    DICT_FILE,
-    KNOWLEDGE_FILE,
-    ACTION_LOG_FILE,
-    AI_CALL_LOG_FILE,
-    NOTE_LOG_FILE,
-    REGRESSION_SUMMARY_FILE,
-)
+class FileRepository(EnergyRepository):
+    storage_backend = "file"
+
+
+class MySQLRepository(EnergyRepository):
+    storage_backend = "mysql"
+
+    def __init__(
+        self,
+        demo_data_file: Path,
+        normalized_data_file: Path,
+        metadata_file: Path,
+        weather_file: Path,
+        dict_file: Path,
+        knowledge_file: Path,
+        action_log_file: Path,
+        ai_call_log_file: Path,
+        note_log_file: Path,
+        regression_summary_file: Path,
+        mysql_client: MySQLCLIClient | None = None,
+    ) -> None:
+        self.mysql = mysql_client or MySQLCLIClient.from_env()
+        super().__init__(
+            demo_data_file,
+            normalized_data_file,
+            metadata_file,
+            weather_file,
+            dict_file,
+            knowledge_file,
+            action_log_file,
+            ai_call_log_file,
+            note_log_file,
+            regression_summary_file,
+        )
+        self.bdq2_metadata = self._load_bdg2_metadata()
+        self.peer_category_to_buildings = self._build_peer_category_to_buildings()
+        self.rows = self._load_rows()
+        self.building_site_map = self._load_building_site_map()
+        self.weather_by_site = self._load_weather_by_site()
+        self._prepare_indexes()
+        self._load_actions()
+        self._load_ai_events()
+        self._load_notes()
+
+    def _mysql_table_count(self, table_name: str) -> int:
+        try:
+            value = self.mysql.query_scalar(f"SELECT COUNT(*) FROM {table_name}")
+            return int(str(value or "0").strip() or "0")
+        except Exception:
+            return 0
+
+    def _ensure_runtime_storage(self) -> None:
+        health = self.mysql.health()
+        if not health["configured"]:
+            raise RuntimeError("MySQL backend selected but MYSQL_HOST/MYSQL_DATABASE/MYSQL_USER not configured")
+        if not health["available"]:
+            raise RuntimeError("MySQL backend selected but mysql client not found")
+        self.mysql.ensure_schema()
+
+    def _load_bdg2_metadata(self) -> dict[str, dict[str, Any]]:
+        if self._mysql_table_count("buildings") <= 0:
+            return super()._load_bdg2_metadata()
+        rows = self.mysql.query_json_rows(
+            """
+            SELECT JSON_OBJECT(
+                'building_id', building_id,
+                'site_id', site_id,
+                'primaryspaceusage', primaryspaceusage,
+                'sub_primaryspaceusage', sub_primaryspaceusage,
+                'peer_category', peer_category,
+                'display_category', display_category,
+                'display_name', display_name
+            )
+            FROM buildings
+            ORDER BY building_id
+            """
+        )
+        metadata: dict[str, dict[str, Any]] = {}
+        for raw in rows:
+            building_id = str(raw.get("building_id", "")).strip()
+            if not building_id:
+                continue
+            metadata[building_id] = {
+                "building_id": building_id,
+                "site_id": str(raw.get("site_id", "")).strip(),
+                "primaryspaceusage": str(raw.get("primaryspaceusage", "")).strip(),
+                "sub_primaryspaceusage": str(raw.get("sub_primaryspaceusage", "")).strip(),
+                "peer_category": str(raw.get("peer_category", "")).strip() or None,
+                "display_category": str(raw.get("display_category", "")).strip(),
+                "display_name": str(raw.get("display_name", "")).strip() or showcase_display_name(building_id),
+            }
+        return metadata
+
+    def _load_rows(self) -> list[dict[str, Any]]:
+        if self._mysql_table_count("energy_timeseries") <= 0:
+            return super()._load_rows()
+        rows = self.mysql.query_json_rows(
+            """
+            SELECT JSON_OBJECT(
+                'record_id', record_id,
+                'building_id', building_id,
+                'building_name', building_name,
+                'building_type', building_type,
+                'timestamp', DATE_FORMAT(ts, '%Y-%m-%d %H:%i:%s'),
+                'hour', hour_of_day,
+                'electricity_kwh', value,
+                'source', source
+            )
+            FROM energy_timeseries
+            WHERE metric_type = 'electricity'
+            ORDER BY building_id, ts
+            """,
+            timeout_sec=120,
+        )
+        normalized_rows: list[dict[str, Any]] = []
+        for raw in rows:
+            ts = parse_time(str(raw.get("timestamp", "")))
+            if not ts:
+                continue
+            try:
+                record_id = int(raw.get("record_id") or len(normalized_rows) + 1)
+            except (TypeError, ValueError):
+                record_id = len(normalized_rows) + 1
+            normalized_rows.append(
+                {
+                    "record_id": record_id,
+                    "building_id": str(raw.get("building_id", "")).strip(),
+                    "building_name": str(raw.get("building_name", "")).strip(),
+                    "building_type": str(raw.get("building_type", "")).strip(),
+                    "timestamp": ts,
+                    "hour": int(raw.get("hour") or ts.hour),
+                    "electricity_kwh": float(raw.get("electricity_kwh") or 0.0),
+                    "source": str(raw.get("source", "mysql")).strip() or "mysql",
+                }
+            )
+        return normalized_rows
+
+    def _load_weather_by_site(self) -> dict[str, dict[dt.datetime, dict[str, float]]]:
+        if self._mysql_table_count("weather_timeseries") <= 0:
+            return super()._load_weather_by_site()
+        rows = self.mysql.query_json_rows(
+            """
+            SELECT JSON_OBJECT(
+                'site_id', site_id,
+                'timestamp', DATE_FORMAT(ts, '%Y-%m-%d %H:%i:%s'),
+                'temperature_c', temperature_c,
+                'wind_speed', wind_speed
+            )
+            FROM weather_timeseries
+            ORDER BY site_id, ts
+            """,
+            timeout_sec=120,
+        )
+        weather_by_site: dict[str, dict[dt.datetime, dict[str, float]]] = {}
+        for raw in rows:
+            site_id = str(raw.get("site_id", "")).strip()
+            timestamp = parse_time(str(raw.get("timestamp", "")))
+            if not site_id or not timestamp:
+                continue
+            weather_by_site.setdefault(site_id, {})[timestamp] = {
+                "temperature_c": round(float(raw.get("temperature_c") or 0.0), 2),
+                "wind_speed": round(float(raw.get("wind_speed") or 0.0), 2),
+            }
+        return weather_by_site
+
+    def _load_actions(self) -> None:
+        if self._mysql_table_count("anomaly_actions") <= 0:
+            return super()._load_actions()
+        rows = self.mysql.query_json_rows(
+            """
+            SELECT JSON_OBJECT(
+                'anomaly_id', anomaly_id,
+                'action', action_name,
+                'status_before', status_before,
+                'status', status_after,
+                'assignee', assignee,
+                'note', note,
+                'created_at', DATE_FORMAT(created_at, '%Y-%m-%d %H:%i:%s')
+            )
+            FROM anomaly_actions
+            ORDER BY created_at, id
+            """
+        )
+        self.action_events = []
+        for event in rows:
+            try:
+                event["anomaly_id"] = int(event.get("anomaly_id"))
+            except (TypeError, ValueError):
+                continue
+            event["created_at"] = str(event.get("created_at", ""))
+            self.action_events.append(event)
+        self._rebuild_action_index()
+
+    def _append_action_event(self, event: dict[str, Any]) -> None:
+        sql = f"""
+        INSERT INTO anomaly_actions (
+            anomaly_id, action_name, status_before, status_after, assignee, note, created_at
+        ) VALUES (
+            {int(event['anomaly_id'])},
+            {sql_literal(event.get('action', ''))},
+            {sql_literal(event.get('status_before', ''))},
+            {sql_literal(event.get('status', ''))},
+            {sql_literal(event.get('assignee', ''))},
+            {sql_literal(event.get('note', ''))},
+            {sql_literal(event.get('created_at', ''))}
+        )
+        """
+        self.mysql.execute(sql)
+        self.action_events.append(event)
+        self._rebuild_action_index()
+
+    def _load_notes(self) -> None:
+        if self._mysql_table_count("anomaly_notes") <= 0:
+            return super()._load_notes()
+        rows = self.mysql.query_json_rows(
+            """
+            SELECT JSON_OBJECT(
+                'anomaly_id', anomaly_id,
+                'cause_confirmed', cause_confirmed,
+                'action_taken', action_taken,
+                'result_summary', result_summary,
+                'recurrence_risk', recurrence_risk,
+                'reviewer', reviewer,
+                'updated_at', DATE_FORMAT(updated_at, '%Y-%m-%d %H:%i:%s')
+            )
+            FROM anomaly_notes
+            ORDER BY updated_at, id
+            """
+        )
+        self.note_events = []
+        for event in rows:
+            try:
+                event["anomaly_id"] = int(event.get("anomaly_id"))
+            except (TypeError, ValueError):
+                continue
+            event["updated_at"] = str(event.get("updated_at", ""))
+            self.note_events.append(event)
+        self._rebuild_note_index()
+
+    def _append_note_event(self, event: dict[str, Any]) -> None:
+        sql = f"""
+        INSERT INTO anomaly_notes (
+            anomaly_id, cause_confirmed, action_taken, result_summary, recurrence_risk, reviewer, updated_at
+        ) VALUES (
+            {int(event['anomaly_id'])},
+            {sql_literal(event.get('cause_confirmed', ''))},
+            {sql_literal(event.get('action_taken', ''))},
+            {sql_literal(event.get('result_summary', ''))},
+            {sql_literal(event.get('recurrence_risk', 'medium'))},
+            {sql_literal(event.get('reviewer', ''))},
+            {sql_literal(event.get('updated_at', ''))}
+        )
+        """
+        self.mysql.execute(sql)
+        self.note_events.append(event)
+        self._rebuild_note_index()
+
+    def _load_ai_events(self) -> None:
+        if self._mysql_table_count("ai_calls") <= 0:
+            return super()._load_ai_events()
+        rows = self.mysql.query_json_rows(
+            """
+            SELECT JSON_OBJECT(
+                'timestamp', DATE_FORMAT(event_time, '%Y-%m-%d %H:%i:%s'),
+                'trace_id', trace_id,
+                'requested_provider', requested_provider,
+                'provider', provider,
+                'building_id', building_id,
+                'anomaly_id', anomaly_id,
+                'has_message', has_message,
+                'event_type', scene,
+                'fallback_used', fallback_used,
+                'latency_ms', latency_ms,
+                'error_type', error_type,
+                'field_complete', field_complete,
+                'result_risk_level', result_risk_level,
+                'knowledge_source', knowledge_source,
+                'retrieval_hit_count', retrieval_hit_count,
+                'retrieval_error_type', retrieval_error_type,
+                'feedback_label', feedback_label
+            )
+            FROM ai_calls
+            ORDER BY event_time, trace_id
+            """
+        )
+        self.ai_events = list(rows)
+
+    def _append_ai_event(self, event: dict[str, Any]) -> None:
+        timestamp = str(event.get("timestamp", "")).strip() or to_iso(dt.datetime.now())
+        trace_id = str(event.get("trace_id", "")).strip() or uuid.uuid4().hex
+        success = 0 if str(event.get("error_type", "")).strip() else 1
+        sql = f"""
+        INSERT INTO ai_calls (
+            trace_id, event_time, requested_provider, provider, scene, building_id, anomaly_id,
+            has_message, result_risk_level, knowledge_source, retrieval_hit_count, retrieval_error_type,
+            fallback_used, field_complete, latency_ms, success, error_type, feedback_label, created_at, updated_at
+        ) VALUES (
+            {sql_literal(trace_id)},
+            {sql_literal(timestamp)},
+            {sql_literal(event.get('requested_provider', ''))},
+            {sql_literal(event.get('provider', ''))},
+            {sql_literal(event.get('event_type', ''))},
+            {sql_literal(event.get('building_id'))},
+            {sql_literal(event.get('anomaly_id'))},
+            {1 if bool(event.get('has_message', False)) else 0},
+            {sql_literal(event.get('result_risk_level', ''))},
+            {sql_literal(event.get('knowledge_source', ''))},
+            {int(event.get('retrieval_hit_count', 0) or 0)},
+            {sql_literal(event.get('retrieval_error_type', ''))},
+            {1 if bool(event.get('fallback_used', False)) else 0},
+            {1 if bool(event.get('field_complete', False)) else 0},
+            {int(event.get('latency_ms', 0) or 0)},
+            {success},
+            {sql_literal(event.get('error_type', ''))},
+            {sql_literal(event.get('feedback_label', ''))},
+            {sql_literal(timestamp)},
+            {sql_literal(timestamp)}
+        )
+        ON DUPLICATE KEY UPDATE
+            requested_provider = VALUES(requested_provider),
+            provider = VALUES(provider),
+            scene = VALUES(scene),
+            building_id = VALUES(building_id),
+            anomaly_id = VALUES(anomaly_id),
+            has_message = VALUES(has_message),
+            result_risk_level = VALUES(result_risk_level),
+            knowledge_source = VALUES(knowledge_source),
+            retrieval_hit_count = VALUES(retrieval_hit_count),
+            retrieval_error_type = VALUES(retrieval_error_type),
+            fallback_used = VALUES(fallback_used),
+            field_complete = VALUES(field_complete),
+            latency_ms = VALUES(latency_ms),
+            success = VALUES(success),
+            error_type = VALUES(error_type),
+            feedback_label = VALUES(feedback_label),
+            updated_at = VALUES(updated_at)
+        """
+        self.mysql.execute(sql)
+        for idx, existing in enumerate(self.ai_events):
+            if str(existing.get("trace_id", "")) == trace_id:
+                merged = dict(existing)
+                merged.update(event)
+                merged["trace_id"] = trace_id
+                merged["timestamp"] = timestamp
+                self.ai_events[idx] = merged
+                break
+        else:
+            merged = dict(event)
+            merged["trace_id"] = trace_id
+            merged["timestamp"] = timestamp
+            self.ai_events.append(merged)
+
+    def save_ai_feedback(self, payload: dict[str, Any]) -> dict[str, Any]:
+        trace_id = str(payload.get("trace_id", "")).strip()
+        label = str(payload.get("label", "")).strip().lower()
+        if not trace_id:
+            raise ValueError("trace_id required")
+        if label not in {"useful", "not_useful"}:
+            raise ValueError("label must be useful/not_useful")
+        sql = f"""
+        UPDATE ai_calls
+        SET feedback_label = {sql_literal(label)}, updated_at = {sql_literal(to_iso(dt.datetime.now()))}
+        WHERE trace_id = {sql_literal(trace_id)}
+        """
+        self.mysql.execute(sql)
+        row_count = self.mysql.query_scalar(
+            f"SELECT COUNT(*) FROM ai_calls WHERE trace_id = {sql_literal(trace_id)}"
+        )
+        if int(str(row_count or "0") or "0") <= 0:
+            raise LookupError("trace_id not found")
+        for ev in self.ai_events:
+            if str(ev.get("trace_id", "")) == trace_id:
+                ev["feedback_label"] = label
+                break
+        return {"trace_id": trace_id, "label": label}
+
+    def _load_regression_summary_from_mysql(self) -> dict[str, Any] | None:
+        if self._mysql_table_count("system_snapshots") <= 0:
+            return None
+        rows = self.mysql.query_json_rows(
+            """
+            SELECT JSON_OBJECT(
+                'payload_json', payload_json
+            )
+            FROM system_snapshots
+            WHERE snapshot_key = 'regression_summary'
+            LIMIT 1
+            """
+        )
+        if not rows:
+            return None
+        payload_raw = str(rows[0].get("payload_json", "")).strip()
+        if not payload_raw:
+            return None
+        try:
+            return json.loads(payload_raw)
+        except json.JSONDecodeError:
+            return None
+
+    def query_system_health(self) -> dict[str, Any]:
+        data = super().query_system_health()
+        mysql_health = self.mysql.health()
+        regression = self._load_regression_summary_from_mysql()
+        if regression:
+            data["recent_regression"] = regression
+        data["storage"] = {
+            "backend": self.storage_backend,
+            "mysql": mysql_health,
+        }
+        if data["status"] == "ok" and not mysql_health["connected"]:
+            data["status"] = "degraded"
+        return data
+
+
+def create_repository() -> EnergyRepository:
+    backend = (os.getenv("STORAGE_BACKEND", STORAGE_BACKEND_DEFAULT).strip().lower() or STORAGE_BACKEND_DEFAULT)
+    repo_cls: type[EnergyRepository] = MySQLRepository if backend == "mysql" else FileRepository
+    return repo_cls(
+        DEMO_DATA_FILE,
+        NORMALIZED_DATA_FILE,
+        METADATA_FILE,
+        WEATHER_FILE,
+        DICT_FILE,
+        KNOWLEDGE_FILE,
+        ACTION_LOG_FILE,
+        AI_CALL_LOG_FILE,
+        NOTE_LOG_FILE,
+        REGRESSION_SUMMARY_FILE,
+    )
+
+
+REPO = create_repository()
 
 
 class Handler(BaseHTTPRequestHandler):

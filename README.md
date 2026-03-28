@@ -85,6 +85,25 @@ python backend/server.py
 
 浏览器访问 [http://127.0.0.1:8000](http://127.0.0.1:8000)
 
+## MySQL 存储切换
+
+当前仓库默认仍使用文件存储。若要切到 `MySQL`：
+
+```powershell
+$env:STORAGE_BACKEND="mysql"
+$env:MYSQL_HOST="127.0.0.1"
+$env:MYSQL_PORT="3306"
+$env:MYSQL_DATABASE="a8"
+$env:MYSQL_USER="root"
+$env:MYSQL_PASSWORD="你的密码"
+python scripts/init_mysql_storage.py
+python backend/server.py
+```
+
+- `scripts/init_mysql_storage.py` 会创建库表并把当前文件数据导入 MySQL。
+- 切换后前端 API 路径保持不变。
+- 知识库仍继续由 `RAGFlow` 管理，不写入 MySQL。
+
 ## 主要 API
 
 - `GET /api/buildings`

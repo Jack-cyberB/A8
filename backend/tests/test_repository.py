@@ -4,7 +4,70 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from backend.server import REPO
+from backend.server import (
+    DEMO_DATA_FILE,
+    DICT_FILE,
+    FileRepository,
+    KNOWLEDGE_FILE,
+    METADATA_FILE,
+    NORMALIZED_DATA_FILE,
+    NOTE_LOG_FILE,
+    REGRESSION_SUMMARY_FILE,
+    REPO,
+    WEATHER_FILE,
+    MySQLRepository,
+    create_repository,
+)
+
+
+class FakeMySQLClient:
+    def __init__(self, counts=None, rows=None):
+        self.counts = counts or {}
+        self.rows = rows or {}
+        self.executed = []
+
+    def ensure_schema(self):
+        self.executed.append("ensure_schema")
+
+    def health(self):
+        return {
+            "configured": True,
+            "available": True,
+            "connected": True,
+            "host": "127.0.0.1",
+            "port": 3306,
+            "database": "a8_test",
+            "user": "root",
+            "error": "",
+        }
+
+    def query_scalar(self, sql, include_database=True, timeout_sec=60):
+        if "FROM ai_calls WHERE trace_id" in sql:
+            return "1"
+        for table_name, value in self.counts.items():
+            if f"FROM {table_name}" in sql:
+                return str(value)
+        return "0"
+
+    def query_json_rows(self, sql, include_database=True, timeout_sec=60):
+        if "FROM buildings" in sql:
+            return list(self.rows.get("buildings", []))
+        if "FROM energy_timeseries" in sql:
+            return list(self.rows.get("energy_timeseries", []))
+        if "FROM weather_timeseries" in sql:
+            return list(self.rows.get("weather_timeseries", []))
+        if "FROM anomaly_actions" in sql:
+            return list(self.rows.get("anomaly_actions", []))
+        if "FROM anomaly_notes" in sql:
+            return list(self.rows.get("anomaly_notes", []))
+        if "FROM ai_calls" in sql:
+            return list(self.rows.get("ai_calls", []))
+        if "FROM system_snapshots" in sql:
+            return list(self.rows.get("system_snapshots", []))
+        return []
+
+    def execute(self, sql, include_database=True, timeout_sec=60):
+        self.executed.append(sql)
 
 
 class RepositoryTests(unittest.TestCase):
@@ -13,9 +76,25 @@ class RepositoryTests(unittest.TestCase):
         self.assertGreater(data["count"], 0)
         return int(data["items"][0]["anomaly_id"])
 
+    def _empty_runtime_files(self, root: Path) -> tuple[Path, Path, Path, Path]:
+        action_file = root / "anomaly_actions.jsonl"
+        ai_file = root / "ai_calls.jsonl"
+        note_file = root / "anomaly_notes.jsonl"
+        regression_file = root / "regression_summary.json"
+        action_file.write_text("", encoding="utf-8")
+        ai_file.write_text("", encoding="utf-8")
+        note_file.write_text("", encoding="utf-8")
+        regression_file.write_text(json.dumps({"status": "unknown", "steps": []}, ensure_ascii=False), encoding="utf-8")
+        return action_file, ai_file, note_file, regression_file
+
     def test_buildings(self):
         data = REPO.query_buildings()
         self.assertGreater(data["count"], 0)
+
+    def test_create_repository_defaults_to_file(self):
+        with mock.patch.dict("os.environ", {"STORAGE_BACKEND": "file"}, clear=False):
+            repo = create_repository()
+        self.assertIsInstance(repo, FileRepository)
 
     def test_analysis_interfaces_electricity(self):
         buildings = REPO.query_buildings()["items"]
@@ -181,19 +260,18 @@ class RepositoryTests(unittest.TestCase):
         self.assertEqual(analysis["summary"], "LLM分析")
         self.assertEqual(analysis["findings"][0], "发现1")
 
-    def test_ai_analyze_llm_fallback(self):
+    def test_ai_analyze_llm_failure_raises(self):
         buildings = REPO.query_buildings()["items"]
-        result = REPO.analyze(
-            {
-                "provider": "llm",
-                "building_id": buildings[0]["building_id"],
-                "metric_type": "electricity",
-                "simulate_llm_failure": True,
-            }
-        )
-        analysis = result["analysis"]
-        self.assertTrue(analysis["fallback_used"])
-        self.assertEqual(analysis["provider"], "template_provider")
+        with self.assertRaises(RuntimeError) as ctx:
+            REPO.analyze(
+                {
+                    "provider": "llm",
+                    "building_id": buildings[0]["building_id"],
+                    "metric_type": "electricity",
+                    "simulate_llm_failure": True,
+                }
+            )
+        self.assertIn("Simulated llm failure", str(ctx.exception))
 
     def test_ai_analyze_default_provider_prefers_llm(self):
         buildings = REPO.query_buildings()["items"]
@@ -600,6 +678,48 @@ class RepositoryTests(unittest.TestCase):
         evaluate = REPO.query_ai_evaluate(24)
         self.assertIn("template", evaluate)
         self.assertIn("feedback", evaluate)
+
+    def test_mysql_repository_reports_storage_health(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            action_file, ai_file, note_file, regression_file = self._empty_runtime_files(Path(tmp))
+            repo = MySQLRepository(
+                DEMO_DATA_FILE,
+                NORMALIZED_DATA_FILE,
+                METADATA_FILE,
+                WEATHER_FILE,
+                DICT_FILE,
+                KNOWLEDGE_FILE,
+                action_file,
+                ai_file,
+                note_file,
+                regression_file,
+                mysql_client=FakeMySQLClient(),
+            )
+            health = repo.query_system_health()
+        self.assertEqual(health["storage"]["backend"], "mysql")
+        self.assertTrue(health["storage"]["mysql"]["connected"])
+
+    def test_mysql_repository_writes_action_events(self):
+        fake = FakeMySQLClient()
+        with tempfile.TemporaryDirectory() as tmp:
+            action_file, ai_file, note_file, regression_file = self._empty_runtime_files(Path(tmp))
+            repo = MySQLRepository(
+                DEMO_DATA_FILE,
+                NORMALIZED_DATA_FILE,
+                METADATA_FILE,
+                WEATHER_FILE,
+                DICT_FILE,
+                KNOWLEDGE_FILE,
+                action_file,
+                ai_file,
+                note_file,
+                regression_file,
+                mysql_client=fake,
+            )
+            anomalies = repo.query_anomalies(None, None, None, None, None, "new", 1, 20, "timestamp_desc")["items"]
+            self.assertGreater(len(anomalies), 0)
+            repo.apply_anomaly_action({"anomaly_id": anomalies[0]["anomaly_id"], "action": "ack", "assignee": "mysql", "note": "ok"})
+        self.assertTrue(any("INSERT INTO anomaly_actions" in sql for sql in fake.executed))
 
 
 if __name__ == "__main__":
