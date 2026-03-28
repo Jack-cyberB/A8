@@ -312,9 +312,14 @@ class RepositoryTests(unittest.TestCase):
     def test_postprocess_knowledge_answer_only_converts_line_start_numbering(self):
         text = "1. 先检查排程。\n2、再检查新风阀。\n室温建议控制在1.5℃波动范围内。"
         processed = REPO._postprocess_knowledge_answer(text)
-        self.assertIn("• 先检查排程。", processed)
-        self.assertIn("• 再检查新风阀。", processed)
+        self.assertIn("1. 先检查排程。", processed)
+        self.assertIn("2、再检查新风阀。", processed)
         self.assertIn("1.5℃波动范围内", processed)
+
+    def test_postprocess_knowledge_answer_only_removes_heading_line(self):
+        text = "结论：\n教学楼应优先采用自然通风，并核查空调设定。"
+        processed = REPO._postprocess_knowledge_answer(text)
+        self.assertEqual(processed, "教学楼应优先采用自然通风，并核查空调设定。")
 
     def test_merge_knowledge_retrieval_results_deduplicates_and_preserves_mixed_source(self):
         merged = REPO._merge_knowledge_retrieval_results(

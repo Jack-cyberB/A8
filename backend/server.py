@@ -953,14 +953,9 @@ class EnergyRepository:
         if not text:
             return ""
         text = text.replace("\r", "\n")
-        text = re.sub(r"(?:^|\n)\s*(结论|依据与分析|标准依据|优先检查|运维建议|执行提示|关键要求|说明)\s*[:：]?\s*", "\n", text)
-        text = re.sub(r"(?m)^\s*\d+[\.、]\s*", "• ", text)
-        text = re.sub(r"\(\s*\)\s*", "", text)
-        text = re.sub(r"•\s*•\s*", "• ", text)
-        text = re.sub(r"\n{3,}", "\n\n", text)
+        text = re.sub(r"(?m)^\s*(结论|依据与分析|标准依据|优先检查|运维建议|执行提示|关键要求|说明)\s*[:：]?\s*", "", text)
         text = re.sub(r"[ \t]+\n", "\n", text)
         text = re.sub(r"\n[ \t]+", "\n", text)
-        text = re.sub(r"([。！？；])(?=[^\n•])", r"\1\n", text)
         text = re.sub(r"\n{3,}", "\n\n", text)
         return text.strip()
 
