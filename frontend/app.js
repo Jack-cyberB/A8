@@ -313,6 +313,7 @@ createApp({
         hourlyProfile: null,
         split: null,
         compare: null,
+        compareRanking: null,
         anomalyType: null,
       },
       refreshTimer: null,
@@ -2812,6 +2813,53 @@ createApp({
         }],
       }, true);
     },
+    renderCompareRankingChart() {
+      const chart = this.ensureChart('compareRanking', 'compareRankingChart');
+      if (!chart) return;
+      const ranking = (this.analysisCompare.peer_ranking || []).slice(0, 6).reverse();
+      if (!ranking.length) {
+        chart.clear();
+        return;
+      }
+      chart.setOption({
+        grid: { left: 92, right: 18, top: 18, bottom: 14 },
+        tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
+        xAxis: {
+          type: 'value',
+          ...this.chartAxisStyle(this.analysisSummary.unit || 'kWh'),
+          splitNumber: 3,
+        },
+        yAxis: {
+          type: 'category',
+          data: ranking.map((item) => item.building_name),
+          axisLabel: {
+            color: '#596982',
+            fontSize: 11,
+            width: 78,
+            overflow: 'truncate',
+          },
+          axisTick: { show: false },
+        },
+        series: [{
+          type: 'bar',
+          barMaxWidth: 14,
+          data: ranking.map((item, index) => ({
+            value: item.avg_value,
+            itemStyle: {
+              color: index === ranking.length - 1 ? '#0f6adf' : '#8ea0bc',
+              borderRadius: 8,
+            },
+          })),
+          label: {
+            show: true,
+            position: 'right',
+            color: '#42526d',
+            fontSize: 11,
+            formatter: ({ value }) => `${this.formatNumber(value, 1)}`,
+          },
+        }],
+      }, true);
+    },
     renderAnomalyTypeChart(byType) {
       const chart = this.ensureChart('anomalyType', 'anomalyTypeChart');
       if (!chart) return;
@@ -2830,6 +2878,7 @@ createApp({
         this.renderHourlyProfileChart();
         this.renderSplitChart();
         this.renderCompareChart();
+        this.renderCompareRankingChart();
       } else if (this.activePage === 'anomaly') {
         this.renderAnomalyTypeChart(this.anomalyTypeStats);
       }
