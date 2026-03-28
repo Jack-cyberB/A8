@@ -230,6 +230,7 @@ createApp({
         documentKey: '',
         content: '',
         format: 'markdown',
+        expanded: false,
       },
       knowledgeDocumentCache: {},
       aiProvider: 'auto',
@@ -750,6 +751,7 @@ createApp({
         documentKey: '',
         content: '',
         format: 'markdown',
+        expanded: false,
       };
       if (!preserveCache) {
         this.knowledgeDocumentCache = {};
@@ -774,7 +776,7 @@ createApp({
         .trim()
         .toLowerCase();
     },
-    async loadKnowledgeDocument(ref, messageId, citationIndex) {
+    async loadKnowledgeDocument(ref, messageId, citationIndex, expanded = false) {
       const cacheKey = this.knowledgeDocumentCacheKey(ref);
       const fallbackContent = ref?.snippet_text || ref?.excerpt || '';
       if (cacheKey && this.knowledgeDocumentCache[cacheKey]) {
@@ -782,9 +784,12 @@ createApp({
           ...this.knowledgeDocumentCache[cacheKey],
           messageId,
           citationIndex,
+          expanded,
         };
         await this.$nextTick();
-        this.focusKnowledgeDocumentMatch(ref);
+        if (expanded) {
+          this.focusKnowledgeDocumentMatch(ref);
+        }
         return;
       }
 
@@ -797,6 +802,7 @@ createApp({
         documentKey: ref?.document_key || ref?.documentKey || '',
         content: fallbackContent,
         format: 'markdown',
+        expanded,
       };
 
       try {
@@ -818,6 +824,7 @@ createApp({
           documentKey: data?.document_key || ref?.document_key || ref?.documentKey || '',
           content: data?.content || fallbackContent,
           format: data?.format || 'markdown',
+          expanded,
         };
         this.knowledgeDocumentViewer = viewer;
         if (cacheKey) {
@@ -827,6 +834,7 @@ createApp({
               ...viewer,
               messageId: '',
               citationIndex: null,
+              expanded: false,
             },
           };
         }
@@ -840,11 +848,14 @@ createApp({
           documentKey: ref?.document_key || ref?.documentKey || '',
           content: fallbackContent,
           format: 'markdown',
+          expanded,
         };
       }
 
       await this.$nextTick();
-      this.focusKnowledgeDocumentMatch(ref);
+      if (expanded) {
+        this.focusKnowledgeDocumentMatch(ref);
+      }
     },
     focusKnowledgeDocumentMatch(ref) {
       const scrollContainer = this.$refs.knowledgeDocumentScroll;
@@ -880,6 +891,9 @@ createApp({
     async openKnowledgeCitation(msg, citationIndex) {
       const ref = Array.isArray(msg?.references) ? msg.references[citationIndex] : null;
       if (!ref) return;
+      const keepExpanded =
+        this.knowledgeDocumentViewer.expanded &&
+        this.knowledgeDocumentViewer.messageId === msg.id;
       this.activeKnowledgeCitation = {
         messageId: msg.id,
         citationIndex,
@@ -896,7 +910,96 @@ createApp({
         similarity: ref.similarity,
         content: ref.snippet_text || ref.excerpt || '',
       };
-      await this.loadKnowledgeDocument(ref, msg.id, citationIndex);
+      await this.loadKnowledgeDocument(ref, msg.id, citationIndex, keepExpanded);
+    },
+    activeKnowledgeReference(msg) {
+      if (!msg || this.activeKnowledgeCitation.messageId !== msg.id) return null;
+      const refs = Array.isArray(msg.references) ? msg.references : [];
+      const idx = this.activeKnowledgeCitation.citationIndex;
+      return Number.isInteger(idx) ? refs[idx] || null : null;
+    },
+    knowledgeDocumentEntryVisible(msg) {
+      if (!msg) return false;
+      return (
+        this.activeKnowledgeCitation.messageId === msg.id ||
+        this.knowledgeDocumentViewer.messageId === msg.id
+      );
+    },
+    knowledgeDocumentExpanded(msg) {
+      if (!msg) return false;
+      return (
+        this.knowledgeDocumentViewer.messageId === msg.id &&
+        !!this.knowledgeDocumentViewer.expanded
+      );
+    },
+    knowledgeDocumentEntryTitle(msg) {
+      if (!msg) return '原文';
+      if (this.knowledgeDocumentViewer.messageId === msg.id && this.knowledgeDocumentViewer.title) {
+        return this.knowledgeDocumentViewer.title;
+      }
+      if (this.activeKnowledgeCitation.messageId === msg.id && this.activeKnowledgeCitation.title) {
+        return this.activeKnowledgeCitation.title;
+      }
+      return '原文';
+    },
+    knowledgeDocumentEntrySource(msg) {
+      if (!msg) return '';
+      if (this.knowledgeDocumentViewer.messageId === msg.id && this.knowledgeDocumentViewer.sourceType) {
+        return this.knowledgeDocumentViewer.sourceType;
+      }
+      if (this.activeKnowledgeCitation.messageId === msg.id && this.activeKnowledgeCitation.sourceType) {
+        return this.activeKnowledgeCitation.sourceType;
+      }
+      return '';
+    },
+    knowledgeDocumentEntryCitationIndex(msg) {
+      if (!msg) return null;
+      if (
+        this.activeKnowledgeCitation.messageId === msg.id &&
+        Number.isInteger(this.activeKnowledgeCitation.citationIndex)
+      ) {
+        return this.activeKnowledgeCitation.citationIndex;
+      }
+      if (
+        this.knowledgeDocumentViewer.messageId === msg.id &&
+        Number.isInteger(this.knowledgeDocumentViewer.citationIndex)
+      ) {
+        return this.knowledgeDocumentViewer.citationIndex;
+      }
+      return null;
+    },
+    async toggleKnowledgeDocumentViewer(msg) {
+      if (!this.knowledgeDocumentEntryVisible(msg)) return;
+      const nextExpanded = !this.knowledgeDocumentExpanded(msg);
+      const ref = this.activeKnowledgeReference(msg);
+      const viewerMatchesActiveRef =
+        !!ref &&
+        this.knowledgeDocumentViewer.messageId === msg.id &&
+        this.knowledgeDocumentViewer.citationIndex === this.activeKnowledgeCitation.citationIndex &&
+        !!this.knowledgeDocumentViewer.content;
+
+      if (ref && !viewerMatchesActiveRef) {
+        await this.loadKnowledgeDocument(
+          ref,
+          msg.id,
+          this.activeKnowledgeCitation.citationIndex,
+          nextExpanded
+        );
+        return;
+      }
+
+      this.knowledgeDocumentViewer = {
+        ...this.knowledgeDocumentViewer,
+        messageId: msg.id,
+        expanded: nextExpanded,
+      };
+
+      if (!nextExpanded) return;
+
+      await this.$nextTick();
+      if (ref) {
+        this.focusKnowledgeDocumentMatch(ref);
+      }
     },
     handleKnowledgeAnswerClick(event, msg) {
       const target = event?.target instanceof Element

@@ -757,7 +757,7 @@
             </div>
           </div>
 
-          <div class="assistant-body" ref="assistantBody" :class="{ 'assistant-body--knowledge': assistantSubmodule === 'knowledge' }">
+          <div class="assistant-body" ref="assistantBody">
             <div class="assistant-thread-shell">
               <div class="assistant-thread-scroll" ref="assistantThreadScroll">
                 <div class="assistant-thread">
@@ -848,6 +848,33 @@
                     @click="handleKnowledgeAnswerClick($event, msg)"
                     v-html="renderKnowledgeAnswer(msg.content, msg.id, msg.references)"
                   ></div>
+                  <div v-if="knowledgeDocumentEntryVisible(msg)" class="knowledge-document-entry">
+                    <div class="knowledge-document-entry-copy">
+                      <div class="knowledge-document-entry-title">{{ knowledgeDocumentEntryTitle(msg) }}</div>
+                      <div class="knowledge-document-entry-meta">
+                        <span v-if="knowledgeDocumentEntryCitationIndex(msg) !== null">ID:{{ knowledgeDocumentEntryCitationIndex(msg) }}</span>
+                        <template v-if="knowledgeDocumentEntrySource(msg)">
+                          <span v-if="knowledgeDocumentEntryCitationIndex(msg) !== null" class="meta-separator"></span>
+                          <span>{{ knowledgeSourceLabel(knowledgeDocumentEntrySource(msg)) }}</span>
+                        </template>
+                      </div>
+                    </div>
+                    <button class="knowledge-document-toggle" type="button" @click="toggleKnowledgeDocumentViewer(msg)">
+                      {{ knowledgeDocumentExpanded(msg) ? '收起原文' : '查看原文' }}
+                    </button>
+                  </div>
+                  <div v-if="knowledgeDocumentExpanded(msg)" class="knowledge-document-inline">
+                    <div class="knowledge-document-scroll" ref="knowledgeDocumentScroll">
+                      <div v-if="knowledgeDocumentViewer.loading" class="knowledge-document-placeholder">正在加载原文...</div>
+                      <div
+                        v-else-if="knowledgeDocumentViewer.content"
+                        class="knowledge-document-content"
+                        ref="knowledgeDocumentContent"
+                        v-html="renderKnowledgeDocument(knowledgeDocumentViewer.content, knowledgeDocumentViewer.format)"
+                      ></div>
+                      <div v-else class="knowledge-document-placeholder">原文</div>
+                    </div>
+                  </div>
                 </div>
 
                 <div v-else-if="msg.type === 'analysis'" class="unified-assistant-card unified-assistant-card--analysis">
@@ -961,31 +988,6 @@
                   </div>
                   <div class="knowledge-snippet-content" v-html="renderKnowledgeDocument(knowledgeSnippetOverlay.content, 'markdown')"></div>
                 </div>
-              </div>
-            </div>
-
-            <div v-if="assistantSubmodule === 'knowledge'" class="knowledge-document-panel">
-              <div class="knowledge-document-head">
-                <div>
-                  <div class="knowledge-document-title">{{ knowledgeDocumentViewer.title || activeKnowledgeCitation.title || '原文' }}</div>
-                  <div v-if="activeKnowledgeCitation.citationIndex !== null || knowledgeDocumentViewer.sourceType" class="knowledge-document-meta">
-                    <span v-if="activeKnowledgeCitation.citationIndex !== null">ID:{{ activeKnowledgeCitation.citationIndex }}</span>
-                    <template v-if="knowledgeDocumentViewer.sourceType">
-                      <span v-if="activeKnowledgeCitation.citationIndex !== null" class="meta-separator"></span>
-                      <span>{{ knowledgeSourceLabel(knowledgeDocumentViewer.sourceType) }}</span>
-                    </template>
-                  </div>
-                </div>
-              </div>
-              <div class="knowledge-document-scroll" ref="knowledgeDocumentScroll">
-                <div v-if="knowledgeDocumentViewer.loading" class="knowledge-document-placeholder">正在加载原文...</div>
-                <div
-                  v-else-if="knowledgeDocumentViewer.content"
-                  class="knowledge-document-content"
-                  ref="knowledgeDocumentContent"
-                  v-html="renderKnowledgeDocument(knowledgeDocumentViewer.content, knowledgeDocumentViewer.format)"
-                ></div>
-                <div v-else class="knowledge-document-placeholder">原文</div>
               </div>
             </div>
           </div>
