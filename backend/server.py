@@ -19,7 +19,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlencode, urlparse
 from urllib.request import Request, urlopen
 
-from backend.mysql_support import MySQLCLIClient, sql_literal
+from backend.mysql_support import MySQLClient, sql_literal
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -64,7 +64,7 @@ RAGFLOW_DEFAULT_SIMILARITY_THRESHOLD = 0.2
 RAGFLOW_DEFAULT_VECTOR_SIMILARITY_WEIGHT = 0.45
 RAGFLOW_DEFAULT_TIMEOUT_SEC = 6.0
 RAGFLOW_DEFAULT_CHAT_TIMEOUT_SEC = 60.0
-STORAGE_BACKEND_DEFAULT = "file"
+STORAGE_BACKEND_DEFAULT = "mysql"
 
 SHOWCASE_BUILDINGS = {
     "Panther_education_Genevieve": {"display_category": "教学楼", "peer_category": "teaching_building"},
@@ -4495,7 +4495,7 @@ class EnergyRepository:
         return "在线模型暂时不可用，系统已切换到模板兜底。"
 
 
-class FileRepository(EnergyRepository):
+class FileImportSource(EnergyRepository):
     storage_backend = "file"
 
 
@@ -4514,9 +4514,9 @@ class MySQLRepository(EnergyRepository):
         ai_call_log_file: Path,
         note_log_file: Path,
         regression_summary_file: Path,
-        mysql_client: MySQLCLIClient | None = None,
+        mysql_client: MySQLClient | None = None,
     ) -> None:
-        self.mysql = mysql_client or MySQLCLIClient.from_env()
+        self.mysql = mysql_client or MySQLClient.from_env()
         super().__init__(
             demo_data_file,
             normalized_data_file,
@@ -4529,15 +4529,6 @@ class MySQLRepository(EnergyRepository):
             note_log_file,
             regression_summary_file,
         )
-        self.bdq2_metadata = self._load_bdg2_metadata()
-        self.peer_category_to_buildings = self._build_peer_category_to_buildings()
-        self.rows = self._load_rows()
-        self.building_site_map = self._load_building_site_map()
-        self.weather_by_site = self._load_weather_by_site()
-        self._prepare_indexes()
-        self._load_actions()
-        self._load_ai_events()
-        self._load_notes()
 
     def _mysql_table_count(self, table_name: str) -> int:
         try:
@@ -4556,7 +4547,7 @@ class MySQLRepository(EnergyRepository):
 
     def _load_bdg2_metadata(self) -> dict[str, dict[str, Any]]:
         if self._mysql_table_count("buildings") <= 0:
-            return super()._load_bdg2_metadata()
+            return {}
         rows = self.mysql.query_json_rows(
             """
             SELECT JSON_OBJECT(
@@ -4590,7 +4581,7 @@ class MySQLRepository(EnergyRepository):
 
     def _load_rows(self) -> list[dict[str, Any]]:
         if self._mysql_table_count("energy_timeseries") <= 0:
-            return super()._load_rows()
+            return []
         rows = self.mysql.query_json_rows(
             """
             SELECT JSON_OBJECT(
@@ -4632,9 +4623,64 @@ class MySQLRepository(EnergyRepository):
             )
         return normalized_rows
 
+    def _load_raw_electricity_headers(self) -> set[str]:
+        if self._mysql_table_count("energy_timeseries") <= 0:
+            return set()
+        rows = self.mysql.query_rows(
+            """
+            SELECT DISTINCT building_id
+            FROM energy_timeseries
+            WHERE metric_type = 'electricity'
+            """
+        )
+        return {str(row.get("building_id", "")).strip() for row in rows if str(row.get("building_id", "")).strip()}
+
+    def _peer_compare_pool(
+        self,
+        peer_category: str,
+        start_time: dt.datetime | None,
+        end_time: dt.datetime | None,
+    ) -> dict[str, float]:
+        cache_key = (
+            peer_category,
+            to_iso(start_time) if start_time else None,
+            to_iso(end_time) if end_time else None,
+        )
+        cached = self.compare_pool_cache.get(cache_key)
+        if cached is not None:
+            return dict(cached)
+
+        candidate_ids = list(self.peer_category_to_buildings.get(peer_category, []))
+        if not candidate_ids:
+            self.compare_pool_cache[cache_key] = {}
+            return {}
+
+        placeholders = ", ".join(["%s"] * len(candidate_ids))
+        params: list[Any] = list(candidate_ids)
+        sql = f"""
+        SELECT building_id, SUM(total_value) / NULLIF(SUM(sample_count), 0) AS avg_value
+        FROM peer_energy_daily
+        WHERE metric_type = 'electricity' AND building_id IN ({placeholders})
+        """
+        if start_time:
+            sql += " AND day >= %s"
+            params.append(start_time.date().isoformat())
+        if end_time:
+            sql += " AND day <= %s"
+            params.append(end_time.date().isoformat())
+        sql += " GROUP BY building_id"
+        rows = self.mysql.query_rows(sql, params=params, timeout_sec=120)
+        result = {
+            str(row.get("building_id", "")).strip(): float(row.get("avg_value") or 0.0)
+            for row in rows
+            if str(row.get("building_id", "")).strip()
+        }
+        self.compare_pool_cache[cache_key] = dict(result)
+        return result
+
     def _load_weather_by_site(self) -> dict[str, dict[dt.datetime, dict[str, float]]]:
         if self._mysql_table_count("weather_timeseries") <= 0:
-            return super()._load_weather_by_site()
+            return {}
         rows = self.mysql.query_json_rows(
             """
             SELECT JSON_OBJECT(
@@ -4662,7 +4708,9 @@ class MySQLRepository(EnergyRepository):
 
     def _load_actions(self) -> None:
         if self._mysql_table_count("anomaly_actions") <= 0:
-            return super()._load_actions()
+            self.action_events = []
+            self._rebuild_action_index()
+            return
         rows = self.mysql.query_json_rows(
             """
             SELECT JSON_OBJECT(
@@ -4708,7 +4756,9 @@ class MySQLRepository(EnergyRepository):
 
     def _load_notes(self) -> None:
         if self._mysql_table_count("anomaly_notes") <= 0:
-            return super()._load_notes()
+            self.note_events = []
+            self._rebuild_note_index()
+            return
         rows = self.mysql.query_json_rows(
             """
             SELECT JSON_OBJECT(
@@ -4754,7 +4804,8 @@ class MySQLRepository(EnergyRepository):
 
     def _load_ai_events(self) -> None:
         if self._mysql_table_count("ai_calls") <= 0:
-            return super()._load_ai_events()
+            self.ai_events = []
+            return
         rows = self.mysql.query_json_rows(
             """
             SELECT JSON_OBJECT(
@@ -4909,9 +4960,12 @@ class MySQLRepository(EnergyRepository):
         return data
 
 
+FileRepository = FileImportSource
+
+
 def create_repository() -> EnergyRepository:
     backend = (os.getenv("STORAGE_BACKEND", STORAGE_BACKEND_DEFAULT).strip().lower() or STORAGE_BACKEND_DEFAULT)
-    repo_cls: type[EnergyRepository] = MySQLRepository if backend == "mysql" else FileRepository
+    repo_cls: type[EnergyRepository] = MySQLRepository if backend != "file" else FileImportSource
     return repo_cls(
         DEMO_DATA_FILE,
         NORMALIZED_DATA_FILE,

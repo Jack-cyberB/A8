@@ -130,6 +130,9 @@ try:
     assert history["code"] == 0 and history["data"]["count"] >= 1
     assert ai_stats["code"] == 0 and "total_calls" in ai_stats["data"]
     assert system_health["code"] == 0 and "recent_regression" in system_health["data"]
+    assert system_health["data"]["storage"]["backend"] == "mysql"
+    assert system_health["data"]["storage"]["mysql"]["connected"] is True
+    assert system_health["data"]["storage"]["mysql"]["database"] == "a8"
     assert "ragflow" in system_health["data"]
     assert "anomaly_id,building_id,building_name" in exported
     assert diagnose_template["code"] == 0 and not diagnose_template["data"]["diagnosis"]["fallback_used"]

@@ -8,6 +8,8 @@ ROOT = Path(__file__).resolve().parents[1]
 
 TESTS = [
     "backend.tests.test_repository.RepositoryTests.test_buildings",
+    "backend.tests.test_repository.RepositoryTests.test_create_repository_defaults_to_mysql",
+    "backend.tests.test_repository.RepositoryTests.test_create_repository_uses_file_backend_when_requested",
     "backend.tests.test_repository.RepositoryTests.test_anomaly_action_flow",
     "backend.tests.test_repository.RepositoryTests.test_anomaly_list_has_status_fields",
     "backend.tests.test_repository.RepositoryTests.test_anomaly_detail_has_processing_summary",
@@ -21,8 +23,10 @@ TESTS = [
     "backend.tests.test_repository.RepositoryTests.test_clean_ragflow_answer_text_removes_inline_citations",
     "backend.tests.test_repository.RepositoryTests.test_knowledge_route_for_question_distinguishes_standard_and_scene",
     "backend.tests.test_repository.RepositoryTests.test_merge_ragflow_stream_text_supports_incremental_and_cumulative_chunks",
-    "backend.tests.test_repository.RepositoryTests.test_ragflow_chat_proxy_supports_standard_route",
-    "backend.tests.test_repository.RepositoryTests.test_ragflow_chat_stream_events_streams_llm_answer",
+    "backend.tests.test_repository.RepositoryTests.test_ragflow_chat_proxy_uses_native_chat_completion",
+    "backend.tests.test_repository.RepositoryTests.test_ragflow_chat_stream_events_use_native_stream_and_preserve_full_answer",
+    "backend.tests.test_repository.MySQLDriverIntegrationTests.test_mysql_client_health_reports_connected",
+    "backend.tests.test_repository.MySQLDriverIntegrationTests.test_mysql_repository_roundtrip_for_storage_tables",
 ]
 
 def _safe_print(text: str) -> None:

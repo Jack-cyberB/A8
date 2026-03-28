@@ -2,15 +2,14 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
-import subprocess
-from typing import Any
+from contextlib import contextmanager
+from typing import Any, Iterable, Sequence
+
+import pymysql
+from pymysql.cursors import DictCursor
 
 
-MYSQL_DEFAULT_BIN = r"C:\Program Files\MySQL\MySQL Server 8.0\bin\mysql.exe"
-
-
-class MySQLCLIError(RuntimeError):
+class MySQLClientError(RuntimeError):
     pass
 
 
@@ -76,6 +75,22 @@ def mysql_schema_statements() -> list[str]:
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
         """.strip(),
         """
+        CREATE TABLE IF NOT EXISTS peer_energy_daily (
+            id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+            metric_type VARCHAR(32) NOT NULL,
+            building_id VARCHAR(128) NOT NULL,
+            day DATE NOT NULL,
+            total_value DOUBLE NOT NULL,
+            sample_count SMALLINT NOT NULL,
+            avg_value DOUBLE NOT NULL,
+            created_at DATETIME NOT NULL,
+            updated_at DATETIME NOT NULL,
+            UNIQUE KEY uq_peer_energy_daily_metric_building_day (metric_type, building_id, day),
+            KEY idx_peer_energy_daily_building_day (building_id, day),
+            KEY idx_peer_energy_daily_metric_day (metric_type, day)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+        """.strip(),
+        """
         CREATE TABLE IF NOT EXISTS anomaly_actions (
             id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
             anomaly_id BIGINT NOT NULL,
@@ -138,7 +153,7 @@ def mysql_schema_statements() -> list[str]:
     ]
 
 
-class MySQLCLIClient:
+class MySQLClient:
     def __init__(
         self,
         host: str,
@@ -146,24 +161,30 @@ class MySQLCLIClient:
         database: str,
         user: str,
         password: str,
-        mysql_bin: str | None = None,
+        connect_timeout_sec: int = 10,
+        read_timeout_sec: int = 60,
+        write_timeout_sec: int = 60,
     ) -> None:
         self.host = host
         self.port = int(port)
         self.database = database
         self.user = user
         self.password = password
-        self.mysql_bin = mysql_bin or shutil.which("mysql") or MYSQL_DEFAULT_BIN
+        self.connect_timeout_sec = int(connect_timeout_sec)
+        self.read_timeout_sec = int(read_timeout_sec)
+        self.write_timeout_sec = int(write_timeout_sec)
 
     @classmethod
-    def from_env(cls) -> "MySQLCLIClient":
+    def from_env(cls) -> "MySQLClient":
         return cls(
             host=os.getenv("MYSQL_HOST", "127.0.0.1").strip() or "127.0.0.1",
             port=int(os.getenv("MYSQL_PORT", "3306") or "3306"),
             database=os.getenv("MYSQL_DATABASE", "a8").strip() or "a8",
             user=os.getenv("MYSQL_USER", "root").strip() or "root",
-            password=os.getenv("MYSQL_PASSWORD", "").strip(),
-            mysql_bin=os.getenv("MYSQL_BIN", "").strip() or None,
+            password=os.getenv("MYSQL_PASSWORD", "root").strip() or "root",
+            connect_timeout_sec=int(os.getenv("MYSQL_CONNECT_TIMEOUT_SEC", "10") or "10"),
+            read_timeout_sec=int(os.getenv("MYSQL_READ_TIMEOUT_SEC", "60") or "60"),
+            write_timeout_sec=int(os.getenv("MYSQL_WRITE_TIMEOUT_SEC", "60") or "60"),
         )
 
     @property
@@ -172,71 +193,128 @@ class MySQLCLIClient:
 
     @property
     def available(self) -> bool:
-        return bool(self.mysql_bin) and os.path.exists(self.mysql_bin)
+        return True
 
-    def _command(self, include_database: bool = True) -> list[str]:
-        command = [
-            self.mysql_bin,
-            f"--host={self.host}",
-            f"--port={self.port}",
-            f"--user={self.user}",
-            "--default-character-set=utf8mb4",
-            "--batch",
-            "--raw",
-            "--silent",
-        ]
+    def _connection_kwargs(self, include_database: bool = True, autocommit: bool = True) -> dict[str, Any]:
+        kwargs = {
+            "host": self.host,
+            "port": self.port,
+            "user": self.user,
+            "password": self.password,
+            "charset": "utf8mb4",
+            "cursorclass": DictCursor,
+            "autocommit": autocommit,
+            "connect_timeout": self.connect_timeout_sec,
+            "read_timeout": self.read_timeout_sec,
+            "write_timeout": self.write_timeout_sec,
+        }
         if include_database and self.database:
-            command.append(self.database)
-        return command
+            kwargs["database"] = self.database
+        return kwargs
 
-    def _run(self, sql: str, include_database: bool = True, timeout_sec: int = 60) -> str:
-        if not self.available:
-            raise MySQLCLIError("mysql client not found")
-        command = self._command(include_database=include_database)
-        command.extend(["--execute", sql])
-        env = os.environ.copy()
-        if self.password:
-            env["MYSQL_PWD"] = self.password
+    @contextmanager
+    def connect(self, include_database: bool = True, autocommit: bool = True):
+        conn = None
         try:
-            proc = subprocess.run(
-                command,
-                check=True,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                timeout=timeout_sec,
-                env=env,
-            )
-        except subprocess.CalledProcessError as exc:
-            stderr = (exc.stderr or exc.stdout or "").strip()
-            raise MySQLCLIError(stderr or "mysql command failed") from exc
-        except subprocess.TimeoutExpired as exc:
-            raise MySQLCLIError("mysql command timeout") from exc
-        return proc.stdout or ""
+            conn = pymysql.connect(**self._connection_kwargs(include_database=include_database, autocommit=autocommit))
+            yield conn
+        except pymysql.MySQLError as exc:
+            raise MySQLClientError(str(exc)) from exc
+        finally:
+            if conn is not None:
+                conn.close()
 
-    def execute(self, sql: str, include_database: bool = True, timeout_sec: int = 60) -> None:
-        self._run(sql, include_database=include_database, timeout_sec=timeout_sec)
+    def execute(
+        self,
+        sql: str,
+        params: Sequence[Any] | dict[str, Any] | None = None,
+        include_database: bool = True,
+        autocommit: bool = True,
+        timeout_sec: int | None = None,
+    ) -> int:
+        with self.connect(include_database=include_database, autocommit=autocommit) as conn:
+            with conn.cursor() as cursor:
+                count = cursor.execute(sql, params)
+            if not autocommit:
+                conn.commit()
+            return int(count or 0)
 
-    def query_json_rows(self, sql: str, include_database: bool = True, timeout_sec: int = 60) -> list[dict[str, Any]]:
-        output = self._run(sql, include_database=include_database, timeout_sec=timeout_sec)
-        rows: list[dict[str, Any]] = []
-        for line in output.splitlines():
-            text = line.strip()
-            if not text:
+    def execute_many(
+        self,
+        sql: str,
+        params_seq: Iterable[Sequence[Any] | dict[str, Any]],
+        include_database: bool = True,
+        autocommit: bool = True,
+        timeout_sec: int | None = None,
+    ) -> int:
+        params_list = list(params_seq)
+        if not params_list:
+            return 0
+        with self.connect(include_database=include_database, autocommit=autocommit) as conn:
+            with conn.cursor() as cursor:
+                count = cursor.executemany(sql, params_list)
+            if not autocommit:
+                conn.commit()
+            return int(count or 0)
+
+    def query_rows(
+        self,
+        sql: str,
+        params: Sequence[Any] | dict[str, Any] | None = None,
+        include_database: bool = True,
+        timeout_sec: int | None = None,
+    ) -> list[dict[str, Any]]:
+        with self.connect(include_database=include_database, autocommit=True) as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(sql, params)
+                rows = cursor.fetchall()
+        return [dict(row) for row in rows]
+
+    def query_json_rows(
+        self,
+        sql: str,
+        params: Sequence[Any] | dict[str, Any] | None = None,
+        include_database: bool = True,
+        timeout_sec: int | None = None,
+    ) -> list[dict[str, Any]]:
+        rows = self.query_rows(sql, params=params, include_database=include_database, timeout_sec=timeout_sec)
+        parsed: list[dict[str, Any]] = []
+        for row in rows:
+            if not row:
                 continue
-            try:
-                rows.append(json.loads(text))
-            except json.JSONDecodeError as exc:
-                raise MySQLCLIError(f"invalid mysql json row: {text[:120]}") from exc
-        return rows
+            if len(row) == 1:
+                value = next(iter(row.values()))
+                if value is None:
+                    continue
+                if isinstance(value, (bytes, bytearray)):
+                    value = value.decode("utf-8", errors="ignore")
+                if isinstance(value, dict):
+                    parsed.append(value)
+                    continue
+                if not isinstance(value, str):
+                    raise MySQLClientError("invalid mysql json row payload type")
+                try:
+                    parsed.append(json.loads(value))
+                except json.JSONDecodeError as exc:
+                    raise MySQLClientError(f"invalid mysql json row: {value[:120]}") from exc
+                continue
+            parsed.append(row)
+        return parsed
 
-    def query_scalar(self, sql: str, include_database: bool = True, timeout_sec: int = 60) -> str:
-        output = self._run(sql, include_database=include_database, timeout_sec=timeout_sec)
-        for line in output.splitlines():
-            text = line.strip()
-            if text:
-                return text
-        return ""
+    def query_scalar(
+        self,
+        sql: str,
+        params: Sequence[Any] | dict[str, Any] | None = None,
+        include_database: bool = True,
+        timeout_sec: int | None = None,
+    ) -> Any:
+        rows = self.query_rows(sql, params=params, include_database=include_database, timeout_sec=timeout_sec)
+        if not rows:
+            return ""
+        row = rows[0]
+        if not row:
+            return ""
+        return next(iter(row.values()))
 
     def ensure_database(self) -> None:
         sql = f"CREATE DATABASE IF NOT EXISTS `{self.database}` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci"
@@ -250,15 +328,13 @@ class MySQLCLIClient:
     def health(self) -> dict[str, Any]:
         connected = False
         error = ""
-        if self.configured and self.available:
+        if self.configured:
             try:
-                self.query_scalar("SELECT 1", include_database=False, timeout_sec=10)
+                self.query_scalar("SELECT 1", include_database=False)
                 connected = True
             except Exception as exc:
                 error = str(exc)
-        elif not self.available:
-            error = "mysql client not found"
-        elif not self.configured:
+        else:
             error = "mysql env not configured"
         return {
             "configured": self.configured,

@@ -1,9 +1,14 @@
-﻿import json
+﻿import os
+import json
 import tempfile
 import unittest
+import uuid
 from pathlib import Path
 from unittest import mock
 
+os.environ["STORAGE_BACKEND"] = "file"
+
+from backend.mysql_support import MySQLClient
 from backend.server import (
     DEMO_DATA_FILE,
     DICT_FILE,
@@ -47,6 +52,20 @@ class FakeMySQLClient:
         for table_name, value in self.counts.items():
             if f"FROM {table_name}" in sql:
                 return str(value)
+        if "FROM buildings" in sql:
+            return str(len(self.rows.get("buildings", [])))
+        if "FROM energy_timeseries" in sql:
+            return str(len(self.rows.get("energy_timeseries", [])))
+        if "FROM weather_timeseries" in sql:
+            return str(len(self.rows.get("weather_timeseries", [])))
+        if "FROM anomaly_actions" in sql:
+            return str(len(self.rows.get("anomaly_actions", [])))
+        if "FROM anomaly_notes" in sql:
+            return str(len(self.rows.get("anomaly_notes", [])))
+        if "FROM ai_calls" in sql:
+            return str(len(self.rows.get("ai_calls", [])))
+        if "FROM system_snapshots" in sql:
+            return str(len(self.rows.get("system_snapshots", [])))
         return "0"
 
     def query_json_rows(self, sql, include_database=True, timeout_sec=60):
@@ -66,11 +85,38 @@ class FakeMySQLClient:
             return list(self.rows.get("system_snapshots", []))
         return []
 
+    def query_rows(self, sql, params=None, include_database=True, timeout_sec=60):
+        if "SELECT DISTINCT building_id" in sql and "FROM energy_timeseries" in sql:
+            seen = set()
+            items = []
+            for row in self.rows.get("energy_timeseries", []):
+                building_id = str(row.get("building_id", "")).strip()
+                if building_id and building_id not in seen:
+                    seen.add(building_id)
+                    items.append({"building_id": building_id})
+            return items
+        if "AVG(value) AS avg_value" in sql and "FROM energy_timeseries" in sql:
+            candidate_ids = list(params or [])
+            grouped = {}
+            for row in self.rows.get("energy_timeseries", []):
+                building_id = str(row.get("building_id", "")).strip()
+                if candidate_ids and building_id not in candidate_ids:
+                    continue
+                grouped.setdefault(building_id, []).append(float(row.get("electricity_kwh") or row.get("value") or 0.0))
+            return [
+                {"building_id": building_id, "avg_value": round(sum(values) / len(values), 6)}
+                for building_id, values in grouped.items()
+                if values
+            ]
+        return []
+
     def execute(self, sql, include_database=True, timeout_sec=60):
         self.executed.append(sql)
 
 
 class RepositoryTests(unittest.TestCase):
+    _mysql_seed_cache = None
+
     def _first_anomaly_id(self) -> int:
         data = REPO.query_anomalies(None, None, None, None, None, None, 1, 5, "timestamp_desc")
         self.assertGreater(data["count"], 0)
@@ -87,11 +133,63 @@ class RepositoryTests(unittest.TestCase):
         regression_file.write_text(json.dumps({"status": "unknown", "steps": []}, ensure_ascii=False), encoding="utf-8")
         return action_file, ai_file, note_file, regression_file
 
+    @classmethod
+    def _mysql_seed_rows(cls):
+        if cls._mysql_seed_cache is None:
+            weather_rows = []
+            for site_id, by_time in REPO.weather_by_site.items():
+                for timestamp, values in by_time.items():
+                    weather_rows.append(
+                        {
+                            "site_id": site_id,
+                            "timestamp": timestamp.strftime("%Y-%m-%d %H:%M:%S"),
+                            "temperature_c": values.get("temperature_c", 0.0),
+                            "wind_speed": values.get("wind_speed", 0.0),
+                        }
+                    )
+            cls._mysql_seed_cache = {
+                "buildings": [dict(meta) for meta in REPO.bdq2_metadata.values()],
+                "energy_timeseries": [
+                    {
+                        "record_id": row.get("record_id"),
+                        "building_id": row.get("building_id"),
+                        "building_name": row.get("building_name"),
+                        "building_type": row.get("building_type"),
+                        "timestamp": row["timestamp"].strftime("%Y-%m-%d %H:%M:%S"),
+                        "hour": row.get("hour"),
+                        "electricity_kwh": row.get("electricity_kwh"),
+                        "source": row.get("source", "normalized"),
+                    }
+                    for row in REPO.rows
+                ],
+                "weather_timeseries": weather_rows,
+                "anomaly_actions": [],
+                "anomaly_notes": [],
+                "ai_calls": [],
+                "system_snapshots": [],
+            }
+        return {
+            key: [dict(item) for item in value]
+            for key, value in cls._mysql_seed_cache.items()
+        }
+
     def test_buildings(self):
         data = REPO.query_buildings()
         self.assertGreater(data["count"], 0)
 
-    def test_create_repository_defaults_to_file(self):
+    def test_create_repository_defaults_to_mysql(self):
+        sentinel = object()
+
+        class StubMySQLRepository:
+            def __init__(self, *args, **kwargs):
+                self.marker = sentinel
+
+        with mock.patch.dict("os.environ", {"STORAGE_BACKEND": ""}, clear=False):
+            with mock.patch("backend.server.MySQLRepository", StubMySQLRepository):
+                repo = create_repository()
+        self.assertIs(repo.marker, sentinel)
+
+    def test_create_repository_uses_file_backend_when_requested(self):
         with mock.patch.dict("os.environ", {"STORAGE_BACKEND": "file"}, clear=False):
             repo = create_repository()
         self.assertIsInstance(repo, FileRepository)
@@ -700,7 +798,7 @@ class RepositoryTests(unittest.TestCase):
         self.assertTrue(health["storage"]["mysql"]["connected"])
 
     def test_mysql_repository_writes_action_events(self):
-        fake = FakeMySQLClient()
+        fake = FakeMySQLClient(rows=self._mysql_seed_rows())
         with tempfile.TemporaryDirectory() as tmp:
             action_file, ai_file, note_file, regression_file = self._empty_runtime_files(Path(tmp))
             repo = MySQLRepository(
@@ -720,6 +818,144 @@ class RepositoryTests(unittest.TestCase):
             self.assertGreater(len(anomalies), 0)
             repo.apply_anomaly_action({"anomaly_id": anomalies[0]["anomaly_id"], "action": "ack", "assignee": "mysql", "note": "ok"})
         self.assertTrue(any("INSERT INTO anomaly_actions" in sql for sql in fake.executed))
+
+
+class MySQLDriverIntegrationTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.database = f"a8_test_codex_{uuid.uuid4().hex[:8]}"
+        cls.client = MySQLClient(
+            host="127.0.0.1",
+            port=3306,
+            database=cls.database,
+            user="root",
+            password="root",
+        )
+        cls.client.ensure_schema()
+
+    @classmethod
+    def tearDownClass(cls):
+        admin = MySQLClient(
+            host="127.0.0.1",
+            port=3306,
+            database="mysql",
+            user="root",
+            password="root",
+        )
+        admin.execute(f"DROP DATABASE IF EXISTS `{cls.database}`")
+
+    def _empty_runtime_files(self, root: Path) -> tuple[Path, Path, Path, Path]:
+        action_file = root / "anomaly_actions.jsonl"
+        ai_file = root / "ai_calls.jsonl"
+        note_file = root / "anomaly_notes.jsonl"
+        regression_file = root / "regression_summary.json"
+        action_file.write_text("", encoding="utf-8")
+        ai_file.write_text("", encoding="utf-8")
+        note_file.write_text("", encoding="utf-8")
+        regression_file.write_text(json.dumps({"status": "unknown", "steps": []}, ensure_ascii=False), encoding="utf-8")
+        return action_file, ai_file, note_file, regression_file
+
+    def setUp(self):
+        for table in [
+            "anomaly_actions",
+            "anomaly_notes",
+            "ai_calls",
+            "system_snapshots",
+            "weather_timeseries",
+            "energy_timeseries",
+            "buildings",
+        ]:
+            self.client.execute(f"DELETE FROM {table}")
+
+    def test_mysql_client_health_reports_connected(self):
+        health = self.client.health()
+        self.assertTrue(health["configured"])
+        self.assertTrue(health["connected"])
+        self.assertEqual(health["database"], self.database)
+
+    def test_mysql_repository_roundtrip_for_storage_tables(self):
+        now = "2026-03-28 10:00:00"
+        self.client.execute(
+            """
+            INSERT INTO buildings (
+                building_id, site_id, primaryspaceusage, sub_primaryspaceusage, peer_category,
+                display_category, display_name, created_at, updated_at
+            ) VALUES (
+                'Panther_education_Genevieve', 'Panther', 'Education', 'Classroom',
+                'teaching_building', '教学楼', 'Panther_education_Genevieve（教学楼）',
+                %s, %s
+            )
+            """,
+            params=(now, now),
+        )
+        self.client.execute(
+            """
+            INSERT INTO ai_calls (
+                trace_id, event_time, requested_provider, provider, scene, building_id, anomaly_id,
+                has_message, result_risk_level, knowledge_source, retrieval_hit_count, retrieval_error_type,
+                fallback_used, field_complete, latency_ms, success, error_type, feedback_label, created_at, updated_at
+            ) VALUES (
+                'trace-test-1', %s, 'template', 'template_provider', 'diagnose', 'Panther_education_Genevieve',
+                NULL, 1, 'medium', 'ragflow', 2, '', 0, 1, 320, 1, '', '', %s, %s
+            )
+            """,
+            params=(now, now, now),
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            action_file, ai_file, note_file, regression_file = self._empty_runtime_files(Path(tmp))
+            repo = MySQLRepository(
+                DEMO_DATA_FILE,
+                NORMALIZED_DATA_FILE,
+                METADATA_FILE,
+                WEATHER_FILE,
+                DICT_FILE,
+                KNOWLEDGE_FILE,
+                action_file,
+                ai_file,
+                note_file,
+                regression_file,
+                mysql_client=self.client,
+            )
+            repo._append_action_event(
+                {
+                    "anomaly_id": 9001,
+                    "action": "ack",
+                    "status_before": "new",
+                    "status": "acknowledged",
+                    "assignee": "mysql",
+                    "note": "已确认",
+                    "created_at": now,
+                }
+            )
+            repo._append_note_event(
+                {
+                    "anomaly_id": 9001,
+                    "cause_confirmed": "阈值验证",
+                    "action_taken": "人工复核",
+                    "result_summary": "确认有效",
+                    "recurrence_risk": "low",
+                    "reviewer": "qa",
+                    "updated_at": now,
+                }
+            )
+            feedback = repo.save_ai_feedback({"trace_id": "trace-test-1", "label": "useful"})
+            health = repo.query_system_health()
+
+        buildings = self.client.query_rows("SELECT building_id, display_name FROM buildings")
+        actions = self.client.query_rows("SELECT anomaly_id, action_name, status_after FROM anomaly_actions")
+        notes = self.client.query_rows("SELECT anomaly_id, recurrence_risk FROM anomaly_notes")
+        ai_calls = self.client.query_rows("SELECT trace_id, feedback_label FROM ai_calls WHERE trace_id = 'trace-test-1'")
+
+        self.assertEqual(buildings[0]["building_id"], "Panther_education_Genevieve")
+        self.assertEqual(buildings[0]["display_name"], "Panther_education_Genevieve（教学楼）")
+        self.assertEqual(actions[0]["action_name"], "ack")
+        self.assertEqual(actions[0]["status_after"], "acknowledged")
+        self.assertEqual(notes[0]["recurrence_risk"], "low")
+        self.assertEqual(feedback["label"], "useful")
+        self.assertEqual(ai_calls[0]["feedback_label"], "useful")
+        self.assertEqual(health["storage"]["backend"], "mysql")
+        self.assertTrue(health["storage"]["mysql"]["connected"])
 
 
 if __name__ == "__main__":

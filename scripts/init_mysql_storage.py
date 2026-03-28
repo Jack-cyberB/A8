@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import datetime as dt
 import json
 import os
@@ -13,12 +14,12 @@ if str(ROOT) not in sys.path:
 
 os.environ["STORAGE_BACKEND"] = "file"
 
-from backend.mysql_support import MySQLCLIClient, sql_literal
+from backend.mysql_support import MySQLClient, sql_literal
 from backend.server import (
     ACTION_LOG_FILE,
     AI_CALL_LOG_FILE,
     DICT_FILE,
-    FileRepository,
+    FileImportSource,
     KNOWLEDGE_FILE,
     METADATA_FILE,
     NORMALIZED_DATA_FILE,
@@ -45,8 +46,8 @@ def now_text() -> str:
     return to_iso(dt.datetime.now())
 
 
-def load_file_repository() -> FileRepository:
-    return FileRepository(
+def load_file_repository() -> FileImportSource:
+    return FileImportSource(
         DEMO_DATA_FILE,
         NORMALIZED_DATA_FILE,
         METADATA_FILE,
@@ -60,7 +61,7 @@ def load_file_repository() -> FileRepository:
     )
 
 
-def import_buildings(client: MySQLCLIClient, repo: FileRepository) -> int:
+def import_buildings(client: MySQLClient, repo: FileImportSource) -> int:
     rows = []
     now = now_text()
     for meta in repo.bdq2_metadata.values():
@@ -100,7 +101,7 @@ def import_buildings(client: MySQLCLIClient, repo: FileRepository) -> int:
     return len(rows)
 
 
-def import_energy(client: MySQLCLIClient, repo: FileRepository) -> int:
+def import_energy(client: MySQLClient, repo: FileImportSource) -> int:
     rows = []
     now = now_text()
     for item in repo.rows:
@@ -144,7 +145,7 @@ def import_energy(client: MySQLCLIClient, repo: FileRepository) -> int:
     return len(rows)
 
 
-def import_weather(client: MySQLCLIClient, repo: FileRepository) -> int:
+def import_weather(client: MySQLClient, repo: FileImportSource) -> int:
     rows = []
     now = now_text()
     for site_id, by_time in repo.weather_by_site.items():
@@ -177,7 +178,87 @@ def import_weather(client: MySQLCLIClient, repo: FileRepository) -> int:
     return len(rows)
 
 
-def import_anomaly_actions(client: MySQLCLIClient, repo: FileRepository) -> int:
+def import_peer_energy_daily(client: MySQLClient, repo: FileImportSource) -> int:
+    raw_file = repo.raw_electricity_file
+    if not raw_file.exists():
+        client.execute("TRUNCATE TABLE peer_energy_daily")
+        return 0
+
+    candidate_ids = [
+        building_id
+        for building_id, meta in repo.bdq2_metadata.items()
+        if str(meta.get("peer_category", "")).strip()
+    ]
+    if not candidate_ids:
+        client.execute("TRUNCATE TABLE peer_energy_daily")
+        return 0
+
+    daily_totals = {}
+    with raw_file.open("r", encoding="utf-8", newline="") as f:
+        reader = csv.reader(f)
+        header = next(reader, [])
+        indexed_candidates = [
+            (idx, building_id)
+            for idx, building_id in enumerate(header[1:], start=1)
+            if building_id in candidate_ids
+        ]
+        for row in reader:
+            if not row:
+                continue
+            day = str(row[0]).strip()[:10]
+            if not day:
+                continue
+            for idx, building_id in indexed_candidates:
+                if idx >= len(row):
+                    continue
+                raw_val = str(row[idx]).strip()
+                if not raw_val:
+                    continue
+                try:
+                    value = float(raw_val)
+                except ValueError:
+                    continue
+                if value < 0:
+                    continue
+                key = (building_id, day)
+                total, count = daily_totals.get(key, (0.0, 0))
+                daily_totals[key] = (total + value, count + 1)
+
+    client.execute("TRUNCATE TABLE peer_energy_daily")
+    now = now_text()
+    rows = []
+    for (building_id, day), (total_value, sample_count) in daily_totals.items():
+        if sample_count <= 0:
+            continue
+        avg_value = total_value / sample_count
+        rows.append(
+            "("
+            + ", ".join(
+                [
+                    sql_literal("electricity"),
+                    sql_literal(building_id),
+                    sql_literal(day),
+                    sql_literal(round(total_value, 6)),
+                    sql_literal(sample_count),
+                    sql_literal(round(avg_value, 6)),
+                    sql_literal(now),
+                    sql_literal(now),
+                ]
+            )
+            + ")"
+        )
+
+    for batch in chunked(rows, 500):
+        sql = f"""
+        INSERT INTO peer_energy_daily (
+            metric_type, building_id, day, total_value, sample_count, avg_value, created_at, updated_at
+        ) VALUES {", ".join(batch)}
+        """
+        client.execute(sql, timeout_sec=120)
+    return len(rows)
+
+
+def import_anomaly_actions(client: MySQLClient, repo: FileImportSource) -> int:
     rows = []
     for event in repo.action_events:
         rows.append(
@@ -207,7 +288,7 @@ def import_anomaly_actions(client: MySQLCLIClient, repo: FileRepository) -> int:
     return len(rows)
 
 
-def import_anomaly_notes(client: MySQLCLIClient, repo: FileRepository) -> int:
+def import_anomaly_notes(client: MySQLClient, repo: FileImportSource) -> int:
     rows = []
     for event in repo.note_events:
         rows.append(
@@ -237,7 +318,7 @@ def import_anomaly_notes(client: MySQLCLIClient, repo: FileRepository) -> int:
     return len(rows)
 
 
-def import_ai_calls(client: MySQLCLIClient, repo: FileRepository) -> int:
+def import_ai_calls(client: MySQLClient, repo: FileImportSource) -> int:
     rows = []
     now = now_text()
     for event in repo.ai_events:
@@ -284,7 +365,7 @@ def import_ai_calls(client: MySQLCLIClient, repo: FileRepository) -> int:
     return len(rows)
 
 
-def import_regression_summary(client: MySQLCLIClient) -> bool:
+def import_regression_summary(client: MySQLClient) -> bool:
     if not REGRESSION_SUMMARY_FILE.exists():
         return False
     payload = json.loads(REGRESSION_SUMMARY_FILE.read_text(encoding="utf-8"))
@@ -301,7 +382,7 @@ def import_regression_summary(client: MySQLCLIClient) -> bool:
 
 
 def main() -> None:
-    client = MySQLCLIClient.from_env()
+    client = MySQLClient.from_env()
     client.ensure_schema()
     repo = load_file_repository()
 
@@ -309,6 +390,7 @@ def main() -> None:
         "buildings": import_buildings(client, repo),
         "energy_timeseries": import_energy(client, repo),
         "weather_timeseries": import_weather(client, repo),
+        "peer_energy_daily": import_peer_energy_daily(client, repo),
         "anomaly_actions": import_anomaly_actions(client, repo),
         "anomaly_notes": import_anomaly_notes(client, repo),
         "ai_calls": import_ai_calls(client, repo),
