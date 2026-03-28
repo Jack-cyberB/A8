@@ -442,15 +442,10 @@
                       <strong>{{ item.value }}</strong>
                     </div>
                   </div>
-                  <div class="compare-info-hint">{{ compareInfoHint() }}</div>
-                </div>
-                <div class="compare-info-block">
-                  <div class="compare-info-title">同类偏差解释</div>
-                  <div v-if="!analysisInsights.compare_findings.length" class="empty-tip">选择单体建筑后，这里会给出同类位置和差距解释。</div>
-                  <div v-else class="insight-list">
-                    <div v-for="item in analysisInsights.compare_findings" :key="`compare-inline-${item.title}`" class="insight-item" :class="insightToneClass(item.severity)">
-                      <div class="insight-item-title">{{ item.title }}</div>
-                      <div class="insight-item-detail">{{ item.detail }}</div>
+                  <div class="compare-info-focus">
+                    <div class="compare-info-title">关注点</div>
+                    <div class="compare-info-list">
+                      <div v-for="item in compareInfoFocusList()" :key="item" class="compare-info-item">{{ item }}</div>
                     </div>
                   </div>
                 </div>

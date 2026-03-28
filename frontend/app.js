@@ -1016,24 +1016,34 @@ createApp({
     compareInfoMetrics() {
       const peer = this.analysisCompare?.peer_group || {};
       if (!peer.peer_count) return [];
+      const nightBaseRatio = Number(this.analysisDistribution?.night_base_load?.ratio_vs_avg_pct || 0);
       return [
         { label: '同类样本', value: `${peer.peer_count || '-'} 栋` },
-        { label: '同类百分位', value: `${this.formatNumber(peer.peer_percentile || 0, 1)}` },
+        { label: '同类百分位', value: `${this.formatNumber(peer.peer_percentile || 0, 1)}%` },
         { label: '排名位置', value: `${peer.ranking_position || '-'} / ${peer.peer_count || '-'}` },
+        { label: '夜间基线', value: `${this.formatNumber(nightBaseRatio, 1)}%` },
       ];
     },
-    compareInfoHint() {
+    compareInfoFocusList() {
       const peer = this.analysisCompare?.peer_group || {};
       const nightBaseRatio = Number(this.analysisDistribution?.night_base_load?.ratio_vs_avg_pct || 0);
       const gap = Number(peer.gap_pct || 0);
-      if (!peer.peer_count) return '先选择单体建筑，再结合结构图判断是否存在稳定偏高的负荷模式。';
+      if (!peer.peer_count) {
+        return ['先选择单体建筑，再结合左侧两张图判断是否存在稳定偏高的负荷模式。'];
+      }
+      const items = [];
       if (nightBaseRatio >= 45) {
-        return `夜间基线约为平均负荷的 ${this.formatNumber(nightBaseRatio, 1)}%，优先排查非工作时段常开设备与基载策略。`;
+        items.push(`夜间基线约为平均负荷的 ${this.formatNumber(nightBaseRatio, 1)}%，优先排查非工作时段常开设备与基载策略。`);
       }
       if (gap >= 10) {
-        return '若同类差距持续偏高，优先结合左侧工作日/昼夜结构，判断是否由白天业务负荷或控制策略抬升造成。';
+        items.push('同类差距持续偏高时，优先结合左侧工作日与昼夜结构，判断是否由白天业务负荷或控制策略抬升造成。');
+      } else if (gap <= -10) {
+        items.push('当前水平明显低于同类均值，可回看峰时与工作日分布，确认是否存在低负荷运行或使用强度差异。');
       }
-      return '当前同类差距不算极端，更适合结合左侧结构图确认具体偏高时段，再决定是否需要专项优化。';
+      if (!items.length) {
+        items.push('当前同类差距不算极端，更适合先定位具体偏高时段，再决定是否需要专项优化。');
+      }
+      return items.slice(0, 2);
     },
     selectedBuildingMeta() {
       return this.buildings.find((item) => item.id === this.filters.buildingId) || null;
