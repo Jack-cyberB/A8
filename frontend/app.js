@@ -19,8 +19,7 @@ const PAGE_WORKSPACE_CONFIG = {
     description: '围绕当前建筑和时间范围，把趋势、结构、对标和节能机会分成独立任务工作区。',
     submodules: [
       { key: 'trend', label: '趋势分析', desc: '趋势变化与天气联动' },
-      { key: 'structure', label: '结构分析', desc: '分时段与周内结构' },
-      { key: 'benchmark', label: '同类对标', desc: '同类样本对比与偏差解释' },
+      { key: 'structure', label: '结构分析与对标', desc: '分时段结构 + 同类样本对比' },
       { key: 'opportunity', label: '节能机会', desc: '高耗窗口与优化动作' },
     ],
   },

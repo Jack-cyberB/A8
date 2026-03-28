@@ -354,17 +354,17 @@
               </div>
             </div>
 
-            <div v-if="activeSubmoduleMap.analysis === 'trend' || activeSubmoduleMap.analysis === 'benchmark'" class="panel panel--insight-board">
+            <div v-if="activeSubmoduleMap.analysis === 'trend'" class="panel panel--insight-board">
               <div class="panel-head">
                 <div>
                   <div class="panel-eyebrow">Insights</div>
-                  <div class="panel-title">{{ activeSubmoduleMap.analysis === 'benchmark' ? '同类偏差解释' : '规则洞察与证据提要' }}</div>
+                  <div class="panel-title">规则洞察与证据提要</div>
                 </div>
                 <div class="panel-meta">{{ analysisInsights.scope_summary.point_count || 0 }} 个数据点</div>
               </div>
               <div v-if="errors.analysisInsights" class="state-warn">{{ errors.analysisInsights }}</div>
-              <div class="insight-groups" :class="{ 'insight-groups--two': activeSubmoduleMap.analysis === 'trend' }">
-                <div v-if="activeSubmoduleMap.analysis === 'trend'" class="insight-group">
+              <div class="insight-groups insight-groups--two">
+                <div class="insight-group">
                   <div class="insight-group-title">趋势结论</div>
                   <div v-if="!analysisInsights.trend_findings.length" class="empty-tip">当前时间范围暂无可解释趋势。</div>
                   <div v-else class="insight-list">
@@ -375,7 +375,7 @@
                   </div>
                 </div>
 
-                <div v-if="activeSubmoduleMap.analysis === 'trend'" class="insight-group">
+                <div class="insight-group">
                   <div class="insight-group-title">天气联动</div>
                   <div v-if="!analysisInsights.weather_findings.length" class="empty-tip">当前没有温度联动结论。</div>
                   <div v-else class="insight-list">
@@ -386,21 +386,11 @@
                   </div>
                 </div>
 
-                <div v-if="activeSubmoduleMap.analysis === 'benchmark'" class="insight-group">
-                  <div class="insight-group-title">同类对比</div>
-                  <div v-if="!analysisInsights.compare_findings.length" class="empty-tip">选择单体建筑后，这里会给出同类位置和差距解释。</div>
-                  <div v-else class="insight-list">
-                    <div v-for="item in analysisInsights.compare_findings" :key="`compare-${item.title}`" class="insight-item" :class="insightToneClass(item.severity)">
-                      <div class="insight-item-title">{{ item.title }}</div>
-                      <div class="insight-item-detail">{{ item.detail }}</div>
-                    </div>
-                  </div>
-                </div>
               </div>
             </div>
 
-            <div v-if="activeSubmoduleMap.analysis === 'structure' || activeSubmoduleMap.analysis === 'benchmark'" class="analysis-secondary-grid" :class="{ 'analysis-secondary-grid--single': activeSubmoduleMap.analysis !== 'structure' }">
-              <div v-if="activeSubmoduleMap.analysis === 'structure'" class="panel">
+            <div v-if="activeSubmoduleMap.analysis === 'structure'" class="analysis-secondary-grid analysis-secondary-grid--merged">
+              <div class="panel">
                 <div class="panel-head">
                   <div>
                     <div class="panel-eyebrow">Structure</div>
@@ -411,16 +401,16 @@
                 <div class="mini-grid">
                   <div class="mini-panel">
                     <div class="mini-panel-title">24 小时负荷轮廓</div>
-                    <div id="patternChart" class="chart chart--mini"></div>
+                    <div id="patternChart" class="chart chart--mini chart--mini-compact"></div>
                   </div>
                   <div class="mini-panel">
                     <div class="mini-panel-title">工作日 / 周末 / 昼夜占比</div>
-                    <div id="splitChart" class="chart chart--mini"></div>
+                    <div id="splitChart" class="chart chart--mini chart--mini-compact"></div>
                   </div>
                 </div>
               </div>
 
-              <div v-if="activeSubmoduleMap.analysis === 'benchmark'" class="panel">
+              <div class="panel">
                 <div class="panel-head">
                   <div>
                     <div class="panel-eyebrow">Compare</div>
@@ -430,8 +420,8 @@
                 </div>
                 <div v-if="errors.analysisCompare" class="state-error">{{ errors.analysisCompare }}</div>
                 <div class="compare-layout">
-                  <div id="compareChart" class="chart chart--compare"></div>
-                  <div class="peer-list">
+                  <div id="compareChart" class="chart chart--compare chart--compare-compact"></div>
+                  <div class="peer-list peer-list--compact">
                     <div class="peer-list-title">同类建筑均值排名</div>
                     <div v-if="analysisCompare.peer_group" class="peer-summary">
                       <div class="peer-summary-item">
@@ -454,6 +444,29 @@
                         <strong>{{ formatNumber(item.avg_value, 1) }} kWh</strong>
                       </li>
                     </ul>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div v-if="activeSubmoduleMap.analysis === 'structure'" class="panel panel--insight-board panel--insight-board-compact">
+              <div class="panel-head">
+                <div>
+                  <div class="panel-eyebrow">Insights</div>
+                  <div class="panel-title">结构与同类偏差解释</div>
+                </div>
+                <div class="panel-meta">{{ analysisInsights.scope_summary.point_count || 0 }} 个数据点</div>
+              </div>
+              <div v-if="errors.analysisInsights" class="state-warn">{{ errors.analysisInsights }}</div>
+              <div class="insight-groups insight-groups--single">
+                <div class="insight-group">
+                  <div class="insight-group-title">同类对比</div>
+                  <div v-if="!analysisInsights.compare_findings.length" class="empty-tip">选择单体建筑后，这里会给出同类位置和差距解释。</div>
+                  <div v-else class="insight-list">
+                    <div v-for="item in analysisInsights.compare_findings" :key="`compare-${item.title}`" class="insight-item" :class="insightToneClass(item.severity)">
+                      <div class="insight-item-title">{{ item.title }}</div>
+                      <div class="insight-item-detail">{{ item.detail }}</div>
+                    </div>
                   </div>
                 </div>
               </div>
