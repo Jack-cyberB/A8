@@ -116,6 +116,8 @@ const PROJECT_HELP_SECTIONS = [
   },
 ];
 
+const OPERATOR_OPTIONS = ['张三', '李四', '王五'];
+
 function buildQuery(params) {
   const q = new URLSearchParams();
   Object.entries(params).forEach(([k, v]) => {
@@ -241,6 +243,12 @@ createApp({
         streamBuffer: '',
         sessionId: '',
       },
+      unifiedChatSessions: {
+        knowledge: { messages: [], input: '', sessionId: '', loading: false, streaming: false, streamBuffer: '' },
+        saving: { messages: [], input: '', sessionId: '', loading: false, streaming: false, streamBuffer: '' },
+        diagnosis: { messages: [], input: '', sessionId: '', loading: false, streaming: false, streamBuffer: '' },
+        interpretation: { messages: [], input: '', sessionId: '', loading: false, streaming: false, streamBuffer: '' },
+      },
       activeKnowledgeCitation: {
         messageId: '',
         citationIndex: null,
@@ -269,6 +277,18 @@ createApp({
         expanded: false,
       },
       knowledgeDocumentCache: {},
+      reportDialogVisible: false,
+      reportExportFormat: 'docx',
+      reportExporting: false,
+      operatorOptions: OPERATOR_OPTIONS,
+      reportOperatorForm: {
+        assignee: '张三',
+        processingTime: '',
+        executionMode: 'ai',
+        executionResult: '',
+        reviewMode: 'ai',
+        reviewConclusion: '',
+      },
       helpDialogVisible: false,
       activeHelpSection: 'overview',
       helpSections: PROJECT_HELP_SECTIONS,
@@ -315,6 +335,9 @@ createApp({
         resultSummary: '',
         recurrenceRisk: 'medium',
         reviewer: '',
+        actionMode: 'manual',
+        resultMode: 'manual',
+        processingTime: '',
       },
       actionDialogVisible: false,
       actionForm: {
@@ -322,6 +345,7 @@ createApp({
         action: 'ack',
         assignee: '',
         note: '',
+        processingTime: '',
       },
       loading: {
         overview: false,
@@ -475,6 +499,11 @@ createApp({
     formatCompactDateTime(value) {
       if (!value) return '-';
       return String(value).replace('T', ' ').slice(0, 16);
+    },
+    currentDateTimeText() {
+      const now = new Date();
+      const pad = (value) => String(value).padStart(2, '0');
+      return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
     },
     providerLabel(value) {
       const map = {
@@ -1131,8 +1160,11 @@ createApp({
     reviewableAnomalyRows(limit = 6) {
       return this.anomalyRows.filter((item) => item.status === 'resolved' || item.status === 'acknowledged').slice(0, limit);
     },
-    topSavingImpactItems(limit = 3) {
-      return (this.analysisInsights.saving_opportunities || [])
+    topSavingImpactItems(source, limit = 3) {
+      const items = Array.isArray(source?.saving_opportunities) && source.saving_opportunities.length
+        ? source.saving_opportunities
+        : (this.analysisInsights.saving_opportunities || []);
+      return items
         .slice(0, limit)
         .map((item) => `${item.title}：影响估算 ${this.formatInsightKwh(this.opportunityEstimatedKwh(item))}`);
     },
@@ -1143,14 +1175,52 @@ createApp({
       const legacy = Number(item.estimated_loss_kwh);
       return Number.isFinite(legacy) ? legacy : 0;
     },
+    inferSavingFocus(question = '') {
+      const text = String(question || '');
+      if (text.includes('夜间') || text.includes('基线') || text.includes('待机')) return 'night_baseload';
+      if (text.includes('异常') || text.includes('浪费') || text.includes('突增') || text.includes('高负荷')) return 'anomaly_waste';
+      if (text.includes('同类') || text.includes('对标') || text.includes('差距')) return 'peer_gap';
+      if (text.includes('峰') || text.includes('错峰') || text.includes('排程') || text.includes('时段')) return 'peak_strategy';
+      return '';
+    },
+    cloneSessionState(session = {}) {
+      return {
+        messages: Array.isArray(session.messages) ? JSON.parse(JSON.stringify(session.messages)) : [],
+        input: String(session.input || ''),
+        sessionId: String(session.sessionId || ''),
+        loading: false,
+        streaming: false,
+        streamBuffer: String(session.streamBuffer || ''),
+      };
+    },
+    saveUnifiedConversationSession(submoduleKey = this.assistantSubmodule) {
+      if (!submoduleKey || !this.unifiedChatSessions[submoduleKey]) return;
+      this.unifiedChatSessions = {
+        ...this.unifiedChatSessions,
+        [submoduleKey]: this.cloneSessionState(this.unifiedChat),
+      };
+    },
+    restoreUnifiedConversationSession(submoduleKey = this.assistantSubmodule, options = {}) {
+      const { resetIfMissing = false } = options;
+      const saved = this.unifiedChatSessions[submoduleKey];
+      if (saved) {
+        this.unifiedChat = this.cloneSessionState(saved);
+      } else if (resetIfMissing) {
+        this.unifiedChat = this.cloneSessionState();
+      }
+      this.resetKnowledgeReferenceState();
+    },
     activateSubmodule(pageKey, submoduleKey) {
       const currentKey = this.activeSubmoduleMap[pageKey];
+      if (pageKey === 'assistant' && currentKey && currentKey !== submoduleKey) {
+        this.saveUnifiedConversationSession(currentKey);
+      }
       this.activeSubmoduleMap = { ...this.activeSubmoduleMap, [pageKey]: submoduleKey };
       if (pageKey === 'assistant') {
         const changed = this.assistantSubmodule !== submoduleKey;
         this.assistantSubmodule = submoduleKey;
         if (changed) {
-          this.resetUnifiedConversation({ silent: true });
+          this.restoreUnifiedConversationSession(submoduleKey, { resetIfMissing: true });
           if (submoduleKey !== 'diagnosis') {
             this.selectedAnomaly = null;
           }
@@ -1404,6 +1474,7 @@ createApp({
             night_base_load: this.analysisDistribution.night_base_load || {},
           },
           compare_snapshot: this.analysisCompare.peer_group || null,
+          saving_focus: mode === 'saving' ? this.inferSavingFocus(question) : '',
           message: question || (mode === 'saving'
             ? `${this.currentAnalysisScopeText()}，请输出节能结论、优先动作和收益影响。`
             : `${this.currentAnalysisScopeText()}，请输出结构化分析结论。`),
@@ -1463,8 +1534,262 @@ createApp({
       this.unifiedChat.loading = false;
       this.unifiedChat.streaming = false;
       this.unifiedChat.streamBuffer = '';
+      this.saveUnifiedConversationSession(this.assistantSubmodule);
       this.resetKnowledgeReferenceState();
       if (!silent) this.$message.success(`已切换到新的${this.assistantSubmoduleConfig().label}会话`);
+    },
+    assistantReportSupported() {
+      return ['saving', 'diagnosis', 'interpretation'].includes(this.assistantSubmodule);
+    },
+    assistantReportMessageType() {
+      return this.assistantSubmodule === 'interpretation' ? 'analysis' : this.assistantSubmodule;
+    },
+    assistantReportTitle() {
+      const map = {
+        saving: '节能建议报告',
+        diagnosis: '异常诊断报告',
+        interpretation: '分析解读报告',
+      };
+      return map[this.assistantSubmodule] || '智能助手报告';
+    },
+    cloneJsonValue(value) {
+      try {
+        return JSON.parse(JSON.stringify(value));
+      } catch (_) {
+        return null;
+      }
+    },
+    assistantReportMessages() {
+      const assistantType = this.assistantReportMessageType();
+      return this.unifiedChat.messages
+        .filter((msg) => {
+          if (msg.role === 'user') return String(msg.content || '').trim();
+          if (msg.role !== 'assistant') return false;
+          if (msg.type !== assistantType || msg.pending) return false;
+          if (msg.type === 'knowledge') return false;
+          return !!msg.data || !!String(msg.content || '').trim();
+        })
+        .map((msg) => {
+          const normalized = {
+            id: msg.id,
+            role: msg.role,
+            type: msg.type,
+            content: String(msg.content || '').trim(),
+            pending: false,
+          };
+          if (msg.role === 'assistant' && msg.data) {
+            normalized.data = this.normalizeReportAssistantData(msg);
+          }
+          return normalized;
+        });
+    },
+    normalizeReportAssistantData(msg) {
+      const data = this.cloneJsonValue(msg.data) || {};
+      if (msg.type === 'saving') {
+        data.report_impacts = this.topSavingImpactItems(data, 6);
+      }
+      return data;
+    },
+    latestAssistantReportResult() {
+      const assistantType = this.assistantReportMessageType();
+      for (let i = this.unifiedChat.messages.length - 1; i >= 0; i -= 1) {
+        const msg = this.unifiedChat.messages[i];
+        if (msg.role === 'assistant' && msg.type === assistantType && !msg.pending && msg.data) {
+          return this.normalizeReportAssistantData(msg);
+        }
+      }
+      return null;
+    },
+    assistantReportReady() {
+      return this.assistantReportSupported() && !!this.latestAssistantReportResult() && this.assistantReportMessages().length > 0;
+    },
+    assistantReportContextMeta() {
+      const building = this.selectedBuildingMeta();
+      return {
+        building_id: this.filters.buildingId || 'ALL',
+        building_name: this.analysisInsights.scope_summary?.building_name || building?.name || '未选择建筑',
+        building_type: this.analysisInsights.scope_summary?.building_type || building?.type || '',
+        start_time: this.isCompleteRange(this.filters.range) ? this.filters.range[0] : '',
+        end_time: this.isCompleteRange(this.filters.range) ? this.filters.range[1] : '',
+        scope_text: this.currentAnalysisScopeText(),
+        metric_label: this.currentMetricLabel(),
+        anomaly_id: this.selectedAnomaly?.anomaly_id || '',
+        anomaly_name: this.selectedAnomaly?.anomaly_name || '',
+        timestamp: this.selectedAnomaly?.timestamp || '',
+      };
+    },
+    reportExecutionDraft() {
+      const latest = this.latestAssistantReportResult() || {};
+      if (this.assistantSubmodule === 'diagnosis') {
+        const actions = (latest.recommended_actions || []).slice(0, 3).join('；');
+        return actions || '请结合当前诊断建议填写执行动作。';
+      }
+      if (this.assistantSubmodule === 'saving') {
+        const actions = (latest.energy_saving_suggestions || []).slice(0, 3).join('；');
+        return actions || '请结合当前节能建议填写执行动作。';
+      }
+      const actions = (latest.operations_suggestions || []).slice(0, 3).join('；');
+      return actions || '请结合当前分析建议填写执行动作。';
+    },
+    reportReviewDraft() {
+      const latest = this.latestAssistantReportResult() || {};
+      if (this.assistantSubmodule === 'diagnosis') {
+        const summary = String(latest.conclusion || '').trim();
+        const prevention = (latest.prevention || []).slice(0, 2).join('；');
+        return [summary, prevention].filter(Boolean).join('；') || '请结合诊断结论填写复核意见。';
+      }
+      if (this.assistantSubmodule === 'saving') {
+        const summary = String(latest.summary || '').trim();
+        const ops = (latest.operations_suggestions || []).slice(0, 2).join('；');
+        return [summary, ops].filter(Boolean).join('；') || '请结合节能建议填写复核意见。';
+      }
+      const summary = String(latest.summary || '').trim();
+      const causes = (latest.possible_causes || []).slice(0, 2).join('；');
+      return [summary, causes].filter(Boolean).join('；') || '请结合分析结论填写复核意见。';
+    },
+    syncReportOperatorDrafts() {
+      if (this.reportOperatorForm.executionMode === 'ai') {
+        this.reportOperatorForm.executionResult = this.reportExecutionDraft();
+      }
+      if (this.reportOperatorForm.reviewMode === 'ai') {
+        this.reportOperatorForm.reviewConclusion = this.reportReviewDraft();
+      }
+    },
+    onReportExecutionModeChange() {
+      this.reportOperatorForm.executionResult = this.reportOperatorForm.executionMode === 'ai' ? this.reportExecutionDraft() : '';
+    },
+    onReportReviewModeChange() {
+      this.reportOperatorForm.reviewConclusion = this.reportOperatorForm.reviewMode === 'ai' ? this.reportReviewDraft() : '';
+    },
+    applyPostmortemActionDraft() {
+      const diagnosisActions = (this.diagnosis?.recommended_actions || []).slice(0, 3);
+      const detailActions = (this.anomalyDetail?.recommended_actions || []).slice(0, 3);
+      const actions = diagnosisActions.length ? diagnosisActions : detailActions;
+      this.postmortemForm.actionTaken = actions.join('；') || '请结合本次异常处置动作补充执行结果。';
+    },
+    applyPostmortemResultDraft() {
+      const summary = String(this.diagnosis?.conclusion || this.anomalyDetail?.rule_explanation?.rule_summary || '').trim();
+      const anomalyName = this.anomalyDetail?.anomaly?.anomaly_name || '当前异常';
+      this.postmortemForm.resultSummary = summary || `${anomalyName}已完成复核，请结合现场结果补充最终结论。`;
+    },
+    onPostmortemActionModeChange() {
+      this.postmortemForm.actionTaken = '';
+      if (this.postmortemForm.actionMode === 'ai') this.applyPostmortemActionDraft();
+    },
+    onPostmortemResultModeChange() {
+      this.postmortemForm.resultSummary = '';
+      if (this.postmortemForm.resultMode === 'ai') this.applyPostmortemResultDraft();
+    },
+    openReportDialog() {
+      if (!this.assistantReportSupported()) return;
+      if (!this.assistantReportReady()) {
+        this.$message.warning('当前模块还没有可导出的完整结果');
+        return;
+      }
+      this.reportOperatorForm = {
+        assignee: this.selectedAnomaly?.assignee || '张三',
+        processingTime: this.currentDateTimeText(),
+        executionMode: 'ai',
+        executionResult: '',
+        reviewMode: 'ai',
+        reviewConclusion: '',
+      };
+      this.syncReportOperatorDrafts();
+      this.reportExportFormat = 'docx';
+      this.reportDialogVisible = true;
+    },
+    async exportAssistantReport() {
+      if (!this.assistantReportReady()) {
+        this.$message.warning('当前模块还没有可导出的完整结果');
+        return;
+      }
+      this.reportExporting = true;
+      try {
+        const payload = {
+          module: this.assistantSubmodule,
+          format: this.reportExportFormat,
+          session_messages: this.assistantReportMessages(),
+          context_meta: this.assistantReportContextMeta(),
+          latest_result: this.latestAssistantReportResult(),
+          operator_form: {
+            assignee: this.reportOperatorForm.assignee,
+            processing_time: this.reportOperatorForm.processingTime,
+            execution_result: this.reportOperatorForm.executionResult,
+            review_conclusion: this.reportOperatorForm.reviewConclusion,
+          },
+        };
+        const response = await fetch(`${API_BASE}/api/assistant/report/export`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        if (!response.ok) {
+          let message = `${response.status} ${response.statusText}`;
+          try {
+            const errorPayload = await response.json();
+            if (errorPayload?.message) message = errorPayload.message;
+          } catch (_) {
+            // ignore
+          }
+          throw new Error(message);
+        }
+        const blob = await response.blob();
+        const disposition = response.headers.get('Content-Disposition') || '';
+        const filename = this.parseDownloadFilename(disposition, this.fallbackAssistantReportFilename());
+        await this.saveAssistantReportBlob(blob, filename, response.headers.get('Content-Type') || '');
+        this.reportDialogVisible = false;
+        this.$message.success(`${this.assistantReportTitle()}已生成`);
+      } catch (err) {
+        if (err?.name === 'AbortError') return;
+        this.$message.error(`报告导出失败：${err.message || '未知错误'}`);
+      } finally {
+        this.reportExporting = false;
+      }
+    },
+    fallbackAssistantReportFilename() {
+      const stamp = new Date();
+      const pad = (value) => String(value).padStart(2, '0');
+      const ts = `${stamp.getFullYear()}${pad(stamp.getMonth() + 1)}${pad(stamp.getDate())}_${pad(stamp.getHours())}${pad(stamp.getMinutes())}${pad(stamp.getSeconds())}`;
+      const ext = this.reportExportFormat === 'pdf' ? 'pdf' : 'docx';
+      return `A8_${this.assistantReportTitle()}_${this.filters.buildingId || 'ALL'}_${ts}.${ext}`;
+    },
+    parseDownloadFilename(disposition, fallbackName) {
+      const encoded = disposition.match(/filename\*=UTF-8''([^;]+)/i);
+      if (encoded && encoded[1]) {
+        try {
+          return decodeURIComponent(encoded[1]);
+        } catch (_) {}
+      }
+      const plain = disposition.match(/filename="?([^\";]+)"?/i);
+      return plain && plain[1] ? plain[1] : fallbackName;
+    },
+    async saveAssistantReportBlob(blob, filename, contentType = '') {
+      const ext = filename.toLowerCase().endsWith('.pdf') ? 'pdf' : 'docx';
+      if (window.showSaveFilePicker) {
+        const picker = await window.showSaveFilePicker({
+          suggestedName: filename,
+          types: [
+            {
+              description: ext === 'pdf' ? 'PDF 文档' : 'Word 文档',
+              accept: {
+                [contentType || (ext === 'pdf' ? 'application/pdf' : 'application/vnd.openxmlformats-officedocument.wordprocessingml.document')]: [`.${ext}`],
+              },
+            },
+          ],
+        });
+        const writable = await picker.createWritable();
+        await writable.write(await blob.arrayBuffer());
+        await writable.close();
+        return;
+      }
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
     },
     scrollAssistantToBottom() {
       const el = this.$refs.assistantThreadScroll || this.$refs.assistantBody;
@@ -2207,12 +2532,16 @@ createApp({
       await this.loadSystemHealth();
     },
     async switchPage(key) {
+      if (this.activePage === 'assistant' && key !== 'assistant') {
+        this.saveUnifiedConversationSession(this.assistantSubmodule);
+      }
       this.activePage = key;
       if (key === 'overview') {
         this.activeSubmoduleMap = { ...this.activeSubmoduleMap, overview: 'kpi' };
       }
       if (key === 'assistant') {
         this.assistantSubmodule = this.activeSubmoduleMap.assistant || this.assistantSubmodule;
+        this.restoreUnifiedConversationSession(this.assistantSubmodule, { resetIfMissing: true });
       }
       await this.refreshCurrentPage();
       await this.$nextTick();
@@ -2225,8 +2554,9 @@ createApp({
     openActionDialog(row, action) {
       this.actionForm.anomalyId = row.anomaly_id;
       this.actionForm.action = action;
-      this.actionForm.assignee = row.assignee || '';
+      this.actionForm.assignee = row.assignee || '张三';
       this.actionForm.note = '';
+      this.actionForm.processingTime = this.currentDateTimeText();
       this.actionDialogVisible = true;
     },
     async submitAnomalyAction() {
@@ -2270,8 +2600,13 @@ createApp({
           actionTaken: note.action_taken || '',
           resultSummary: note.result_summary || '',
           recurrenceRisk: note.recurrence_risk || 'medium',
-          reviewer: note.reviewer || '',
+          reviewer: note.reviewer || '张三',
+          actionMode: note.action_taken ? 'manual' : 'ai',
+          resultMode: note.result_summary ? 'manual' : 'ai',
+          processingTime: note.updated_at || this.currentDateTimeText(),
         };
+        if (!note.action_taken) this.applyPostmortemActionDraft();
+        if (!note.result_summary) this.applyPostmortemResultDraft();
         this.anomalyDetailVisible = true;
       } catch (err) {
         console.error(err);
@@ -2286,9 +2621,12 @@ createApp({
         return;
       }
       this.postmortemForm.causeConfirmed = (this.diagnosis.causes || []).join('；');
+      this.postmortemForm.actionMode = 'ai';
+      this.postmortemForm.resultMode = 'ai';
       this.postmortemForm.actionTaken = (this.diagnosis.recommended_actions || []).join('；');
       this.postmortemForm.resultSummary = this.diagnosis.conclusion || '';
       this.postmortemForm.recurrenceRisk = this.diagnosis.risk_level || 'medium';
+      this.postmortemForm.processingTime = this.currentDateTimeText();
     },
     async submitPostmortemNote() {
       if (!this.postmortemForm.anomalyId) return;
@@ -2331,7 +2669,6 @@ createApp({
       this.diagnosis = null;
       this.activeSubmoduleMap = { ...this.activeSubmoduleMap, assistant: 'diagnosis' };
       this.assistantSubmodule = 'diagnosis';
-      this.resetUnifiedConversation({ silent: true });
       await this.switchPage('assistant');
       await nextTick();
       const userQuestion = `请诊断 ${row.building_name} 在 ${this.formatCompactDateTime(row.timestamp)} 出现的${row.anomaly_name}（偏差 ${this.formatNumber(row.deviation_pct, 1)}%）。`;
@@ -2475,7 +2812,6 @@ createApp({
       this.analysisInsight = null;
       this.activeSubmoduleMap = { ...this.activeSubmoduleMap, assistant: 'interpretation' };
       this.assistantSubmodule = 'interpretation';
-      this.resetUnifiedConversation({ silent: true });
       await this.switchPage('assistant');
       await nextTick();
       const question = `请分析${this.currentAnalysisScopeText()}的能耗数据，生成可用于汇报的分析结论。`;

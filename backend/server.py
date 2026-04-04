@@ -11,15 +11,25 @@ import re
 import socket
 import time
 import uuid
+from collections import Counter
+from copy import deepcopy
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Generator
 from urllib.error import HTTPError, URLError
-from urllib.parse import parse_qs, urlencode, urlparse
+from urllib.parse import parse_qs, quote, urlencode, urlparse
 from urllib.request import Request, urlopen
 
 from backend.mysql_support import MySQLClient, sql_literal
+
+from docx import Document
+from docx.enum.section import WD_SECTION
+from docx.enum.table import WD_ALIGN_VERTICAL, WD_TABLE_ALIGNMENT
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.oxml import OxmlElement
+from docx.oxml.ns import qn
+from docx.shared import Cm, Pt
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -218,6 +228,12 @@ ANOMALY_RULE_META = {
     },
 }
 
+ASSISTANT_REPORT_MODULE_META = {
+    "saving": {"title": "节能建议报告", "filename": "节能建议报告"},
+    "diagnosis": {"title": "异常诊断报告", "filename": "异常诊断报告"},
+    "interpretation": {"title": "分析解读报告", "filename": "分析解读报告"},
+}
+
 
 def load_local_env() -> None:
     if not ENV_FILE.exists():
@@ -253,6 +269,30 @@ def parse_time(value: str | None) -> dt.datetime | None:
 
 def to_iso(ts: dt.datetime) -> str:
     return ts.strftime(TIME_FMT)
+
+
+def clean_text(value: Any) -> str:
+    text = str(value or "").replace("\r", "\n")
+    lines = [re.sub(r"\s{2,}", " ", line).strip() for line in text.split("\n")]
+    return "\n".join(line for line in lines if line).strip()
+
+
+def ensure_text_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    result: list[str] = []
+    for item in value:
+        text = clean_text(item)
+        if text:
+            result.append(text)
+    return result
+
+
+def decode_json_clone(value: Any) -> Any:
+    try:
+        return json.loads(json.dumps(value, ensure_ascii=False))
+    except Exception:
+        return deepcopy(value)
 
 
 def showcase_display_name(building_id: str, peer_category: str | None = None) -> str:
@@ -531,7 +571,8 @@ class LLMDiagnoseProvider(DiagnoseProvider):
 
         base_url = os.getenv("OPENAI_BASE_URL", "https://api.deepseek.com").strip() or "https://api.deepseek.com"
         model = os.getenv("OPENAI_MODEL", "deepseek-chat").strip() or "deepseek-chat"
-        timeout_sec = float(os.getenv("OPENAI_TIMEOUT_SEC", "12"))
+        base_timeout_sec = float(os.getenv("OPENAI_TIMEOUT_SEC", "12"))
+        timeout_sec = float(os.getenv("OPENAI_DIAGNOSE_TIMEOUT_SEC", str(max(base_timeout_sec, 45.0))))
         max_retries = int(os.getenv("OPENAI_MAX_RETRIES", "2"))
 
         template_result = repo._diagnose_by_template(payload)
@@ -601,6 +642,7 @@ class LLMDiagnoseProvider(DiagnoseProvider):
                     model=model,
                     timeout_sec=timeout_sec,
                     messages=messages,
+                    response_format={"type": "json_object"},
                 )
                 choices = response.get("choices", [])
                 if not choices:
@@ -638,14 +680,14 @@ class LLMDiagnoseProvider(DiagnoseProvider):
                     time.sleep(0.6 * (attempt + 1))
                     continue
                 break
-            except (URLError, TimeoutError, socket.timeout) as exc:
+            except (URLError, TimeoutError, socket.timeout, ConnectionResetError) as exc:
                 last_err = RuntimeError(f"llm network error: {type(exc).__name__}")
                 if attempt < max_retries:
                     time.sleep(0.6 * (attempt + 1))
                     continue
                 break
             except Exception as exc:
-                last_err = RuntimeError(f"llm parse error: {type(exc).__name__}")
+                last_err = RuntimeError(str(exc) if str(exc) else f"llm parse error: {type(exc).__name__}")
                 break
 
         raise RuntimeError(str(last_err or "llm unknown error"))
@@ -2746,6 +2788,414 @@ class EnergyRepository:
             )
         return output.getvalue()
 
+    def _assistant_report_meta(self, module: str) -> dict[str, str]:
+        meta = ASSISTANT_REPORT_MODULE_META.get(module, {})
+        return {
+            "title": str(meta.get("title", "")).strip() or "智能助手报告",
+            "filename": str(meta.get("filename", "")).strip() or "智能助手报告",
+        }
+
+    def _normalize_report_context_meta(self, payload: dict[str, Any]) -> dict[str, str]:
+        meta = payload.get("context_meta", {})
+        if not isinstance(meta, dict):
+            meta = {}
+        building_id = clean_text(meta.get("building_id")) or "ALL"
+        building_name = clean_text(meta.get("building_name")) or showcase_display_name(building_id)
+        start_time = clean_text(meta.get("start_time")) or "-"
+        end_time = clean_text(meta.get("end_time")) or "-"
+        return {
+            "building_id": building_id,
+            "building_name": building_name,
+            "start_time": start_time,
+            "end_time": end_time,
+            "scope_text": clean_text(meta.get("scope_text")) or f"{building_name} | {start_time} ~ {end_time}",
+            "anomaly_id": clean_text(meta.get("anomaly_id")) or "-",
+            "anomaly_name": clean_text(meta.get("anomaly_name")) or "-",
+            "timestamp": clean_text(meta.get("timestamp")) or "-",
+            "metric_label": clean_text(meta.get("metric_label")) or "电力",
+            "building_type": clean_text(meta.get("building_type")) or "-",
+        }
+
+    def _normalize_report_messages(self, payload: dict[str, Any], module: str) -> list[dict[str, Any]]:
+        raw_messages = payload.get("session_messages", [])
+        if not isinstance(raw_messages, list):
+            raw_messages = []
+        module_type = "analysis" if module == "interpretation" else module
+        messages: list[dict[str, Any]] = []
+        for raw in raw_messages:
+            if not isinstance(raw, dict):
+                continue
+            role = str(raw.get("role", "")).strip()
+            if role == "user":
+                content = clean_text(raw.get("content"))
+                if content:
+                    messages.append({"role": "user", "content": content})
+                continue
+            if role != "assistant":
+                continue
+            msg_type = str(raw.get("type", "")).strip()
+            if msg_type != module_type or bool(raw.get("pending")):
+                continue
+            data = decode_json_clone(raw.get("data")) if isinstance(raw.get("data"), dict) else {}
+            content = clean_text(raw.get("content"))
+            if not data and not content:
+                continue
+            messages.append({"role": "assistant", "type": msg_type, "data": data, "content": content})
+        return messages
+
+    def _coerce_report_latest_result(self, payload: dict[str, Any], messages: list[dict[str, Any]]) -> dict[str, Any]:
+        latest = payload.get("latest_result", {})
+        if isinstance(latest, dict) and latest:
+            return decode_json_clone(latest)
+        for item in reversed(messages):
+            if item.get("role") == "assistant" and isinstance(item.get("data"), dict) and item["data"]:
+                return decode_json_clone(item["data"])
+        return {}
+
+    def _assistant_report_question_summary(self, messages: list[dict[str, Any]]) -> list[str]:
+        questions = [clean_text(item.get("content")) for item in messages if item.get("role") == "user"]
+        compact: list[str] = []
+        for item in questions:
+            if item and item not in compact:
+                compact.append(item)
+        return compact
+
+    def _assistant_report_brief_history(self, messages: list[dict[str, Any]], module: str) -> list[str]:
+        history: list[str] = []
+        for item in messages:
+            if item.get("role") != "assistant":
+                continue
+            data = item.get("data") if isinstance(item.get("data"), dict) else {}
+            if module == "diagnosis":
+                conclusion = clean_text(data.get("conclusion"))
+            else:
+                conclusion = clean_text(data.get("summary"))
+            if conclusion:
+                history.append(conclusion)
+        return history[:-1] if len(history) > 1 else []
+
+    def _assistant_report_sections(self, module: str, latest_result: dict[str, Any], history: list[str]) -> list[dict[str, Any]]:
+        sections: list[dict[str, Any]] = []
+        if module == "saving":
+            sections.append({"title": "1. 节能结论摘要", "type": "paragraph", "content": clean_text(latest_result.get("summary")) or "当前会话未返回节能结论。"})
+            sections.append({"title": "2. 优先动作", "type": "list", "items": ensure_text_list(latest_result.get("energy_saving_suggestions"))})
+            sections.append({"title": "3. 预估收益与影响", "type": "list", "items": ensure_text_list(latest_result.get("report_impacts", latest_result.get("saving_impacts")))})
+            sections.append({"title": "4. 实施配合要点", "type": "list", "items": ensure_text_list(latest_result.get("operations_suggestions"))})
+        elif module == "diagnosis":
+            sections.append({"title": "1. 诊断结论", "type": "paragraph", "content": clean_text(latest_result.get("conclusion")) or "当前会话未返回诊断结论。"})
+            sections.append({"title": "2. 可能原因", "type": "list", "items": ensure_text_list(latest_result.get("causes", latest_result.get("possible_causes")))})
+            sections.append({"title": "3. 排查步骤", "type": "list", "items": ensure_text_list(latest_result.get("steps"))})
+            sections.append({"title": "4. 立即动作", "type": "list", "items": ensure_text_list(latest_result.get("recommended_actions"))})
+            sections.append({"title": "5. 预防建议", "type": "list", "items": ensure_text_list(latest_result.get("prevention"))})
+        else:
+            sections.append({"title": "1. 分析结论", "type": "paragraph", "content": clean_text(latest_result.get("summary")) or "当前会话未返回分析结论。"})
+            sections.append({"title": "2. 主要发现", "type": "list", "items": ensure_text_list(latest_result.get("findings"))})
+            sections.append({"title": "3. 可能原因", "type": "list", "items": ensure_text_list(latest_result.get("possible_causes"))})
+            sections.append({"title": "4. 运维建议", "type": "list", "items": ensure_text_list(latest_result.get("operations_suggestions"))})
+
+        if history:
+            sections.append({"title": "会话补充结论", "type": "list", "items": history})
+        return sections
+
+    def _build_operator_form_rows(self, module: str, latest_result: dict[str, Any]) -> list[dict[str, Any]]:
+        if module == "diagnosis":
+            action_items = ensure_text_list(latest_result.get("recommended_actions"))[:2]
+            review_items = ensure_text_list(latest_result.get("prevention"))[:2]
+            review_summary = clean_text(latest_result.get("conclusion"))
+        elif module == "saving":
+            action_items = ensure_text_list(latest_result.get("energy_saving_suggestions"))[:2]
+            review_items = ensure_text_list(latest_result.get("operations_suggestions"))[:2]
+            review_summary = clean_text(latest_result.get("summary"))
+        else:
+            action_items = ensure_text_list(latest_result.get("operations_suggestions"))[:2]
+            review_items = ensure_text_list(latest_result.get("possible_causes"))[:2]
+            review_summary = clean_text(latest_result.get("summary"))
+
+        action_text = "；".join(action_items) if action_items else "结合本次报告建议填写执行动作。"
+        review_text = "；".join(review_items) if review_items else "结合本次报告结论填写复核意见。"
+        if review_summary:
+            review_text = f"{review_summary}；{review_text}"
+
+        return [
+            {"label": "处理人", "value": "张三 / 李四 / 王五（任选其一）", "row_height_lines": 1},
+            {"label": "处理时间", "value": "____年__月__日 __:__", "row_height_lines": 1},
+            {"label": "执行结果", "value": action_text, "row_height_lines": 2},
+            {"label": "复核结论", "value": review_text, "row_height_lines": 2},
+        ]
+
+    def _override_operator_form_rows(
+        self,
+        default_rows: list[dict[str, Any]],
+        payload: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        raw = payload.get("operator_form", {})
+        if not isinstance(raw, dict):
+            return default_rows
+        label_to_row = {str(item.get("label", "")).strip(): dict(item) for item in default_rows}
+        mapping = {
+            "assignee": "处理人",
+            "processing_time": "处理时间",
+            "execution_result": "执行结果",
+            "review_conclusion": "复核结论",
+        }
+        for field_key, label in mapping.items():
+            if label not in label_to_row:
+                continue
+            value = clean_text(raw.get(field_key))
+            if value:
+                label_to_row[label]["value"] = value
+        return [label_to_row.get(item.get("label", ""), item) for item in default_rows]
+
+    def _build_assistant_report(self, payload: dict[str, Any]) -> dict[str, Any]:
+        module = str(payload.get("module", "")).strip().lower()
+        if module not in ASSISTANT_REPORT_MODULE_META:
+            raise ValueError("module must be saving/diagnosis/interpretation")
+        format_name = str(payload.get("format", "")).strip().lower()
+        if format_name not in {"docx", "pdf"}:
+            raise ValueError("format must be docx/pdf")
+        messages = self._normalize_report_messages(payload, module)
+        if not messages:
+            raise ValueError("current module session is empty")
+        latest_result = self._coerce_report_latest_result(payload, messages)
+        if not latest_result:
+            raise ValueError("latest_result required")
+        meta = self._normalize_report_context_meta(payload)
+        questions = self._assistant_report_question_summary(messages)
+        history = self._assistant_report_brief_history(messages, module)
+        module_meta = self._assistant_report_meta(module)
+        meta_items = [
+            ("生成时间", to_iso(dt.datetime.now())),
+            ("报告模块", module_meta["title"].replace("报告", "")),
+            ("建筑名称", meta["building_name"]),
+            ("建筑编号", meta["building_id"]),
+            ("建筑类型", meta["building_type"]),
+            ("分析指标", meta["metric_label"]),
+            ("时间范围", f"{meta['start_time']} ~ {meta['end_time']}"),
+        ]
+        if module == "diagnosis":
+            meta_items.extend(
+                [
+                    ("异常类型", meta["anomaly_name"]),
+                    ("异常时间", meta["timestamp"]),
+                    ("异常编号", meta["anomaly_id"]),
+                ]
+            )
+        operator_form_rows = self._override_operator_form_rows(
+            self._build_operator_form_rows(module, latest_result),
+            payload,
+        )
+        return {
+            "module": module,
+            "format": format_name,
+            "report_title": module_meta["title"],
+            "filename_prefix": module_meta["filename"],
+            "meta_items": meta_items,
+            "question_summary": questions,
+            "sections": self._assistant_report_sections(module, latest_result, history),
+            "operator_form_fields": operator_form_rows,
+            "latest_result": latest_result,
+        }
+
+    def _set_doc_cell_text(self, cell: Any, text: str, bold: bool = False) -> None:
+        cell.text = ""
+        paragraph = cell.paragraphs[0]
+        run = paragraph.add_run(text)
+        run.bold = bold
+        self._set_doc_run_font(run, 10.5)
+        cell.vertical_alignment = WD_ALIGN_VERTICAL.CENTER
+
+    def _set_doc_run_font(self, run: Any, size: float, bold: bool | None = None) -> None:
+        if bold is not None:
+            run.bold = bold
+        run.font.size = Pt(size)
+        run.font.name = "Microsoft YaHei"
+        r_pr = run._element.get_or_add_rPr()
+        r_fonts = r_pr.rFonts
+        if r_fonts is None:
+            r_fonts = OxmlElement("w:rFonts")
+            r_pr.append(r_fonts)
+        r_fonts.set(qn("w:eastAsia"), "Microsoft YaHei")
+
+    def _docx_add_title(self, document: Document, text: str, level: int = 0) -> None:
+        if level == 0:
+            p = document.add_paragraph()
+            p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            run = p.add_run(text)
+            self._set_doc_run_font(run, 16, bold=True)
+            return
+        paragraph = document.add_paragraph()
+        run = paragraph.add_run(text)
+        self._set_doc_run_font(run, 12 if level == 1 else 10.5, bold=True)
+
+    def _docx_add_paragraph(self, document: Document, text: str, indent: bool = False) -> None:
+        paragraph = document.add_paragraph()
+        if indent:
+            paragraph.paragraph_format.first_line_indent = Cm(0.74)
+        run = paragraph.add_run(text)
+        self._set_doc_run_font(run, 10.5)
+
+    def _docx_add_list(self, document: Document, items: list[str]) -> None:
+        if not items:
+            self._docx_add_paragraph(document, "无")
+            return
+        for idx, item in enumerate(items, start=1):
+            self._docx_add_paragraph(document, f"{idx}. {item}")
+
+    def _apply_doc_table_border(self, table: Any) -> None:
+        tbl = table._tbl
+        tbl_pr = tbl.tblPr
+        borders = tbl_pr.first_child_found_in("w:tblBorders")
+        if borders is None:
+            borders = OxmlElement("w:tblBorders")
+            tbl_pr.append(borders)
+        for edge in ("top", "left", "bottom", "right", "insideH", "insideV"):
+            element = borders.find(qn(f"w:{edge}"))
+            if element is None:
+                element = OxmlElement(f"w:{edge}")
+                borders.append(element)
+            element.set(qn("w:val"), "single")
+            element.set(qn("w:sz"), "4")
+            element.set(qn("w:space"), "0")
+            element.set(qn("w:color"), "B8C0CC")
+
+    def _build_docx_report(self, report: dict[str, Any]) -> bytes:
+        document = Document()
+        section = document.sections[0]
+        section.top_margin = Cm(1.5)
+        section.bottom_margin = Cm(1.5)
+        section.left_margin = Cm(1.8)
+        section.right_margin = Cm(1.8)
+        self._docx_add_title(document, report["report_title"])
+        self._docx_add_paragraph(document, f"导出时间：{to_iso(dt.datetime.now())}")
+
+        meta_table = document.add_table(rows=0, cols=2)
+        meta_table.alignment = WD_TABLE_ALIGNMENT.CENTER
+        meta_table.autofit = True
+        for label, value in report["meta_items"]:
+            row = meta_table.add_row().cells
+            self._set_doc_cell_text(row[0], label, bold=True)
+            self._set_doc_cell_text(row[1], clean_text(value) or "-")
+        self._apply_doc_table_border(meta_table)
+
+        self._docx_add_title(document, "会话问题摘要", level=1)
+        self._docx_add_list(document, report["question_summary"])
+
+        for section_item in report["sections"]:
+            self._docx_add_title(document, section_item["title"], level=1)
+            if section_item["type"] == "paragraph":
+                self._docx_add_paragraph(document, section_item.get("content") or "无", indent=True)
+            else:
+                self._docx_add_list(document, ensure_text_list(section_item.get("items")))
+
+        self._docx_add_title(document, "操作员处理栏", level=1)
+        operator_table = document.add_table(rows=4, cols=2)
+        operator_table.alignment = WD_TABLE_ALIGNMENT.CENTER
+        rows = report["operator_form_fields"]
+        for idx, row in enumerate(rows):
+            self._set_doc_cell_text(operator_table.cell(idx, 0), str(row.get("label", "")), bold=True)
+            self._set_doc_cell_text(operator_table.cell(idx, 1), str(row.get("value", "")))
+        self._apply_doc_table_border(operator_table)
+
+        stream = io.BytesIO()
+        document.save(stream)
+        return stream.getvalue()
+
+    def _build_pdf_report(self, report: dict[str, Any]) -> bytes:
+        try:
+            from reportlab.lib import colors
+            from reportlab.lib.enums import TA_CENTER
+            from reportlab.lib.pagesizes import A4
+            from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+            from reportlab.lib.units import mm
+            from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+            from reportlab.pdfbase import pdfmetrics
+            from reportlab.pdfbase.cidfonts import UnicodeCIDFont
+        except ModuleNotFoundError as exc:
+            raise RuntimeError("reportlab not installed") from exc
+
+        pdfmetrics.registerFont(UnicodeCIDFont("STSong-Light"))
+        styles = getSampleStyleSheet()
+        title_style = ParagraphStyle("ReportTitle", parent=styles["Title"], fontName="STSong-Light", fontSize=16, leading=22, alignment=TA_CENTER)
+        heading_style = ParagraphStyle("ReportHeading", parent=styles["Heading2"], fontName="STSong-Light", fontSize=12, leading=18, spaceBefore=8, spaceAfter=6)
+        body_style = ParagraphStyle("ReportBody", parent=styles["BodyText"], fontName="STSong-Light", fontSize=10.5, leading=16)
+        story: list[Any] = [Paragraph(report["report_title"], title_style), Spacer(1, 5 * mm)]
+
+        meta_rows = [[Paragraph("<b>字段</b>", body_style), Paragraph("<b>内容</b>", body_style)]]
+        for label, value in report["meta_items"]:
+            meta_rows.append([Paragraph(label, body_style), Paragraph(clean_text(value) or "-", body_style)])
+        meta_table = Table(meta_rows, colWidths=[34 * mm, 138 * mm])
+        meta_table.setStyle(
+            TableStyle(
+                [
+                    ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#B8C0CC")),
+                    ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#F4F6F8")),
+                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                    ("LEFTPADDING", (0, 0), (-1, -1), 6),
+                    ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+                    ("TOPPADDING", (0, 0), (-1, -1), 5),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+                ]
+            )
+        )
+        story.extend([meta_table, Spacer(1, 4 * mm), Paragraph("会话问题摘要", heading_style)])
+        questions = report["question_summary"] or ["无"]
+        for idx, item in enumerate(questions, start=1):
+            story.append(Paragraph(f"{idx}. {item}", body_style))
+        story.append(Spacer(1, 3 * mm))
+
+        for section_item in report["sections"]:
+            story.append(Paragraph(section_item["title"], heading_style))
+            if section_item["type"] == "paragraph":
+                story.append(Paragraph(section_item.get("content") or "无", body_style))
+            else:
+                items = ensure_text_list(section_item.get("items")) or ["无"]
+                for idx, item in enumerate(items, start=1):
+                    story.append(Paragraph(f"{idx}. {item}", body_style))
+            story.append(Spacer(1, 2 * mm))
+
+        story.append(Paragraph("操作员处理栏", heading_style))
+        operator_rows = [[Paragraph("<b>字段</b>", body_style), Paragraph("<b>填写内容</b>", body_style)]]
+        row_heights = [None]
+        for row in report["operator_form_fields"]:
+            operator_rows.append([Paragraph(str(row.get("label", "")), body_style), Paragraph(clean_text(row.get("value")) or "-", body_style)])
+            row_heights.append((10 if int(row.get("row_height_lines", 1) or 1) <= 1 else 22) * mm)
+        operator_table = Table(operator_rows, colWidths=[34 * mm, 138 * mm], rowHeights=row_heights)
+        operator_table.setStyle(
+            TableStyle(
+                [
+                    ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#B8C0CC")),
+                    ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#F4F6F8")),
+                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                    ("LEFTPADDING", (0, 0), (-1, -1), 6),
+                    ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+                    ("TOPPADDING", (0, 0), (-1, -1), 5),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+                ]
+            )
+        )
+        story.append(operator_table)
+
+        stream = io.BytesIO()
+        doc = SimpleDocTemplate(stream, pagesize=A4, leftMargin=16 * mm, rightMargin=16 * mm, topMargin=14 * mm, bottomMargin=14 * mm)
+        doc.build(story)
+        return stream.getvalue()
+
+    def export_assistant_report(self, payload: dict[str, Any]) -> tuple[bytes, str, str]:
+        report = self._build_assistant_report(payload)
+        timestamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+        latest_result = report.get("latest_result", {})
+        building_id = clean_text(next((value for label, value in report["meta_items"] if label == "建筑编号"), "ALL")) or "ALL"
+        filename = f"A8_{report['filename_prefix']}_{building_id}_{timestamp}.{report['format']}"
+        if report["format"] == "docx":
+            content = self._build_docx_report(report)
+            content_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        else:
+            content = self._build_pdf_report(report)
+            content_type = "application/pdf"
+        if not content:
+            raise RuntimeError("report content is empty")
+        return content, filename, content_type
+
     def query_ai_evaluate(self, hours: int = 24) -> dict[str, Any]:
         safe_hours = min(max(hours, 1), 168)
         now = dt.datetime.now()
@@ -3761,6 +4211,7 @@ class EnergyRepository:
         sort: str = "timestamp_desc",
     ) -> dict[str, Any]:
         filtered = self._filter_anomalies(building_id, start_time, end_time, anomaly_type, severity, status)
+        available_type_source = self._filter_anomalies(building_id, start_time, end_time, None, severity, status)
         sorted_rows = self._sort_anomalies(filtered, sort)
 
         by_type: dict[str, int] = {}
@@ -3775,6 +4226,15 @@ class EnergyRepository:
                 bucket["count"] = int(bucket.get("count", 0)) + 1
             st = self._action_state(int(item["anomaly_id"]))["status"]
             by_status[st] = by_status.get(st, 0) + 1
+
+        available_type_code: dict[str, dict[str, Any]] = {}
+        for item in available_type_source:
+            type_label = str(item.get("display_name") or item.get("anomaly_name") or self._anomaly_name(str(item.get("anomaly_type", ""))))
+            type_code = str(item.get("anomaly_type", "")).strip()
+            if not type_code:
+                continue
+            bucket = available_type_code.setdefault(type_code, {"code": type_code, "name": type_label, "count": 0})
+            bucket["count"] = int(bucket.get("count", 0)) + 1
 
         safe_page = max(1, page)
         safe_page_size = min(max(1, page_size), 200)
@@ -3813,7 +4273,7 @@ class EnergyRepository:
             "severity": severity,
             "status": status,
             "by_type": by_type,
-            "available_types": sorted(by_type_code.values(), key=lambda item: (-int(item.get("count", 0)), str(item.get("name", "")))),
+            "available_types": sorted(available_type_code.values(), key=lambda item: (-int(item.get("count", 0)), str(item.get("name", "")))),
             "by_status": by_status,
             "items": items,
         }
@@ -4380,7 +4840,8 @@ class EnergyRepository:
 
         base_url = os.getenv("OPENAI_BASE_URL", "https://api.deepseek.com").strip() or "https://api.deepseek.com"
         model = os.getenv("OPENAI_MODEL", "deepseek-chat").strip() or "deepseek-chat"
-        timeout_sec = float(os.getenv("OPENAI_TIMEOUT_SEC", "12"))
+        base_timeout_sec = float(os.getenv("OPENAI_TIMEOUT_SEC", "12"))
+        timeout_sec = float(os.getenv("OPENAI_DIAGNOSE_TIMEOUT_SEC", str(max(base_timeout_sec, 45.0))))
 
         evidence_text = "\n".join(
             f"- {x.get('title', '')}: {x.get('excerpt', '')}"
@@ -4622,6 +5083,62 @@ class EnergyRepository:
         operations.append("对已经识别出的异常窗口补充分项电表、BMS 操作记录和现场值班记录，形成可闭环的问题清单。")
         return self._merge_text_lists(operations, [], max_items=4, min_items=3)
 
+    def _select_relevant_saving_opportunities(
+        self,
+        opportunities: list[dict[str, Any]],
+        message: str,
+        focus: str | None = None,
+        limit: int = 3,
+    ) -> list[dict[str, Any]]:
+        items = list(opportunities or [])
+        if not items:
+            return []
+        focus_text = str(focus or "").strip()
+        if focus_text:
+            focus_map = {
+                "night_baseload": "夜间基线负荷优化",
+                "anomaly_waste": "异常浪费回收",
+                "peer_gap": "同类差距收敛",
+                "peak_strategy": "高峰时段策略优化",
+            }
+            target_title = focus_map.get(focus_text, focus_text)
+            focused = [item for item in items if target_title in str(item.get("title", ""))]
+            if focused:
+                return focused[:limit]
+        question = str(message or "").strip().lower()
+        if not question:
+            return items[:limit]
+
+        keyword_groups = [
+            ["夜间", "基线", "待机", "常开", "night"],
+            ["异常", "浪费", "突增", "高负荷", "回收", "anomaly"],
+            ["同类", "对标", "差距", "peer", "benchmark"],
+            ["峰时", "高峰", "时段", "错峰", "排程", "schedule", "peak"],
+        ]
+
+        ranked: list[tuple[int, float, dict[str, Any]]] = []
+        for item in items:
+            title = str(item.get("title", ""))
+            detail = str(item.get("detail", ""))
+            corpus = f"{title} {detail}".lower()
+            score = 0
+            for group in keyword_groups:
+                hits = sum(1 for keyword in group if keyword and keyword.lower() in question and keyword.lower() in corpus)
+                if hits:
+                    score += hits * 3
+            parts = [part for part in re.split(r"[\s,，、:：()（）]+", corpus) if len(part) >= 2]
+            score += sum(1 for part in parts[:10] if part in question)
+            estimated_value = float(item.get("estimated_kwh", item.get("estimated_loss_kwh", 0)) or 0)
+            ranked.append((score, estimated_value, item))
+
+        ranked.sort(key=lambda x: (-x[0], -x[1]))
+        matched = [item for score, _, item in ranked if score > 0]
+        if not matched:
+            return items[:limit]
+        best_score = max(score for score, _, _ in ranked)
+        best_items = [item for score, _, item in ranked if score == best_score and score > 0]
+        return best_items[:limit]
+
     def _build_analysis_prompt_context(
         self,
         payload: dict[str, Any],
@@ -4824,6 +5341,12 @@ class EnergyRepository:
         operations = self._build_analysis_operations(insights)
 
         message = str(payload.get("message", "")).strip() or f"{building_name} {metric_label} 分析"
+        selected_saving_opportunities = self._select_relevant_saving_opportunities(
+            insights.get("saving_opportunities") or [],
+            message,
+            payload.get("saving_focus"),
+            limit=3,
+        )
         retrieval = self._search_knowledge(
             "anomaly_sustained_high_load",
             message,
@@ -4847,6 +5370,7 @@ class EnergyRepository:
                 "possible_causes": possible_causes,
                 "energy_saving_suggestions": energy_saving,
                 "operations_suggestions": operations,
+                "saving_opportunities": selected_saving_opportunities,
                 "evidence": evidence,
                 "knowledge_source": retrieval["knowledge_source"],
                 "retrieval_hit_count": retrieval["retrieval_hit_count"],
@@ -4960,6 +5484,7 @@ class EnergyRepository:
                         "possible_causes": self._merge_text_lists(llm_provider._coerce_list_of_str(llm_obj.get("possible_causes")), template_analysis["possible_causes"], max_items=4, min_items=3),
                         "energy_saving_suggestions": self._merge_text_lists(llm_provider._coerce_list_of_str(llm_obj.get("energy_saving_suggestions")), template_analysis["energy_saving_suggestions"], max_items=4, min_items=3),
                         "operations_suggestions": self._merge_text_lists(llm_provider._coerce_list_of_str(llm_obj.get("operations_suggestions")), template_analysis["operations_suggestions"], max_items=4, min_items=3),
+                        "saving_opportunities": template_analysis.get("saving_opportunities", []),
                         "evidence": template_analysis["evidence"],
                         "knowledge_source": template_analysis.get("knowledge_source", "none"),
                         "retrieval_hit_count": template_analysis.get("retrieval_hit_count", 0),
@@ -5709,6 +6234,22 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(text.encode("utf-8-sig"))
 
+    def _file_bytes(self, content: bytes, filename: str, content_type: str) -> None:
+        encoded_name = quote(filename, safe="")
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Disposition", f"attachment; filename*=UTF-8''{encoded_name}")
+        self.send_header("Content-Length", str(len(content)))
+        self.send_header("Cache-Control", "no-store, no-cache, must-revalidate")
+        self.send_header("Pragma", "no-cache")
+        self.send_header("Expires", "0")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+        try:
+            self.wfile.write(content)
+        except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
+            return
+
     def do_OPTIONS(self) -> None:
         self._set_json_headers(HTTPStatus.NO_CONTENT)
 
@@ -5761,6 +6302,18 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"code": 502, "message": str(exc), "data": None}, HTTPStatus.BAD_GATEWAY)
                 return
             self._json({"code": 0, "message": "ok", "data": result})
+            return
+
+        if parsed.path == "/api/assistant/report/export":
+            try:
+                content, filename, content_type = REPO.export_assistant_report(payload)
+            except ValueError as exc:
+                self._json({"code": 400, "message": str(exc), "data": None}, HTTPStatus.BAD_REQUEST)
+                return
+            except Exception as exc:
+                self._json({"code": 502, "message": str(exc), "data": None}, HTTPStatus.BAD_GATEWAY)
+                return
+            self._file_bytes(content, filename, content_type)
             return
 
         if parsed.path == "/api/ragflow/chat/stream":

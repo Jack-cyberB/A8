@@ -2655,6 +2655,56 @@ body {
   min-width: 88px;
 }
 
+.assistant-report-btn {
+  margin-top: 10px;
+  align-self: flex-start;
+}
+
+.report-export-dialog .el-dialog {
+  border-radius: 8px;
+}
+
+.report-export-header {
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.report-export-body {
+  display: grid;
+  gap: 12px;
+  color: var(--text);
+  line-height: 1.7;
+}
+
+.report-export-line {
+  font-size: 14px;
+}
+
+.report-export-format-title {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.report-export-format-group {
+  display: grid;
+  gap: 10px;
+}
+
+.postmortem-mode-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin: 6px 0 2px;
+}
+
+.mode-label,
+.form-inline-tip {
+  font-size: 13px;
+  color: var(--muted);
+}
+
 @media (max-width: 1220px) {
   .workspace-grid--overview,
   .cards--status,
