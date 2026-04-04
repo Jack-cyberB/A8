@@ -20,6 +20,7 @@
         <div class="topbar-sub">V2 交付版 | 电力深分析 + 运维闭环 + AI 诊断与分析</div>
       </div>
       <div class="topbar-status">
+        <button class="topbar-help-btn" type="button" @click="helpDialogVisible = true" aria-label="帮助说明">?</button>
         <div class="status-inline">
           <span class="status-dot" :class="healthToneClass(health.status)"></span>
           <span class="status-inline-label">系统</span>
@@ -327,7 +328,7 @@
                       </div>
                     </div>
                     <div class="opportunity-detail">{{ item.detail }}</div>
-                    <div class="opportunity-meta">影响估算 {{ formatInsightKwh(item.estimated_loss_kwh) }}</div>
+                    <div class="opportunity-meta">影响估算 {{ formatInsightKwh(opportunityEstimatedKwh(item)) }}</div>
                     <div class="assistant-actions assistant-actions--start assistant-actions--compact">
                       <el-button size="small" type="primary" @click="sendSavingOpportunityToAssistant(item)">生成节能建议</el-button>
                     </div>
@@ -426,6 +427,10 @@
                         <div class="subtle-metric">偏差 {{ formatNumber(row.deviation_pct, 1) }}%</div>
                       </div>
                     </div>
+                    <div class="anomaly-window-detail">
+                      {{ row.rule_name }}：当前 {{ formatAnomalyKwh(row.current_value) }}，基线 {{ formatAnomalyKwh(row.baseline_value) }}，阈值 {{ formatAnomalyKwh(row.threshold_value) }}
+                    </div>
+                    <div class="anomaly-window-detail">{{ anomalyRuleBrief(row) }}</div>
                     <div class="assistant-actions assistant-actions--start assistant-actions--compact">
                       <el-button size="small" @click="openAnomalyDetail(row)">详情</el-button>
                       <el-button size="small" type="primary" @click="diagnoseFromAnomaly(row)">进入诊断</el-button>
@@ -445,14 +450,18 @@
                 </div>
               </div>
               <div class="anomaly-toolbar">
-                <el-select v-model="anomalyQuery.severity" placeholder="严重级别" style="width: 140px" @change="onAnomalyFilterChange">
+                <el-select data-testid="anomaly-type-filter" v-model="anomalyQuery.anomalyType" placeholder="异常类型" style="width: 170px" @change="onAnomalyFilterChange">
+                  <el-option label="全部类型" value=""></el-option>
+                  <el-option v-for="item in anomalyTypeOptions" :key="item.code" :label="item.name" :value="item.code"></el-option>
+                </el-select>
+                <el-select data-testid="anomaly-severity-filter" v-model="anomalyQuery.severity" placeholder="严重级别" style="width: 140px" @change="onAnomalyFilterChange">
                   <el-option label="全部级别" value=""></el-option>
                   <el-option label="高" value="high"></el-option>
                   <el-option label="中" value="medium"></el-option>
                   <el-option label="低" value="low"></el-option>
                 </el-select>
 
-                <el-select v-model="anomalyQuery.status" placeholder="处理状态" style="width: 160px" @change="onAnomalyFilterChange">
+                <el-select data-testid="anomaly-status-filter" v-model="anomalyQuery.status" placeholder="处理状态" style="width: 160px" @change="onAnomalyFilterChange">
                   <el-option label="全部状态" value=""></el-option>
                   <el-option label="新告警" value="new"></el-option>
                   <el-option label="已确认" value="acknowledged"></el-option>
@@ -460,7 +469,7 @@
                   <el-option label="已完成" value="resolved"></el-option>
                 </el-select>
 
-                <el-select v-model="anomalyQuery.sort" placeholder="排序" style="width: 200px" @change="onAnomalyFilterChange">
+                <el-select data-testid="anomaly-sort-filter" v-model="anomalyQuery.sort" placeholder="排序" style="width: 200px" @change="onAnomalyFilterChange">
                   <el-option label="时间倒序" value="timestamp_desc"></el-option>
                   <el-option label="时间正序" value="timestamp_asc"></el-option>
                   <el-option label="偏差最大优先" value="deviation_desc"></el-option>
@@ -501,6 +510,12 @@
                   </template>
                 </el-table-column>
                 <el-table-column prop="deviation_pct" label="偏差(%)" width="100"></el-table-column>
+                <el-table-column label="判定依据" min-width="300">
+                  <template #default="scope">
+                    <div class="table-title-cell">{{ scope.row.rule_name }}</div>
+                    <div class="table-time">{{ anomalyRuleBrief(scope.row) }}</div>
+                  </template>
+                </el-table-column>
                 <el-table-column label="操作" min-width="290" fixed="right">
                   <template #default="scope">
                     <div class="action-cell">
@@ -732,23 +747,26 @@
                     <div class="assistant-summary-card">{{ msg.data.summary }}</div>
                     <div class="assistant-section-grid">
                       <div class="assistant-section">
-                        <div class="assistant-section-title">主要发现</div>
-                        <ul class="assistant-bullet-list">
-                          <li v-for="item in msg.data.findings" :key="item">{{ item }}</li>
-                        </ul>
-                      </div>
-                      <div class="assistant-section">
-                        <div class="assistant-section-title">可能原因</div>
-                        <ul class="assistant-bullet-list">
-                          <li v-for="item in msg.data.possible_causes" :key="item">{{ item }}</li>
-                        </ul>
-                      </div>
-                      <div class="assistant-section">
-                        <div class="assistant-section-title">运维建议</div>
-                        <ul class="assistant-bullet-list">
-                          <li v-for="item in msg.data.operations_suggestions" :key="item">{{ item }}</li>
-                        </ul>
-                      </div>
+                      <div class="assistant-section-title">主要发现</div>
+                      <ul class="assistant-bullet-list">
+                        <li v-for="item in msg.data.findings" :key="item">{{ item }}</li>
+                        <li v-if="!msg.data.findings || !msg.data.findings.length">当前没有返回发现条目，建议先回到能耗分析页复核趋势、结构和同类对标结果。</li>
+                      </ul>
+                    </div>
+                    <div class="assistant-section">
+                      <div class="assistant-section-title">可能原因</div>
+                      <ul class="assistant-bullet-list">
+                        <li v-for="item in msg.data.possible_causes" :key="item">{{ item }}</li>
+                        <li v-if="!msg.data.possible_causes || !msg.data.possible_causes.length">当前没有返回原因条目，建议先从排程、夜间基线和天气联动三个方向排查。</li>
+                      </ul>
+                    </div>
+                    <div class="assistant-section">
+                      <div class="assistant-section-title">运维建议</div>
+                      <ul class="assistant-bullet-list">
+                        <li v-for="item in msg.data.operations_suggestions" :key="item">{{ item }}</li>
+                        <li v-if="!msg.data.operations_suggestions || !msg.data.operations_suggestions.length">建议先定位异常窗口，再核对设备工况、分项电表和现场值班记录。</li>
+                      </ul>
+                    </div>
                     </div>
                     <div class="assistant-actions assistant-actions--start">
                       <el-button size="small" :type="analysisFeedbackLabel === 'useful' ? 'primary' : 'default'" @click="submitAnalysisFeedback('useful')">有帮助</el-button>
@@ -776,11 +794,12 @@
                     <div class="assistant-summary-card">{{ msg.data.summary }}</div>
                     <div class="assistant-section-grid assistant-section-grid--triple">
                       <div class="assistant-section">
-                        <div class="assistant-section-title">优先动作</div>
-                        <ul class="assistant-bullet-list">
-                          <li v-for="item in msg.data.energy_saving_suggestions" :key="item">{{ item }}</li>
-                        </ul>
-                      </div>
+                      <div class="assistant-section-title">优先动作</div>
+                      <ul class="assistant-bullet-list">
+                        <li v-for="item in msg.data.energy_saving_suggestions" :key="item">{{ item }}</li>
+                        <li v-if="!msg.data.energy_saving_suggestions || !msg.data.energy_saving_suggestions.length">当前没有返回节能动作，建议先从夜间基线、高峰排程和同类差距最大的场景着手。</li>
+                      </ul>
+                    </div>
                       <div class="assistant-section">
                         <div class="assistant-section-title">预估收益 / 影响</div>
                         <ul class="assistant-bullet-list">
@@ -789,11 +808,12 @@
                         </ul>
                       </div>
                       <div class="assistant-section">
-                        <div class="assistant-section-title">实施配合</div>
-                        <ul class="assistant-bullet-list">
-                          <li v-for="item in msg.data.operations_suggestions" :key="item">{{ item }}</li>
-                        </ul>
-                      </div>
+                      <div class="assistant-section-title">实施配合</div>
+                      <ul class="assistant-bullet-list">
+                        <li v-for="item in msg.data.operations_suggestions" :key="item">{{ item }}</li>
+                        <li v-if="!msg.data.operations_suggestions || !msg.data.operations_suggestions.length">建议同步整理设备台账、排程记录和异常窗口，便于节能措施落地复核。</li>
+                      </ul>
+                    </div>
                     </div>
                     <div class="assistant-actions assistant-actions--start">
                       <el-button size="small" :type="analysisFeedbackLabel === 'useful' ? 'primary' : 'default'" @click="submitAnalysisFeedback('useful')">有帮助</el-button>
@@ -862,6 +882,12 @@
         <p><strong>基线对比：</strong>{{ anomalyDetail.baseline_window.avg_kwh }} kWh（24h均值）</p>
         <p><strong>同类对比：</strong>{{ anomalyDetail.peer_compare.peer_avg_kwh }} kWh，偏差 {{ anomalyDetail.peer_compare.vs_peer_pct }}%</p>
         <p><strong>建议动作：</strong>{{ (anomalyDetail.recommended_actions || []).join('；') }}</p>
+        <h4>异常判定说明</h4>
+        <p><strong>判定类型：</strong>{{ anomalyDetail.rule_explanation.rule_name }}</p>
+        <p><strong>触发阈值：</strong>{{ anomalyDetail.rule_explanation.threshold_value }} kWh</p>
+        <p><strong>判定窗口：</strong>{{ anomalyDetail.rule_explanation.trigger_window }}</p>
+        <p><strong>偏差比例：</strong>{{ anomalyDetail.rule_explanation.deviation_pct }}%</p>
+        <p><strong>规则说明：</strong>{{ anomalyDetail.rule_explanation.rule_summary }}</p>
         <h4>处理时间线</h4>
         <ul class="history-list">
           <li v-for="h in anomalyHistory" :key="`${h.created_at}-${h.action}`">{{ h.created_at }} | {{ h.action }} -> {{ h.status }} | {{ h.assignee || '未指派' }} | {{ h.note || '-' }}</li>
@@ -901,6 +927,30 @@
         <el-button @click="actionDialogVisible = false">取消</el-button>
         <el-button type="primary" :loading="loading.action" @click="submitAnomalyAction">提交</el-button>
       </template>
+    </el-dialog>
+
+    <el-dialog v-model="helpDialogVisible" width="900px" class="help-dialog" align-center>
+      <template #header>
+        <div class="help-header">
+          <div class="help-title">系统说明</div>
+          <el-button text @click="helpDialogVisible = false">关闭</el-button>
+        </div>
+      </template>
+      <div class="help-tabs">
+        <button
+          v-for="section in helpSections"
+          :key="section.key"
+          class="help-tab-btn"
+          :class="{ active: activeHelpSection === section.key }"
+          type="button"
+          @click="activeHelpSection = section.key">
+          {{ section.title }}
+        </button>
+      </div>
+      <div class="help-content" v-if="activeHelpContent()">
+        <div class="help-section-title">{{ activeHelpContent().title }}</div>
+        <p v-for="paragraph in activeHelpContent().paragraphs" :key="paragraph" class="help-paragraph">{{ paragraph }}</p>
+      </div>
     </el-dialog>
   </div>
 

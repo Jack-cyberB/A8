@@ -228,6 +228,10 @@ class RepositoryTests(unittest.TestCase):
         self.assertIn("saving_opportunities", insights)
         self.assertIn("anomaly_windows", insights)
         self.assertGreater(insights["scope_summary"]["point_count"], 0)
+        if insights["saving_opportunities"]:
+            first_opportunity = insights["saving_opportunities"][0]
+            self.assertIn("estimated_kwh", first_opportunity)
+            self.assertIn("estimated_loss_kwh", first_opportunity)
 
     def test_analysis_interfaces_unsupported_metric(self):
         with self.assertRaises(ValueError):
@@ -254,12 +258,26 @@ class RepositoryTests(unittest.TestCase):
         item = data["items"][0]
         self.assertIn("status", item)
         self.assertIn("assignee", item)
+        self.assertIn("rule_name", item)
+        self.assertIn("baseline_value", item)
+        self.assertIn("threshold_value", item)
+        self.assertIn("trigger_window", item)
+        self.assertGreater(len(data.get("available_types", [])), 0)
 
     def test_anomaly_detail_has_processing_summary(self):
         aid = self._first_anomaly_id()
         detail = REPO.query_anomaly_detail(aid)
         self.assertIsNotNone(detail)
         self.assertIn("processing_summary", detail)
+        self.assertIn("rule_explanation", detail)
+
+    def test_anomaly_types_are_humanized(self):
+        data = REPO.query_anomalies(None, None, None, None, None, None, 1, 50, "timestamp_desc")
+        self.assertTrue(any(not key.startswith("anomaly_") for key in data.get("by_type", {}).keys()))
+
+    def test_anomaly_detection_has_multiple_rule_types(self):
+        types = {str(item.get("anomaly_type")) for item in REPO.anomalies}
+        self.assertGreaterEqual(len(types), 4)
 
     def test_diagnose_template_shape(self):
         aid = self._first_anomaly_id()
@@ -267,12 +285,25 @@ class RepositoryTests(unittest.TestCase):
         d = result["diagnosis"]
         self.assertIn("conclusion", d)
         self.assertIn("causes", d)
+        self.assertGreaterEqual(len(d["causes"]), 3)
+        self.assertGreaterEqual(len(d["steps"]), 3)
+        self.assertGreaterEqual(len(d["recommended_actions"]), 3)
         self.assertIn("provider", d)
         self.assertIn("latency_ms", d)
         self.assertIn("trace_id", d)
         self.assertIn("data_evidence", d)
         self.assertGreaterEqual(len(d["data_evidence"]), 1)
         self.assertFalse(d["fallback_used"])
+
+    def test_diagnose_stream_emits_structured_template_and_done(self):
+        aid = self._first_anomaly_id()
+        with mock.patch.dict("os.environ", {"OPENAI_API_KEY": ""}, clear=False):
+            events = list(REPO.diagnose_stream_events({"message": "请分析异常", "anomaly_id": aid, "provider": "auto"}))
+        self.assertGreaterEqual(len(events), 2)
+        self.assertEqual(events[0][0], "template")
+        self.assertGreaterEqual(len(events[0][1].get("steps", [])), 3)
+        self.assertEqual(events[-1][0], "done")
+        self.assertTrue(events[-1][1].get("fallback_used"))
 
     def test_diagnose_llm_failure_raises(self):
         aid = self._first_anomaly_id()
@@ -286,7 +317,7 @@ class RepositoryTests(unittest.TestCase):
             "choices": [
                 {
                     "message": {
-                        "content": '{"conclusion":"LLM结论","causes":["原因A"],"steps":["步骤1"],"prevention":["预防1"],"recommended_actions":["动作1"],"evidence":["证据1"],"confidence":0.81,"risk_level":"high"}'
+                        "content": '{"conclusion":"LLM结论","causes":["空调系统在午间异常满负荷运行，和当前偏差水平一致","新风联动未按课表切换，导致教学时段额外抬升负荷","局部照明或专用设备长开，使该时点明显高于24h基线"],"steps":["先核对该时段总表、分项表和分路数据，确认不是采集坏值","再检查空调、新风和照明排程及手自动状态","最后结合现场值班记录和课表核实是否存在计划外用能"],"prevention":["按课表固化教学楼空调和新风排程","建立午间高负荷阈值告警并联动分项回路","把异常时段操作记录纳入每周复盘"],"recommended_actions":["立即复核午间空调和新风运行状态","临时关闭不必要的高负荷回路并观察曲线回落","通知值班人员核对现场是否存在计划外设备开启"],"evidence":["证据1"],"confidence":0.81,"risk_level":"high"}'
                     }
                 }
             ]
@@ -299,7 +330,7 @@ class RepositoryTests(unittest.TestCase):
         self.assertFalse(d["fallback_used"])
         self.assertEqual(d["provider"], "llm_provider")
         self.assertEqual(d["conclusion"], "LLM结论")
-        self.assertEqual(d["causes"][0], "原因A")
+        self.assertIn("空调系统", d["causes"][0])
 
     def test_diagnose_default_provider_prefers_llm(self):
         aid = self._first_anomaly_id()
@@ -307,7 +338,7 @@ class RepositoryTests(unittest.TestCase):
             "choices": [
                 {
                     "message": {
-                        "content": '{"conclusion":"默认LLM结论","causes":["原因A"],"steps":["步骤1"],"prevention":["预防1"],"recommended_actions":["动作1"],"evidence":["证据1"],"confidence":0.76,"risk_level":"medium"}'
+                        "content": '{"conclusion":"默认LLM结论","causes":["空调系统在午间异常满负荷运行，和当前偏差水平一致","新风联动未按课表切换，导致教学时段额外抬升负荷","局部照明或专用设备长开，使该时点明显高于24h基线"],"steps":["先核对该时段总表、分项表和分路数据，确认不是采集坏值","再检查空调、新风和照明排程及手自动状态","最后结合现场值班记录和课表核实是否存在计划外用能"],"prevention":["按课表固化教学楼空调和新风排程","建立午间高负荷阈值告警并联动分项回路","把异常时段操作记录纳入每周复盘"],"recommended_actions":["立即复核午间空调和新风运行状态","临时关闭不必要的高负荷回路并观察曲线回落","通知值班人员核对现场是否存在计划外设备开启"],"evidence":["证据1"],"confidence":0.76,"risk_level":"medium"}'
                     }
                 }
             ]
@@ -335,6 +366,9 @@ class RepositoryTests(unittest.TestCase):
         self.assertIn("findings", analysis)
         self.assertIn("energy_saving_suggestions", analysis)
         self.assertIn("operations_suggestions", analysis)
+        self.assertGreaterEqual(len(analysis["findings"]), 3)
+        self.assertGreaterEqual(len(analysis["energy_saving_suggestions"]), 3)
+        self.assertGreaterEqual(len(analysis["operations_suggestions"]), 3)
         self.assertIn("trace_id", analysis)
         self.assertFalse(analysis["fallback_used"])
 

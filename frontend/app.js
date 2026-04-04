@@ -77,6 +77,45 @@ const ASSISTANT_SUBMODULE_CONFIG = {
   },
 };
 
+const PROJECT_HELP_SECTIONS = [
+  {
+    key: 'overview',
+    title: '系统概览',
+    paragraphs: [
+      'A8 是一个面向建筑运维与能耗管理场景的系统。当前版本重点覆盖电力数据，围绕数据总览、能耗分析、运维处置和智能助手四个工作区组织功能。',
+      '系统的异常识别不是黑盒模型，而是基于建筑自身基线、工作时段与非工作时段差异、连续时长和阈值关系来判断。阈值大多以建筑自身均值、标准差和昼夜基线为基础生成，而不是用一个全局固定值套所有建筑。',
+      '操作上建议先在总览和分析页面确认建筑与时间范围，再进入运维处置查看异常分布、事件列表和处置记录。事件列表里展示的当前值、基线值、阈值和触发窗口，就是系统实际判定所使用的数据依据。',
+    ],
+  },
+  {
+    key: 'types',
+    title: '异常类型说明',
+    paragraphs: [
+      '瞬时突增要求某个时点的负荷高于该建筑的“均值 + 2 倍标准差”，并且该点同时不低于前后相邻 2 个时点。持续高负荷要求负荷连续 4 个点及以上高于“均值 × 1.5”。',
+      '非工作时段高负荷要求负荷发生在周末，或小时小于 7 点、或大于等于 21 点，并且连续 2 个点及以上高于 max(非工作时段均值 × 1.45, 建筑总体均值 × 0.95)。夜间基线偏高要求夜间时段定义为 0 点到 5 点，某天夜间平均负荷占当天平均负荷比例大于 58%，同时夜间平均负荷还必须高于 max(建筑夜间均值 × 1.2, 建筑总体均值 × 0.52)。',
+      '工作时段低负荷或疑似停运要求发生在工作日 8 点到 18 点，连续 2 个点及以上低于最低运行阈值。该阈值按 min(max(工作时段均值 × 0.18, 0.25), max(工作时段均值 × 0.4, 0.5)) 计算。启停时段异常要求先按工作日历史数据取典型启用时间和停用时间的中位数，再判断某天是否比典型时间提前或延后至少 2 小时，同时该时点负荷还要高于 max(工作时段均值 × 0.92, 非工作时段均值 × 1.22, 建筑总体均值 × 0.98) 的 1.03 倍，并且该时点负荷与非工作时段均值之比不低于 1.12。',
+    ],
+  },
+  {
+    key: 'severity',
+    title: '异常级别说明',
+    paragraphs: [
+      '异常级别分为低、中、高，但不是统一按一个偏差百分比来分档。瞬时突增在“高于阈值 18% 以上”或“相对基线偏差 55% 以上”时判为高；高于阈值 8% 以上或相对基线偏差 30% 以上时判为中。持续高负荷在连续 8 个点及以上或高于阈值 18% 以上时判为高；连续 5 个点及以上或高于阈值 8% 以上时判为中。',
+      '非工作时段高负荷在连续 6 个点及以上或高于阈值 22% 以上时判为高；连续 3 个点及以上或高于阈值 10% 以上时判为中。工作时段低负荷或疑似停运在连续 4 个点及以上或低于阈值 45% 以上时判为高；连续 2 个点及以上或低于阈值 22% 以上时判为中。',
+      '夜间基线偏高在夜间负荷占比达到 85% 以上时判为高，达到 65% 以上时判为中。启停时段异常在偏移 4 小时及以上且该时点负荷至少是非工作时段均值的 1.35 倍时判为高；偏移 2 小时及以上且该时点负荷至少是非工作时段均值的 1.15 倍时判为中，其余为低。',
+    ],
+  },
+  {
+    key: 'pages',
+    title: '页面说明',
+    paragraphs: [
+      '数据总览用于查看当前建筑或筛选范围内的总量、趋势和异常总数。能耗分析用于查看趋势、结构、同类对标和节能机会，适合做汇报和判断负荷结构问题。',
+      '运维处置页面用于查看异常分布、事件列表、异常详情和处置记录。事件列表中的判定依据会直接展示当前值、基线值、阈值和触发窗口，例如“当前 630.9 kWh、基线 428.6 kWh、阈值 621.5 kWh、窗口 2017-12-31 17:00:00 ~ 2017-12-31 19:00:00”，这些数字就是系统实际判定时使用的口径。',
+      '智能助手页面主要承担知识问答、异常诊断、节能建议和分析解读。日常使用建议按先分析、再处置、再诊断的顺序操作，这样操作员可以先确认异常是否成立，再决定是否进入诊断和闭环。',
+    ],
+  },
+];
+
 function buildQuery(params) {
   const q = new URLSearchParams();
   Object.entries(params).forEach(([k, v]) => {
@@ -117,6 +156,7 @@ createApp({
       analysisOverlayWeather: true,
       analysisUnsupportedMessage: '',
       anomalyQuery: {
+        anomalyType: '',
         severity: '',
         status: '',
         sort: 'timestamp_desc',
@@ -124,6 +164,7 @@ createApp({
         pageSize: 20,
         total: 0,
       },
+      anomalyTypeOptions: [],
       trendSeries: [],
       anomalyRows: [],
       anomalyTypeStats: {},
@@ -228,6 +269,9 @@ createApp({
         expanded: false,
       },
       knowledgeDocumentCache: {},
+      helpDialogVisible: false,
+      activeHelpSection: 'overview',
+      helpSections: PROJECT_HELP_SECTIONS,
       aiProvider: 'auto',
       aiStats: {
         windowHours: 24,
@@ -545,6 +589,9 @@ createApp({
     severityLabel(value) {
       const map = { high: '高', medium: '中', low: '低' };
       return map[value] || value || '-';
+    },
+    activeHelpContent() {
+      return this.helpSections.find((section) => section.key === this.activeHelpSection) || this.helpSections[0];
     },
     severityToneClass(value) {
       const map = { high: 'is-danger', medium: 'is-warning', low: 'is-success' };
@@ -1087,7 +1134,14 @@ createApp({
     topSavingImpactItems(limit = 3) {
       return (this.analysisInsights.saving_opportunities || [])
         .slice(0, limit)
-        .map((item) => `${item.title}：影响估算 ${this.formatInsightKwh(item.estimated_loss_kwh)}`);
+        .map((item) => `${item.title}：影响估算 ${this.formatInsightKwh(this.opportunityEstimatedKwh(item))}`);
+    },
+    opportunityEstimatedKwh(item) {
+      if (!item || typeof item !== 'object') return 0;
+      const estimated = Number(item.estimated_kwh);
+      if (Number.isFinite(estimated)) return estimated;
+      const legacy = Number(item.estimated_loss_kwh);
+      return Number.isFinite(legacy) ? legacy : 0;
     },
     activateSubmodule(pageKey, submoduleKey) {
       const currentKey = this.activeSubmoduleMap[pageKey];
@@ -1200,7 +1254,7 @@ createApp({
     },
     async sendStreamingDiagnosis({ question } = {}) {
       this.unifiedChat.loading = true;
-      this.unifiedChat.streaming = true;
+      this.unifiedChat.streaming = false;
       this.unifiedChat.streamBuffer = '';
       const msgId = `${Date.now()}-assistant`;
       const baseData = {
@@ -1224,54 +1278,22 @@ createApp({
       };
 
       try {
-        const response = await fetch(`${API_BASE}/api/ai/stream`, {
+        const data = await this.fetchJson(`${API_BASE}/api/ai/diagnose`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(payload),
         });
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        const reader = response.body.getReader();
-        const decoder = new TextDecoder();
-        let buf = '';
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          buf += decoder.decode(value, { stream: true });
-          const events = buf.split('\n\n');
-          buf = events.pop();
-          for (const block of events) {
-            const evName = block.match(/^event: (.+)/m)?.[1];
-            const dataStr = block.match(/^data: (.+)/m)?.[1];
-            if (!dataStr) continue;
-            let evData;
-            try { evData = JSON.parse(dataStr); } catch { continue; }
-            const idx = this.unifiedChat.messages.findIndex(m => m.id === msgId);
-            if (idx < 0) break;
-            if (evName === 'template') {
-              evData.causes = evData.causes || evData.possible_causes || [];
-              evData.steps = evData.steps || [];
-              evData.prevention = evData.prevention || [];
-              evData.recommended_actions = evData.recommended_actions || [];
-              evData.evidence = evData.evidence || [];
-              this.unifiedChat.messages.splice(idx, 1, { id: msgId, role: 'assistant', type: 'diagnosis', pending: true, data: evData });
-              this.diagnosis = evData;
-            } else if (evName === 'token') {
-              this.unifiedChat.streamBuffer += evData.text;
-              const cur = this.unifiedChat.messages[idx];
-              this.unifiedChat.messages.splice(idx, 1, { ...cur, data: { ...cur.data, conclusion: this.unifiedChat.streamBuffer } });
-            } else if (evName === 'done') {
-              const cur = this.unifiedChat.messages[idx];
-              const finalConclusion = this.unifiedChat.streamBuffer || cur.data.conclusion;
-              const finalData = { ...cur.data, ...evData, conclusion: finalConclusion };
-              this.unifiedChat.messages.splice(idx, 1, { ...cur, pending: false, data: finalData });
-              this.diagnosis = finalData;
-            } else if (evName === 'fallback' || evName === 'error') {
-              const cur = this.unifiedChat.messages[idx];
-              this.unifiedChat.messages.splice(idx, 1, { ...cur, pending: false });
-            }
-            await this.$nextTick();
-            this.scrollAssistantToBottom();
-          }
+        const idx = this.unifiedChat.messages.findIndex(m => m.id === msgId);
+        if (idx >= 0) {
+          const finalData = data.diagnosis || {};
+          this.unifiedChat.messages.splice(idx, 1, {
+            id: msgId,
+            role: 'assistant',
+            type: 'diagnosis',
+            pending: false,
+            data: finalData,
+          });
+          this.diagnosis = finalData;
         }
       } catch (err) {
         const idx = this.unifiedChat.messages.findIndex(m => m.id === msgId);
@@ -2052,9 +2074,18 @@ createApp({
       this.loading.anomaly = true;
       this.errors.anomaly = '';
       try {
-        const data = await this.fetchJson(`${API_BASE}/api/anomaly/list${buildQuery({ ...this.getTimeParams(), severity: this.anomalyQuery.severity, status: this.anomalyQuery.status, sort: this.anomalyQuery.sort, page: this.anomalyQuery.page, page_size: this.anomalyQuery.pageSize })}`);
+        const data = await this.fetchJson(`${API_BASE}/api/anomaly/list${buildQuery({
+          ...this.getTimeParams(),
+          anomaly_type: this.anomalyQuery.anomalyType,
+          severity: this.anomalyQuery.severity,
+          status: this.anomalyQuery.status,
+          sort: this.anomalyQuery.sort,
+          page: this.anomalyQuery.page,
+          page_size: this.anomalyQuery.pageSize,
+        })}`);
         this.anomalyRows = data.items || [];
         this.anomalyTypeStats = data.by_type || {};
+        this.anomalyTypeOptions = data.available_types || [];
         this.anomalyQuery.total = data.total_count || 0;
         this.anomalyQuery.page = data.page || this.anomalyQuery.page;
         this.anomalyQuery.pageSize = data.page_size || this.anomalyQuery.pageSize;
@@ -2065,6 +2096,7 @@ createApp({
         this.errors.anomaly = '异常数据加载失败';
         this.anomalyRows = [];
         this.anomalyTypeStats = {};
+        this.anomalyTypeOptions = [];
       } finally {
         this.loading.anomaly = false;
       }
@@ -2146,6 +2178,7 @@ createApp({
     async exportAnomalies() {
       const params = buildQuery({
         ...this.getTimeParams(),
+        anomaly_type: this.anomalyQuery.anomalyType,
         severity: this.anomalyQuery.severity,
         status: this.anomalyQuery.status,
         sort: this.anomalyQuery.sort,
@@ -2543,6 +2576,18 @@ createApp({
       const num = Number(value || 0);
       return Number.isFinite(num) ? `${num.toFixed(1)} kWh` : '0.0 kWh';
     },
+    formatAnomalyKwh(value) {
+      const num = Number(value || 0);
+      return Number.isFinite(num) ? `${num.toFixed(1)} kWh` : '-';
+    },
+    anomalyRuleBrief(row) {
+      if (!row) return '-';
+      const current = this.formatAnomalyKwh(row.current_value);
+      const baseline = this.formatAnomalyKwh(row.baseline_value);
+      const threshold = this.formatAnomalyKwh(row.threshold_value);
+      const windowText = row.trigger_window || row.time_scope_label || '-';
+      return `${row.rule_name || '异常规则'} | 当前 ${current} / 基线 ${baseline} / 阈值 ${threshold} | ${windowText}`;
+    },
     bucketAnalysisSeries(series, bucketHours) {
       if (!Array.isArray(series) || !series.length || !bucketHours || bucketHours <= 1) {
         return series || [];
@@ -2853,10 +2898,20 @@ createApp({
     renderAnomalyTypeChart(byType) {
       const chart = this.ensureChart('anomalyType', 'anomalyTypeChart');
       if (!chart) return;
+      const items = Object.entries(byType || {})
+        .map(([name, value]) => ({ name, value }))
+        .sort((a, b) => Number(b.value || 0) - Number(a.value || 0));
       chart.setOption({
         tooltip: { trigger: 'item' },
         legend: { bottom: 0, textStyle: { color: '#5f6c84' } },
-        series: [{ type: 'pie', radius: ['34%', '72%'], data: Object.entries(byType).map(([name, value]) => ({ name, value })) }],
+        series: [{
+          type: 'pie',
+          radius: ['34%', '72%'],
+          data: items,
+          label: {
+            formatter: ({ name, percent }) => `${name}\n${this.formatNumber(percent || 0, 1)}%`,
+          },
+        }],
       });
     },
     async syncVisibleCharts() {

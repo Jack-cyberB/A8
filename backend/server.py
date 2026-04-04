@@ -185,6 +185,39 @@ ALLOWED_TRANSITIONS = {
     STATUS_RESOLVED: set(),
 }
 
+ANOMALY_RULE_META = {
+    "anomaly_spike": {
+        "rule_name": "瞬时突增",
+        "time_scope_label": "单点瞬时",
+        "summary_template": "当前负荷高于建筑自身突增阈值，属于短时异常抬升。",
+    },
+    "anomaly_sustained_high_load": {
+        "rule_name": "持续高负荷",
+        "time_scope_label": "连续高负荷窗口",
+        "summary_template": "连续多个时点高于建筑自身高负荷阈值，说明存在持续运行压力。",
+    },
+    "anomaly_off_hours_load": {
+        "rule_name": "非工作时段高负荷",
+        "time_scope_label": "夜间/周末时段",
+        "summary_template": "在夜间或周末等非工作时段，负荷仍显著高于非工作时段基线。",
+    },
+    "anomaly_workhour_offline": {
+        "rule_name": "工作时段低负荷/疑似停运",
+        "time_scope_label": "工作时段",
+        "summary_template": "在正常工作时段负荷异常偏低，可能存在设备停运、联动未开启或采集异常。",
+    },
+    "anomaly_baseload_high": {
+        "rule_name": "夜间基线偏高",
+        "time_scope_label": "夜间基线窗口",
+        "summary_template": "夜间平均负荷相对日均水平偏高，说明存在待机、常开或控制策略未收敛问题。",
+    },
+    "anomaly_schedule_shift": {
+        "rule_name": "启停时段异常",
+        "time_scope_label": "日程启停窗口",
+        "summary_template": "启停时段相对典型工作日显著提前或延后，疑似排程设置异常。",
+    },
+}
+
 
 def load_local_env() -> None:
     if not ENV_FILE.exists():
@@ -458,6 +491,36 @@ class LLMDiagnoseProvider(DiagnoseProvider):
                 except (json.JSONDecodeError, IndexError, KeyError):
                     continue
 
+    def _build_diagnosis_prompt_context(
+        self,
+        context: dict[str, Any],
+        diag_template: dict[str, Any],
+    ) -> str:
+        window_context = context.get("window_context") or {}
+        peer_context = context.get("peer_context") or {}
+        weather_context = context.get("weather_context") or {}
+        systems = "、".join(context.get("likely_systems") or []) or "未识别"
+        tags = "、".join(context.get("phenomenon_tags") or []) or "无"
+        lines = [
+            f"建筑：{context.get('building_name', '')}",
+            f"建筑类型：{context.get('building_type', '')}",
+            f"异常类型：{diag_template.get('anomaly_name', '')}",
+            f"异常时间：{context.get('timestamp', '')}",
+            f"当前负荷：{context.get('value_kwh', '')} kWh",
+            f"偏差比例：{context.get('deviation_pct', '')}%",
+            f"24h基线：{window_context.get('baseline_24h_avg_kwh', '')} kWh",
+            f"同小时均值：{window_context.get('same_hour_avg_kwh', '')} kWh",
+            f"异常前24h均值：{window_context.get('before_24h_avg_kwh', '')} kWh",
+            f"异常后24h均值：{window_context.get('after_24h_avg_kwh', '')} kWh",
+            f"同类偏差：{peer_context.get('gap_pct', '')}%",
+            f"同类百分位：{peer_context.get('peer_percentile', '')}",
+            f"异常时温度：{weather_context.get('temperature_c', '')}°C",
+            f"温度区间：{weather_context.get('temperature_band', '')}",
+            f"优先怀疑系统：{systems}",
+            f"现象标签：{tags}",
+        ]
+        return "\n".join(line for line in lines if line and not line.endswith("："))
+
     def diagnose(self, repo: "EnergyRepository", payload: dict[str, Any]) -> dict[str, Any]:
         if payload.get("simulate_llm_failure"):
             raise RuntimeError("Simulated llm failure")
@@ -492,6 +555,7 @@ class LLMDiagnoseProvider(DiagnoseProvider):
                 if isinstance(x, dict)
             ]
         ).strip()
+        prompt_context_text = self._build_diagnosis_prompt_context(context, diag_template)
         prompt_message = str(payload.get("message", "")).strip()
         if not prompt_message:
             prompt_message = "请基于异常上下文给出诊断建议。"
@@ -499,20 +563,27 @@ class LLMDiagnoseProvider(DiagnoseProvider):
         system_prompt = (
             "你是建筑能源运维诊断助手，面向真实运维排障场景。必须只输出一个JSON对象，不要输出其他文本。"
             "JSON字段必须包含：conclusion, causes, steps, prevention, recommended_actions, evidence, confidence, risk_level。"
-            "其中causes/steps/prevention/recommended_actions为字符串数组，每个数组至少包含1条内容，不允许输出空数组。"
+            "其中causes/steps/prevention/recommended_actions为字符串数组，每个数组至少包含3条内容，不允许输出空数组。"
             "evidence为数组。risk_level只能是low/medium/high。confidence为0.0到1.0之间的数字。"
-            "conclusion必须引用建筑名称、异常发生时间段和具体偏差数值（如'较基线偏高X%'）。"
+            "conclusion必须引用建筑名称、异常发生时间段、当前负荷、24h基线和具体偏差数值（如'较基线偏高X%'）。"
             "如提供了知识证据，请在conclusion中用[1][2]等标注引用来源。"
-            "请使用中文，优先给出可执行的排查步骤和处理动作，不要泛泛而谈。"
+            "causes禁止写成'设备异常启动''临时任务''传感器偏差'这类泛词，必须写出具体系统、场景和导致偏高/偏低的机制。"
+            "steps必须是按顺序执行的排查动作，明确先查什么数据、再查什么设备、最后怎么交叉验证。"
+            "recommended_actions必须是本班次就能执行的即时动作，prevention必须是后续制度、排程或阈值治理动作。"
+            "请使用中文，不要复述空话，不要只摆数据，要像资深运维工程师给现场班组下达诊断意见。"
         )
         user_prompt = (
-            f"异常类型: {anomaly_name}\n"
-            f"异常上下文: {json.dumps(context, ensure_ascii=False)}\n"
-            f"模板诊断摘要: {diag_template.get('conclusion', '')}\n"
+            f"异常摘要:\n{prompt_context_text}\n"
             f"数据证据:\n{data_evidence_text}\n"
             f"知识证据:\n{evidence_text}\n"
             f"用户问题: {prompt_message}\n"
-            "请结合异常发生时间、偏差比例、当前建筑和知识证据，优先输出可执行的排查顺序与风险判断。\n"
+            "输出要求：\n"
+            "1. conclusion 用 1 段话讲清这次异常意味着什么，先点判断，再点理由。\n"
+            "2. causes 至少 3 条，每条都要写成“系统/对象 + 异常机制 + 为什么符合当前数据”。\n"
+            "3. steps 至少 3 条，必须是现场可执行顺序，优先写分项回路、BMS排程、设备状态、现场记录。\n"
+            "4. recommended_actions 至少 3 条，必须是立即动作，不要和 prevention 重复。\n"
+            "5. prevention 至少 3 条，必须是防复发治理动作。\n"
+            "6. 如果知识证据和数据证据不足以支持某个判断，就不要编造。\n"
             "请输出严格JSON。"
         )
 
@@ -544,12 +615,21 @@ class LLMDiagnoseProvider(DiagnoseProvider):
                 llm_diag = self._sanitize_llm_result(llm_obj)
 
                 merged = dict(diag_template)
-                for key in ("conclusion", "causes", "steps", "prevention", "recommended_actions", "confidence", "risk_level"):
-                    if llm_diag.get(key):
-                        merged[key] = llm_diag[key]
+                llm_causes = llm_diag.get("causes", llm_diag.get("possible_causes"))
+                merged["conclusion"] = str(llm_diag.get("conclusion", "")).strip() or diag_template.get("conclusion", "")
+                merged["causes"] = repo._clean_text_list(llm_causes, max_items=4)
+                merged["steps"] = repo._clean_text_list(llm_diag.get("steps"), max_items=4)
+                merged["prevention"] = repo._clean_text_list(llm_diag.get("prevention"), max_items=4)
+                merged["recommended_actions"] = repo._clean_text_list(llm_diag.get("recommended_actions"), max_items=3)
+                if llm_diag.get("confidence") not in (None, ""):
+                    merged["confidence"] = llm_diag["confidence"]
+                if llm_diag.get("risk_level"):
+                    merged["risk_level"] = llm_diag["risk_level"]
                 merged["possible_causes"] = merged.get("causes", [])
                 merged["data_evidence"] = diag_template.get("data_evidence", [])
                 merged["evidence"] = diag_template.get("evidence", [])
+                if not repo._required_diag_fields_complete(merged):
+                    raise RuntimeError("llm returned incomplete diagnosis fields")
                 return {"diagnosis": merged, "context": context}
             except HTTPError as exc:
                 retryable = exc.code == 429 or 500 <= exc.code < 600
@@ -709,6 +789,21 @@ class EnergyRepository:
     def _load_dictionary(self) -> dict[str, Any]:
         with self.dict_file.open("r", encoding="utf-8-sig") as f:
             return json.load(f).get("anomaly_type_dict", {})
+
+    def _anomaly_dictionary(self, anomaly_type: str) -> dict[str, Any]:
+        return self.dict_data.get(anomaly_type, {})
+
+    def _anomaly_name(self, anomaly_type: str) -> str:
+        return str(self._anomaly_dictionary(anomaly_type).get("name", "")).strip() or anomaly_type
+
+    def _rule_meta(self, anomaly_type: str) -> dict[str, str]:
+        meta = ANOMALY_RULE_META.get(anomaly_type, {})
+        return {
+            "rule_code": anomaly_type,
+            "rule_name": str(meta.get("rule_name", "")).strip() or self._anomaly_name(anomaly_type),
+            "time_scope_label": str(meta.get("time_scope_label", "")).strip() or "异常时段",
+            "summary_template": str(meta.get("summary_template", "")).strip() or "当前点位命中异常规则。",
+        }
 
     def _load_bdg2_metadata(self) -> dict[str, dict[str, Any]]:
         if not self.metadata_file.exists():
@@ -1890,36 +1985,401 @@ class EnergyRepository:
 
         self.anomalies = self._detect_anomalies()
 
+    def _off_hours_row(self, row: dict[str, Any]) -> bool:
+        hour = int(row.get("hour", 0))
+        weekday = row["timestamp"].weekday()
+        return weekday >= 5 or hour < 7 or hour >= 21
+
+    def _work_hours_row(self, row: dict[str, Any]) -> bool:
+        hour = int(row.get("hour", 0))
+        weekday = row["timestamp"].weekday()
+        return weekday < 5 and 8 <= hour <= 18
+
+    def _median_value(self, values: list[float], fallback: float = 0.0) -> float:
+        if not values:
+            return fallback
+        ordered = sorted(float(v) for v in values)
+        middle = len(ordered) // 2
+        if len(ordered) % 2 == 1:
+            return ordered[middle]
+        return (ordered[middle - 1] + ordered[middle]) / 2
+
+    def _severity_for_anomaly(
+        self,
+        anomaly_type: str,
+        row_value: float,
+        baseline_value: float,
+        threshold_value: float,
+        trigger_count: int,
+        extra: dict[str, Any] | None = None,
+    ) -> str:
+        extra = extra or {}
+        baseline_gap_pct = ((row_value - baseline_value) / baseline_value * 100) if baseline_value else 0.0
+        threshold_gap_pct = ((row_value - threshold_value) / threshold_value * 100) if threshold_value else 0.0
+        threshold_drop_pct = ((threshold_value - row_value) / threshold_value * 100) if threshold_value else 0.0
+        abs_gap_pct = abs(baseline_gap_pct)
+
+        if anomaly_type == "anomaly_spike":
+            if threshold_gap_pct >= 18 or abs_gap_pct >= 55:
+                return "high"
+            if threshold_gap_pct >= 8 or abs_gap_pct >= 30:
+                return "medium"
+            return "low"
+
+        if anomaly_type == "anomaly_sustained_high_load":
+            if trigger_count >= 8 or threshold_gap_pct >= 18:
+                return "high"
+            if trigger_count >= 5 or threshold_gap_pct >= 8:
+                return "medium"
+            return "low"
+
+        if anomaly_type == "anomaly_off_hours_load":
+            if trigger_count >= 6 or threshold_gap_pct >= 22:
+                return "high"
+            if trigger_count >= 3 or threshold_gap_pct >= 10:
+                return "medium"
+            return "low"
+
+        if anomaly_type == "anomaly_workhour_offline":
+            if trigger_count >= 4 or threshold_drop_pct >= 45:
+                return "high"
+            if trigger_count >= 2 or threshold_drop_pct >= 22:
+                return "medium"
+            return "low"
+
+        if anomaly_type == "anomaly_baseload_high":
+            night_ratio_pct = float(extra.get("night_ratio_pct", 0.0) or 0.0)
+            if night_ratio_pct >= 85:
+                return "high"
+            if night_ratio_pct >= 65:
+                return "medium"
+            return "low"
+
+        if anomaly_type == "anomaly_schedule_shift":
+            shift_hours = abs(float(extra.get("shift_hours", 0.0) or 0.0))
+            offhour_ratio = float(extra.get("offhour_ratio", 0.0) or 0.0)
+            if shift_hours >= 4 and offhour_ratio >= 1.35:
+                return "high"
+            if shift_hours >= 2 and offhour_ratio >= 1.15:
+                return "medium"
+            return "low"
+
+        if abs_gap_pct >= 60:
+            return "high"
+        if abs_gap_pct >= 30:
+            return "medium"
+        return "low"
+
+    def _window_label(self, rows: list[dict[str, Any]]) -> str:
+        if not rows:
+            return ""
+        if len(rows) == 1:
+            return to_iso(rows[0]["timestamp"])
+        return f"{to_iso(rows[0]['timestamp'])} ~ {to_iso(rows[-1]['timestamp'])}"
+
+    def _append_anomaly(
+        self,
+        anomalies: list[dict[str, Any]],
+        seen: set[tuple[int, str]],
+        anomaly_id: int,
+        row: dict[str, Any],
+        anomaly_type: str,
+        threshold: float,
+        stat_mean: float,
+        *,
+        baseline_value: float | None = None,
+        trigger_rows: list[dict[str, Any]] | None = None,
+        trigger_count: int | None = None,
+        time_scope_label: str | None = None,
+        rule_summary: str | None = None,
+        extra: dict[str, Any] | None = None,
+    ) -> int:
+        key = (int(row["record_id"]), anomaly_type)
+        if key in seen:
+            return anomaly_id
+        seen.add(key)
+        anomalies.append(
+            self._to_anomaly(
+                anomaly_id,
+                row,
+                anomaly_type,
+                threshold,
+                stat_mean,
+                baseline_value=baseline_value,
+                trigger_rows=trigger_rows,
+                trigger_count=trigger_count,
+                time_scope_label=time_scope_label,
+                rule_summary=rule_summary,
+                extra=extra,
+            )
+        )
+        return anomaly_id + 1
+
     def _detect_anomalies(self) -> list[dict[str, Any]]:
         anomalies: list[dict[str, Any]] = []
         a_id = 1
+        seen: set[tuple[int, str]] = set()
 
         for building_id, items in self.by_building.items():
             stat = self.stats[building_id]
             spike_threshold = stat["spike_threshold"]
             high_threshold = stat["high_load_threshold"]
+            off_hour_values = [float(row["electricity_kwh"]) for row in items if self._off_hours_row(row)]
+            work_hour_values = [float(row["electricity_kwh"]) for row in items if self._work_hours_row(row)]
+            night_values = [float(row["electricity_kwh"]) for row in items if int(row.get("hour", 0)) < 6]
+            off_hour_avg = sum(off_hour_values) / len(off_hour_values) if off_hour_values else stat["mean"]
+            work_hour_avg = sum(work_hour_values) / len(work_hour_values) if work_hour_values else stat["mean"]
+            night_avg = sum(night_values) / len(night_values) if night_values else off_hour_avg
+            night_ratio = (night_avg / stat["mean"] * 100) if stat["mean"] else 0.0
+            workhour_offline_threshold = min(max(work_hour_avg * 0.18, 0.25), max(work_hour_avg * 0.4, 0.5))
+            off_hours_threshold = max(off_hour_avg * 1.45, stat["mean"] * 0.95)
+            night_base_threshold = max(night_avg * 1.2, stat["mean"] * 0.52)
+            schedule_active_threshold = max(work_hour_avg * 0.92, off_hour_avg * 1.22, stat["mean"] * 0.98)
 
-            for row in items:
-                if row["electricity_kwh"] > spike_threshold:
-                    anomalies.append(self._to_anomaly(a_id, row, "anomaly_spike", spike_threshold, stat["mean"]))
-                    a_id += 1
-
-            for row in items:
-                if 8 <= row["hour"] <= 20 and row["electricity_kwh"] < 0.5:
-                    anomalies.append(self._to_anomaly(a_id, row, "anomaly_offline", 0.5, stat["mean"]))
-                    a_id += 1
-
-            consec = 0
-            for row in items:
-                if row["electricity_kwh"] > high_threshold:
-                    consec += 1
-                else:
-                    consec = 0
-                if consec >= 4:
-                    anomalies.append(
-                        self._to_anomaly(a_id, row, "anomaly_sustained_high_load", high_threshold, stat["mean"])
+            for index, row in enumerate(items):
+                value = float(row["electricity_kwh"])
+                prev_value = float(items[index - 1]["electricity_kwh"]) if index > 0 else value
+                next_value = float(items[index + 1]["electricity_kwh"]) if index + 1 < len(items) else value
+                if value > spike_threshold and value >= prev_value and value >= next_value:
+                    a_id = self._append_anomaly(
+                        anomalies,
+                        seen,
+                        a_id,
+                        row,
+                        "anomaly_spike",
+                        spike_threshold,
+                        stat["mean"],
+                        baseline_value=stat["mean"],
+                        trigger_rows=[row],
+                        trigger_count=1,
+                        time_scope_label="单点瞬时",
+                        rule_summary=f"当前点负荷 {round(value, 2)} kWh，高于建筑瞬时突增阈值 {round(spike_threshold, 2)} kWh。",
                     )
-                    a_id += 1
+
+            consec_rows: list[dict[str, Any]] = []
+            for row in items:
+                if float(row["electricity_kwh"]) > high_threshold:
+                    consec_rows.append(row)
+                else:
+                    if len(consec_rows) >= 4:
+                        peak_row = max(consec_rows, key=lambda current: float(current["electricity_kwh"]))
+                        a_id = self._append_anomaly(
+                            anomalies,
+                            seen,
+                            a_id,
+                            peak_row,
+                            "anomaly_sustained_high_load",
+                            high_threshold,
+                            stat["mean"],
+                            baseline_value=stat["mean"],
+                            trigger_rows=list(consec_rows),
+                            trigger_count=len(consec_rows),
+                            time_scope_label="连续高负荷窗口",
+                            rule_summary=f"连续 {len(consec_rows)} 个时点高于高负荷阈值 {round(high_threshold, 2)} kWh。",
+                        )
+                    consec_rows = []
+            if len(consec_rows) >= 4:
+                peak_row = max(consec_rows, key=lambda current: float(current["electricity_kwh"]))
+                a_id = self._append_anomaly(
+                    anomalies,
+                    seen,
+                    a_id,
+                    peak_row,
+                    "anomaly_sustained_high_load",
+                    high_threshold,
+                    stat["mean"],
+                    baseline_value=stat["mean"],
+                    trigger_rows=list(consec_rows),
+                    trigger_count=len(consec_rows),
+                    time_scope_label="连续高负荷窗口",
+                    rule_summary=f"连续 {len(consec_rows)} 个时点高于高负荷阈值 {round(high_threshold, 2)} kWh。",
+                )
+
+            off_hour_run: list[dict[str, Any]] = []
+            workhour_offline_run: list[dict[str, Any]] = []
+            for row in items:
+                value = float(row["electricity_kwh"])
+                if self._off_hours_row(row) and value > off_hours_threshold:
+                    off_hour_run.append(row)
+                else:
+                    if len(off_hour_run) >= 2:
+                        peak_row = max(off_hour_run, key=lambda current: float(current["electricity_kwh"]))
+                        a_id = self._append_anomaly(
+                            anomalies,
+                            seen,
+                            a_id,
+                            peak_row,
+                            "anomaly_off_hours_load",
+                            off_hours_threshold,
+                            stat["mean"],
+                            baseline_value=off_hour_avg,
+                            trigger_rows=list(off_hour_run),
+                            trigger_count=len(off_hour_run),
+                            time_scope_label="夜间/周末时段",
+                            rule_summary=f"非工作时段连续 {len(off_hour_run)} 个时点高于基线阈值 {round(off_hours_threshold, 2)} kWh。",
+                        )
+                    off_hour_run = []
+
+                if self._work_hours_row(row) and value < workhour_offline_threshold:
+                    workhour_offline_run.append(row)
+                else:
+                    if len(workhour_offline_run) >= 2:
+                        low_row = min(workhour_offline_run, key=lambda current: float(current["electricity_kwh"]))
+                        a_id = self._append_anomaly(
+                            anomalies,
+                            seen,
+                            a_id,
+                            low_row,
+                            "anomaly_workhour_offline",
+                            workhour_offline_threshold,
+                            stat["mean"],
+                            baseline_value=work_hour_avg,
+                            trigger_rows=list(workhour_offline_run),
+                            trigger_count=len(workhour_offline_run),
+                            time_scope_label="工作时段",
+                            rule_summary=f"工作时段连续 {len(workhour_offline_run)} 个时点低于最低运行阈值 {round(workhour_offline_threshold, 2)} kWh。",
+                        )
+                    workhour_offline_run = []
+
+            if len(off_hour_run) >= 2:
+                peak_row = max(off_hour_run, key=lambda current: float(current["electricity_kwh"]))
+                a_id = self._append_anomaly(
+                    anomalies,
+                    seen,
+                    a_id,
+                    peak_row,
+                    "anomaly_off_hours_load",
+                    off_hours_threshold,
+                    stat["mean"],
+                    baseline_value=off_hour_avg,
+                    trigger_rows=list(off_hour_run),
+                    trigger_count=len(off_hour_run),
+                    time_scope_label="夜间/周末时段",
+                    rule_summary=f"非工作时段连续 {len(off_hour_run)} 个时点高于基线阈值 {round(off_hours_threshold, 2)} kWh。",
+                )
+            if len(workhour_offline_run) >= 2:
+                low_row = min(workhour_offline_run, key=lambda current: float(current["electricity_kwh"]))
+                a_id = self._append_anomaly(
+                    anomalies,
+                    seen,
+                    a_id,
+                    low_row,
+                    "anomaly_workhour_offline",
+                    workhour_offline_threshold,
+                    stat["mean"],
+                    baseline_value=work_hour_avg,
+                    trigger_rows=list(workhour_offline_run),
+                    trigger_count=len(workhour_offline_run),
+                    time_scope_label="工作时段",
+                    rule_summary=f"工作时段连续 {len(workhour_offline_run)} 个时点低于最低运行阈值 {round(workhour_offline_threshold, 2)} kWh。",
+                )
+
+            night_rows_by_day: dict[str, list[dict[str, Any]]] = {}
+            day_rows: dict[str, list[dict[str, Any]]] = {}
+            for row in items:
+                date_key = row["timestamp"].strftime("%Y-%m-%d")
+                day_rows.setdefault(date_key, []).append(row)
+                if int(row.get("hour", 0)) < 6:
+                    night_rows_by_day.setdefault(date_key, []).append(row)
+            for date_key, rows_in_day in night_rows_by_day.items():
+                values = [float(row["electricity_kwh"]) for row in rows_in_day]
+                if not values:
+                    continue
+                day_avg = sum(float(row["electricity_kwh"]) for row in day_rows.get(date_key, rows_in_day)) / max(len(day_rows.get(date_key, rows_in_day)), 1)
+                local_night_avg = sum(values) / len(values)
+                ratio_pct = (local_night_avg / day_avg * 100) if day_avg else 0.0
+                if ratio_pct > 58 and local_night_avg > night_base_threshold:
+                    anchor_row = max(rows_in_day, key=lambda current: float(current["electricity_kwh"]))
+                    a_id = self._append_anomaly(
+                        anomalies,
+                        seen,
+                        a_id,
+                        anchor_row,
+                        "anomaly_baseload_high",
+                        night_base_threshold,
+                        stat["mean"],
+                        baseline_value=day_avg,
+                        trigger_rows=list(rows_in_day),
+                        trigger_count=len(rows_in_day),
+                        time_scope_label="夜间基线窗口",
+                        rule_summary=f"{date_key} 夜间平均负荷为日均的 {round(ratio_pct, 1)}%，高于夜间基线判定阈值。",
+                        extra={"night_ratio_pct": round(ratio_pct, 2)},
+                    )
+
+            rows_by_day: dict[str, list[dict[str, Any]]] = {}
+            for row in items:
+                if row["timestamp"].weekday() < 5:
+                    rows_by_day.setdefault(row["timestamp"].strftime("%Y-%m-%d"), []).append(row)
+            first_active_hours: list[float] = []
+            last_active_hours: list[float] = []
+            daily_active_rows: dict[str, list[dict[str, Any]]] = {}
+            for date_key, rows_in_day in rows_by_day.items():
+                active_rows = [row for row in rows_in_day if float(row["electricity_kwh"]) >= schedule_active_threshold]
+                if len(active_rows) < 2:
+                    continue
+                daily_active_rows[date_key] = active_rows
+                first_active = min(active_rows, key=lambda current: current["timestamp"])
+                last_active = max(active_rows, key=lambda current: current["timestamp"])
+                first_active_hours.append(float(first_active.get("hour", 0)))
+                last_active_hours.append(float(last_active.get("hour", 0)))
+
+            typical_start_hour = int(round(self._median_value(first_active_hours, 8.0)))
+            typical_end_hour = int(round(self._median_value(last_active_hours, 18.0)))
+
+            for date_key, active_rows in daily_active_rows.items():
+                first_active = min(active_rows, key=lambda current: current["timestamp"])
+                last_active = max(active_rows, key=lambda current: current["timestamp"])
+                first_hour = int(first_active.get("hour", 0))
+                last_hour = int(last_active.get("hour", 0))
+                first_value = float(first_active["electricity_kwh"])
+                last_value = float(last_active["electricity_kwh"])
+                early_shift_hours = typical_start_hour - first_hour
+                late_shift_hours = last_hour - typical_end_hour
+                early_ratio = (first_value / off_hour_avg) if off_hour_avg else 0.0
+                late_ratio = (last_value / off_hour_avg) if off_hour_avg else 0.0
+
+                if early_shift_hours >= 2 and first_value >= schedule_active_threshold * 1.03 and early_ratio >= 1.12:
+                    a_id = self._append_anomaly(
+                        anomalies,
+                        seen,
+                        a_id,
+                        first_active,
+                        "anomaly_schedule_shift",
+                        schedule_active_threshold,
+                        stat["mean"],
+                        baseline_value=work_hour_avg,
+                        trigger_rows=[first_active],
+                        trigger_count=1,
+                        time_scope_label="日程启停窗口",
+                        rule_summary=f"{date_key} 首个高负荷时点出现在 {first_hour:02d}:00，较典型启用时段 {typical_start_hour:02d}:00 提前了 {early_shift_hours} 小时。",
+                        extra={
+                            "schedule_direction": "early_start",
+                            "shift_hours": early_shift_hours,
+                            "typical_start_hour": typical_start_hour,
+                            "offhour_ratio": round(early_ratio, 4),
+                        },
+                    )
+                if late_shift_hours >= 2 and last_value >= schedule_active_threshold * 1.03 and late_ratio >= 1.12:
+                    a_id = self._append_anomaly(
+                        anomalies,
+                        seen,
+                        a_id,
+                        last_active,
+                        "anomaly_schedule_shift",
+                        schedule_active_threshold,
+                        stat["mean"],
+                        baseline_value=work_hour_avg,
+                        trigger_rows=[last_active],
+                        trigger_count=1,
+                        time_scope_label="日程启停窗口",
+                        rule_summary=f"{date_key} 最后一个高负荷时点出现在 {last_hour:02d}:00，较典型停用时段 {typical_end_hour:02d}:00 延后了 {late_shift_hours} 小时。",
+                        extra={
+                            "schedule_direction": "late_stop",
+                            "shift_hours": late_shift_hours,
+                            "typical_end_hour": typical_end_hour,
+                            "offhour_ratio": round(late_ratio, 4),
+                        },
+                    )
 
         anomalies.sort(key=lambda x: x["timestamp"], reverse=True)
         return anomalies
@@ -1931,9 +2391,27 @@ class EnergyRepository:
         anomaly_type: str,
         threshold: float,
         stat_mean: float,
+        *,
+        baseline_value: float | None = None,
+        trigger_rows: list[dict[str, Any]] | None = None,
+        trigger_count: int | None = None,
+        time_scope_label: str | None = None,
+        rule_summary: str | None = None,
+        extra: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        diff_pct = ((row["electricity_kwh"] - stat_mean) / stat_mean * 100) if stat_mean else 0.0
-        severity = "high" if abs(diff_pct) > 60 else "medium" if abs(diff_pct) > 30 else "low"
+        reference_value = float(baseline_value if baseline_value is not None else stat_mean)
+        diff_pct = ((row["electricity_kwh"] - reference_value) / reference_value * 100) if reference_value else 0.0
+        trigger_rows = trigger_rows or [row]
+        rule_meta = self._rule_meta(anomaly_type)
+        merged_extra = dict(extra or {})
+        severity = self._severity_for_anomaly(
+            anomaly_type,
+            float(row["electricity_kwh"]),
+            reference_value,
+            float(threshold),
+            int(trigger_count or len(trigger_rows) or 1),
+            merged_extra,
+        )
         return {
             "anomaly_id": anomaly_id,
             "record_id": row["record_id"],
@@ -1943,10 +2421,22 @@ class EnergyRepository:
             "timestamp": row["timestamp"],
             "electricity_kwh": round(row["electricity_kwh"], 4),
             "mean_kwh": round(stat_mean, 4),
+            "baseline_value": round(reference_value, 4),
+            "current_value": round(float(row["electricity_kwh"]), 4),
             "deviation_pct": round(diff_pct, 2),
             "threshold": round(threshold, 4),
+            "threshold_value": round(threshold, 4),
             "anomaly_type": anomaly_type,
+            "anomaly_name": self._anomaly_name(anomaly_type),
+            "display_name": self._anomaly_name(anomaly_type),
+            "rule_code": rule_meta["rule_code"],
+            "rule_name": rule_meta["rule_name"],
+            "rule_summary": str(rule_summary or rule_meta["summary_template"]).strip(),
+            "trigger_window": self._window_label(trigger_rows),
+            "trigger_count": int(trigger_count or len(trigger_rows) or 1),
+            "time_scope_label": str(time_scope_label or rule_meta["time_scope_label"]).strip(),
             "severity": severity,
+            **merged_extra,
         }
 
     def _load_actions(self) -> None:
@@ -2106,13 +2596,13 @@ class EnergyRepository:
         }
 
     def _required_diag_fields_complete(self, diagnosis: dict[str, Any]) -> bool:
-        required = ["conclusion", "causes", "steps", "prevention", "evidence", "confidence", "risk_level"]
+        required = ["conclusion", "causes", "steps", "prevention", "recommended_actions", "evidence", "confidence", "risk_level"]
         for key in required:
             if key not in diagnosis:
                 return False
             value = diagnosis.get(key)
-            if key in {"causes", "steps", "prevention", "evidence"}:
-                if not isinstance(value, list):
+            if key in {"causes", "steps", "prevention", "recommended_actions", "evidence"}:
+                if not isinstance(value, list) or not value:
                     return False
             elif value in (None, ""):
                 return False
@@ -2134,7 +2624,7 @@ class EnergyRepository:
             if key == "summary":
                 if value in (None, ""):
                     return False
-            elif not isinstance(value, list):
+            elif not isinstance(value, list) or not value:
                 return False
         return True
 
@@ -2624,11 +3114,13 @@ class EnergyRepository:
         return {"title": title, "detail": detail, "severity": severity}
 
     def _opportunity_item(self, title: str, detail: str, priority: str, estimated_kwh: float = 0.0) -> dict[str, Any]:
+        estimated_value = round(float(estimated_kwh), 4)
         return {
             "title": title,
             "detail": detail,
             "priority": priority,
-            "estimated_kwh": round(float(estimated_kwh), 4),
+            "estimated_kwh": estimated_value,
+            "estimated_loss_kwh": estimated_value,
         }
 
     def _analysis_target_building(self, building_id: str | None, rows: list[dict[str, Any]]) -> tuple[str | None, list[dict[str, Any]]]:
@@ -3195,6 +3687,15 @@ class EnergyRepository:
                 "severity": item["severity"],
                 "deviation_pct": item["deviation_pct"],
                 "estimated_loss_kwh": item["estimated_loss_kwh"],
+                "rule_code": item.get("rule_code", item.get("anomaly_type")),
+                "rule_name": item.get("rule_name", item.get("anomaly_name")),
+                "rule_summary": item.get("rule_summary", ""),
+                "baseline_value": item.get("baseline_value", item.get("mean_kwh")),
+                "current_value": item.get("current_value", item.get("electricity_kwh")),
+                "threshold_value": item.get("threshold_value", item.get("threshold")),
+                "trigger_window": item.get("trigger_window", item["timestamp"] if isinstance(item.get("timestamp"), str) else to_iso(item["timestamp"])),
+                "trigger_count": item.get("trigger_count", 1),
+                "time_scope_label": item.get("time_scope_label", "异常时段"),
             }
             for item in self._trend_markers(anomalies)[:4]
         ]
@@ -3263,9 +3764,15 @@ class EnergyRepository:
         sorted_rows = self._sort_anomalies(filtered, sort)
 
         by_type: dict[str, int] = {}
+        by_type_code: dict[str, dict[str, Any]] = {}
         by_status: dict[str, int] = {}
         for item in sorted_rows:
-            by_type[item["anomaly_type"]] = by_type.get(item["anomaly_type"], 0) + 1
+            type_label = str(item.get("display_name") or item.get("anomaly_name") or self._anomaly_name(str(item.get("anomaly_type", ""))))
+            by_type[type_label] = by_type.get(type_label, 0) + 1
+            type_code = str(item.get("anomaly_type", "")).strip()
+            if type_code:
+                bucket = by_type_code.setdefault(type_code, {"code": type_code, "name": type_label, "count": 0})
+                bucket["count"] = int(bucket.get("count", 0)) + 1
             st = self._action_state(int(item["anomaly_id"]))["status"]
             by_status[st] = by_status.get(st, 0) + 1
 
@@ -3287,7 +3794,8 @@ class EnergyRepository:
                 {
                     **x,
                     "timestamp": to_iso(x["timestamp"]),
-                    "anomaly_name": self.dict_data.get(x["anomaly_type"], {}).get("name", x["anomaly_type"]),
+                    "anomaly_name": str(x.get("anomaly_name") or self._anomaly_name(x["anomaly_type"])),
+                    "display_name": str(x.get("display_name") or self._anomaly_name(x["anomaly_type"])),
                     "status": action_state["status"],
                     "assignee": action_state["assignee"],
                     "last_note": action_state["last_note"],
@@ -3305,6 +3813,7 @@ class EnergyRepository:
             "severity": severity,
             "status": status,
             "by_type": by_type,
+            "available_types": sorted(by_type_code.values(), key=lambda item: (-int(item.get("count", 0)), str(item.get("name", "")))),
             "by_status": by_status,
             "items": items,
         }
@@ -3403,13 +3912,27 @@ class EnergyRepository:
         knowledge = self.dict_data.get(context["anomaly_type"], {})
         action_state = self._action_state(anomaly_id)
         note = self.query_anomaly_note(anomaly_id)
+        anomaly_name = str(context.get("anomaly_name") or knowledge.get("name", context["anomaly_type"]))
 
         return {
             "anomaly": {
                 **context,
                 "timestamp": to_iso(context["timestamp"]),
-                "anomaly_name": knowledge.get("name", context["anomaly_type"]),
+                "anomaly_name": anomaly_name,
+                "display_name": str(context.get("display_name") or anomaly_name),
                 "status": action_state["status"],
+            },
+            "rule_explanation": {
+                "rule_code": str(context.get("rule_code", context["anomaly_type"])),
+                "rule_name": str(context.get("rule_name", anomaly_name)),
+                "rule_summary": str(context.get("rule_summary", "")),
+                "current_value": round(float(context.get("current_value", context["electricity_kwh"])), 4),
+                "baseline_value": round(float(context.get("baseline_value", context["mean_kwh"])), 4),
+                "threshold_value": round(float(context.get("threshold_value", context["threshold"])), 4),
+                "deviation_pct": round(float(context.get("deviation_pct", 0.0)), 2),
+                "trigger_window": str(context.get("trigger_window", to_iso(context["timestamp"]))),
+                "trigger_count": int(context.get("trigger_count", 1) or 1),
+                "time_scope_label": str(context.get("time_scope_label", "异常时段")),
             },
             "impact": {
                 "estimated_loss_kwh": round(estimated_loss, 4),
@@ -3560,6 +4083,9 @@ class EnergyRepository:
             "anomaly_spike": ["空调系统", "照明系统", "动力设备"],
             "anomaly_off_hours_load": ["照明系统", "新风系统", "待机设备", "热水设备"],
             "anomaly_sustained_high_load": ["空调主机", "循环水泵", "新风机组", "连续运行设备"],
+            "anomaly_workhour_offline": ["配电回路", "控制器", "采集网关", "主机联动"],
+            "anomaly_baseload_high": ["照明回路", "热水系统", "待机设备", "新风机组"],
+            "anomaly_schedule_shift": ["BMS排程", "空调联动", "照明定时", "新风排程"],
         }
         building_text = str(building_type or "").lower()
         systems.extend(anomaly_map.get(anomaly_type, ["空调系统", "照明系统", "重点用能设备"]))
@@ -3766,9 +4292,9 @@ class EnergyRepository:
 
         knowledge = self.dict_data.get(chosen_type, self.dict_data.get("anomaly_spike", {}))
         anomaly_name = knowledge.get("name", chosen_type)
-        causes = knowledge.get("possible_causes", [])
-        steps = knowledge.get("steps", [])
-        prevention = knowledge.get("prevention", [])
+        causes = self._clean_text_list(knowledge.get("possible_causes", []), max_items=4)
+        steps = self._clean_text_list(knowledge.get("steps", []), max_items=4)
+        prevention = self._clean_text_list(knowledge.get("prevention", []), max_items=4)
         retrieval = self._search_knowledge(
             chosen_type,
             message,
@@ -3777,16 +4303,22 @@ class EnergyRepository:
         )
         evidence = retrieval["items"]
 
+        enriched_causes = self._build_diagnosis_causes(diagnose_context, raw_context, causes)
+        enriched_steps = self._build_diagnosis_steps(diagnose_context, raw_context, steps)
+        enriched_prevention = self._build_diagnosis_prevention(diagnose_context, prevention)
+        recommended_actions = self._build_diagnosis_actions(diagnose_context, chosen_type, enriched_steps, steps[:3] if steps else prevention[:3])
+
         if raw_context:
             conclusion = (
                 f"{diagnose_context['building_name']} 在 {diagnose_context['timestamp']} 出现{anomaly_name}，"
-                f"异常点负荷 {diagnose_context['value_kwh']} kWh，"
-                f"较24小时基线 {diagnose_context['window_context'].get('baseline_24h_avg_kwh') or raw_context['mean_kwh']} kWh 偏离 {diagnose_context['deviation_pct']}%。"
+                f"异常点负荷 {diagnose_context['value_kwh']} kWh，较24小时基线 "
+                f"{diagnose_context['window_context'].get('baseline_24h_avg_kwh') or raw_context['mean_kwh']} kWh 偏离 {diagnose_context['deviation_pct']}%。"
+                f"结合同小时基线、建筑类型和知识证据，这更像是 { '、'.join(diagnose_context.get('likely_systems', [])[:2]) or '关键用能系统' } 在该时段运行异常，而不是普通波动。"
             )
         else:
             conclusion = (
                 f"根据你提供的问题，系统判定为 {anomaly_name} 场景。"
-                "建议先执行基础排查步骤，再结合实时曲线确认是否恢复。"
+                "建议先执行基础排查步骤，再结合实时曲线和知识依据确认是否恢复。"
             )
 
         if raw_context and evidence:
@@ -3799,17 +4331,15 @@ class EnergyRepository:
             confidence = 0.45
 
         risk_level = "high" if confidence >= 0.8 else "medium" if confidence >= 0.6 else "low"
-        recommended_actions = steps[:3] if steps else prevention[:3]
-
         return {
             "diagnosis": {
                 "anomaly_type": chosen_type,
                 "anomaly_name": anomaly_name,
                 "conclusion": conclusion,
-                "causes": causes,
-                "possible_causes": causes,
-                "steps": steps,
-                "prevention": prevention,
+                "causes": enriched_causes,
+                "possible_causes": enriched_causes,
+                "steps": enriched_steps,
+                "prevention": enriched_prevention,
                 "recommended_actions": recommended_actions,
                 "data_evidence": diagnose_context.get("data_evidence", []),
                 "evidence": evidence,
@@ -3831,10 +4361,21 @@ class EnergyRepository:
         diag = template_result["diagnosis"]
         context = template_result["context"]
         trace_id = uuid.uuid4().hex
+        requested_provider = str(payload.get("provider", "auto")).strip().lower() or "auto"
+
+        yield "template", diag
 
         api_key = os.getenv("OPENAI_API_KEY", "").strip()
         if not api_key:
-            yield "error", {"message": "LLM provider not configured", "trace_id": trace_id}
+            yield "done", {
+                **diag,
+                "provider": "template_provider",
+                "requested_provider": requested_provider,
+                "fallback_used": True,
+                "degrade_message": self._friendly_degrade_message("LLM provider not configured"),
+                "trace_id": trace_id,
+                "latency_ms": 0,
+            }
             return
 
         base_url = os.getenv("OPENAI_BASE_URL", "https://api.deepseek.com").strip() or "https://api.deepseek.com"
@@ -3848,9 +4389,9 @@ class EnergyRepository:
         ).strip()
 
         system_prompt = (
-            "你是建筑能源运维诊断助手。用一到两段中文，以运维专家视角，"
-            "针对给定的建筑能源异常给出专业分析结论。结合建筑名称、时间、偏差数值和知识证据。"
-            "直接输出结论文字，不要输出JSON、标题或列表。"
+            "你是建筑能源运维诊断助手。请输出可直接展示在运维工作台上的中文诊断结论。"
+            "要求比普通数据复述更深入，必须说明异常意味着什么、优先怀疑哪些系统、为什么要这样判断。"
+            "结论要引用建筑名称、异常时间、偏差值、基线或同小时对比，不要输出JSON、标题或列表。"
         )
         user_prompt = (
             f"异常类型: {diag.get('anomaly_name', '')}\n"
@@ -3878,9 +4419,25 @@ class EnergyRepository:
             ):
                 yield "token", {"text": token}
             latency_ms = int((time.perf_counter() - start) * 1000)
-            yield "done", {"provider": "llm_provider", "trace_id": trace_id, "latency_ms": latency_ms}
+            yield "done", {
+                **diag,
+                "conclusion": "",
+                "provider": "llm_provider",
+                "requested_provider": requested_provider,
+                "fallback_used": False,
+                "trace_id": trace_id,
+                "latency_ms": latency_ms,
+            }
         except Exception as exc:
-            yield "error", {"message": str(exc), "trace_id": trace_id}
+            yield "done", {
+                **diag,
+                "provider": "template_provider",
+                "requested_provider": requested_provider,
+                "fallback_used": True,
+                "degrade_message": self._friendly_degrade_message(str(exc)),
+                "trace_id": trace_id,
+                "latency_ms": int((time.perf_counter() - start) * 1000),
+            }
 
     def _build_analysis_context(
         self,
@@ -3918,6 +4475,152 @@ class EnergyRepository:
         if len(text) <= limit:
             return text
         return f"{text[:limit].rstrip()}..."
+
+    def _clean_text_list(self, items: Any, max_items: int = 5) -> list[str]:
+        if not isinstance(items, list):
+            return []
+        cleaned: list[str] = []
+        seen: set[str] = set()
+        for item in items:
+            text = self._truncate_text(item, 180)
+            if not text or text in seen:
+                continue
+            cleaned.append(text)
+            seen.add(text)
+            if len(cleaned) >= max_items:
+                break
+        return cleaned
+
+    def _merge_text_lists(self, primary: Any, fallback: Any, *, max_items: int = 5, min_items: int = 1) -> list[str]:
+        merged = self._clean_text_list(primary, max_items=max_items)
+        if len(merged) < min_items:
+            for item in self._clean_text_list(fallback, max_items=max_items):
+                if item not in merged:
+                    merged.append(item)
+                if len(merged) >= max_items:
+                    break
+        return merged[:max_items]
+
+    def _build_diagnosis_causes(
+        self,
+        diagnose_context: dict[str, Any],
+        raw_context: dict[str, Any] | None,
+        base_causes: list[str],
+    ) -> list[str]:
+        causes = list(base_causes or [])
+        window_context = diagnose_context.get("window_context") or {}
+        weather_context = diagnose_context.get("weather_context") or {}
+        peer_context = diagnose_context.get("peer_context") or {}
+        likely_systems = diagnose_context.get("likely_systems") or []
+        if raw_context and window_context.get("baseline_24h_avg_kwh") is not None:
+            causes.append(
+                f"异常点负荷 {diagnose_context.get('value_kwh', 0)} kWh，相对24小时基线 {window_context.get('baseline_24h_avg_kwh')} kWh 偏高 {diagnose_context.get('deviation_pct', 0)}%，说明不是普通时段波动。"
+            )
+        if window_context.get("same_hour_avg_kwh"):
+            causes.append(f"近7个同小时均值仅 {window_context.get('same_hour_avg_kwh')} kWh，当前时点明显偏离常规同小时负荷。")
+        if weather_context.get("temperature_band") == "hot":
+            causes.append("异常发生在高温区间，空调主机、新风机组或末端设备可能因负荷上升而共同抬高总电量。")
+        elif weather_context.get("temperature_band") == "cold":
+            causes.append("异常发生在低温区间，采暖、伴热或防冻运行策略可能推高对应时段能耗。")
+        if float(peer_context.get("gap_pct", 0) or 0) >= 10:
+            causes.append(f"当前建筑较同类均值偏高 {round(float(peer_context.get('gap_pct', 0) or 0), 2)}%，问题更可能来自本建筑运行策略或局部设备异常。")
+        if likely_systems:
+            causes.append(f"结合建筑类型与异常类型，建议优先怀疑 { '、'.join(likely_systems[:3]) } 的运行状态或联动策略。")
+        return self._merge_text_lists(causes, base_causes, max_items=4, min_items=3)
+
+    def _build_diagnosis_steps(
+        self,
+        diagnose_context: dict[str, Any],
+        raw_context: dict[str, Any] | None,
+        base_steps: list[str],
+    ) -> list[str]:
+        steps = list(base_steps or [])
+        likely_systems = diagnose_context.get("likely_systems") or []
+        ts = diagnose_context.get("timestamp") or "当前异常时段"
+        steps.insert(0, f"先核对 {ts} 前后 1 小时的总表、分项表和分路数据，确认异常不是采集抖动或单点坏值。")
+        if likely_systems:
+            steps.append(f"按 { '、'.join(likely_systems[:2]) } 的顺序检查设备启停、设定点、手自动状态和联动信号。")
+        if raw_context:
+            steps.append("对照近7个同小时曲线与前后24小时窗口，确认异常是瞬时触发还是持续运行问题。")
+        steps.append("同步查看 BMS 排程、临时加班记录和现场设备运行台账，判断是否存在计划外启停或联动遗漏。")
+        return self._merge_text_lists(steps, base_steps, max_items=4, min_items=4)
+
+    def _build_diagnosis_actions(
+        self,
+        diagnose_context: dict[str, Any],
+        chosen_type: str,
+        step_items: list[str],
+        base_actions: list[str],
+    ) -> list[str]:
+        actions = list(base_actions or [])
+        if chosen_type in {"anomaly_spike", "anomaly_sustained_high_load", "anomaly_off_hours_load"}:
+            actions.append("先对异常时段相关空调、新风、照明或动力回路执行限时核减，避免异常负荷继续放大。")
+        if chosen_type == "anomaly_workhour_offline":
+            actions.append("先恢复关键主机、控制器和通信链路，再确认现场末端是否已恢复正常运行。")
+        if chosen_type in {"anomaly_baseload_high", "anomaly_schedule_shift"}:
+            actions.append("立即复核夜间/启停排程，取消不必要的常开策略，并保留调参前后曲线截图用于复盘。")
+        if step_items:
+            actions.append(f"优先执行：{step_items[0]}")
+        return self._merge_text_lists(actions, base_actions, max_items=3, min_items=3)
+
+    def _build_diagnosis_prevention(self, diagnose_context: dict[str, Any], base_prevention: list[str]) -> list[str]:
+        prevention = list(base_prevention or [])
+        likely_systems = diagnose_context.get("likely_systems") or []
+        prevention.append("把异常时段的排程、设定点和现场操作记录纳入每周复盘，避免同类问题重复发生。")
+        prevention.append("针对夜间基线、异常峰值和工作时段停运建立自动阈值告警，并与分项电表趋势联动校验。")
+        if likely_systems:
+            prevention.append(f"对 { '、'.join(likely_systems[:2]) } 建立月度巡检与季节切换前专项检查清单。")
+        return self._merge_text_lists(prevention, base_prevention, max_items=4, min_items=3)
+
+    def _build_analysis_findings(self, insights: dict[str, Any], summary: dict[str, Any]) -> list[str]:
+        findings: list[str] = []
+        for item in (insights.get("trend_findings") or [])[:3]:
+            findings.append(f"{item['title']}：{item['detail']}")
+        for item in (insights.get("weather_findings") or [])[:2]:
+            findings.append(f"{item['title']}：{item['detail']}")
+        for item in (insights.get("compare_findings") or [])[:2]:
+            findings.append(f"{item['title']}：{item['detail']}")
+        if summary.get("peak_value") and summary.get("avg_value"):
+            findings.append(f"峰值 {summary['peak_value']} kWh，高于均值 {summary['avg_value']} kWh，说明当前窗口存在明显的峰段管理空间。")
+        return self._merge_text_lists(findings, [], max_items=5, min_items=3)
+
+    def _build_analysis_possible_causes(self, insights: dict[str, Any]) -> list[str]:
+        possible_causes: list[str] = []
+        for item in insights.get("weather_findings") or []:
+            text = str(item.get("detail", ""))
+            if "热天气" in text or "温度正相关" in text:
+                possible_causes.append("负荷与外气温存在正相关，空调、新风或末端策略可能在高温时段放大能耗。")
+            elif "低温" in text or "反向影响" in text:
+                possible_causes.append("低温时段相关负荷上升，可能与采暖、伴热或防冻运行有关。")
+        for item in insights.get("trend_findings") or []:
+            text = f"{item.get('title', '')}{item.get('detail', '')}"
+            if "非工作时段" in text:
+                possible_causes.append("非工作时段负荷回落不充分，说明夜间待机、常开设备或排程收敛不足。")
+            if "波动" in text or "启停" in text:
+                possible_causes.append("设备启停节奏偏密，可能造成短周期波动和无效能耗叠加。")
+        for item in insights.get("compare_findings") or []:
+            text = f"{item.get('title', '')}{item.get('detail', '')}"
+            if "同类" in text and "高" in text:
+                possible_causes.append("与同类建筑差距偏大，问题更可能来自本建筑控制策略、运行时长或局部设备效率。")
+        possible_causes.append("建议把异常窗口、夜间基线和同类差距结合起来看，优先排查最能解释这三类信号的系统。")
+        return self._merge_text_lists(possible_causes, [], max_items=4, min_items=3)
+
+    def _build_analysis_energy_saving(self, insights: dict[str, Any]) -> list[str]:
+        energy_saving: list[str] = []
+        for item in (insights.get("saving_opportunities") or [])[:4]:
+            estimated_value = round(float(item.get("estimated_kwh", item.get("estimated_loss_kwh", 0)) or 0), 2)
+            energy_saving.append(f"{item['title']}：{item['detail']} 可优先作为节能专项，当前窗口影响估算 {estimated_value} kWh。")
+        if not energy_saving:
+            energy_saving.append("当前窗口未形成高置信度节能机会，建议继续跟踪高峰和夜间基线后再组织专项优化。")
+        return self._merge_text_lists(energy_saving, [], max_items=4, min_items=3)
+
+    def _build_analysis_operations(self, insights: dict[str, Any]) -> list[str]:
+        operations: list[str] = []
+        for item in (insights.get("anomaly_windows") or [])[:3]:
+            operations.append(f"先复核 {item['timestamp']} 的 {item['anomaly_name']}，偏差 {item['deviation_pct']}%，影响约 {item['estimated_loss_kwh']} kWh，并核查对应设备工况与排程。")
+        operations.append("把高峰时段排程、夜间基线和异常窗口放在同一张时间轴上核对，优先确认哪些负荷是可控的。")
+        operations.append("对已经识别出的异常窗口补充分项电表、BMS 操作记录和现场值班记录，形成可闭环的问题清单。")
+        return self._merge_text_lists(operations, [], max_items=4, min_items=3)
 
     def _build_analysis_prompt_context(
         self,
@@ -4115,44 +4818,10 @@ class EnergyRepository:
         insights = context["insights"]
         building_name = context.get("building_name") or "当前建筑"
         metric_label = "电力"
-        findings = [
-            f"{item['title']}：{item['detail']}"
-            for item in (
-                (insights.get("trend_findings") or []) +
-                (insights.get("weather_findings") or []) +
-                (insights.get("compare_findings") or [])
-            )[:6]
-        ]
-
-        possible_causes: list[str] = []
-        for item in insights.get("weather_findings") or []:
-            text = str(item.get("detail", ""))
-            if "热天气" in text or "温度正相关" in text:
-                possible_causes.append("负荷受外部气温影响明显，空调或通风策略可能抬高用电。")
-            elif "低温" in text or "反向影响" in text:
-                possible_causes.append("低温时段相关负荷抬升，需排查采暖或伴热运行策略。")
-        for item in insights.get("trend_findings") or []:
-            text = str(item.get("detail", ""))
-            if "启停" in text or "波动" in text:
-                possible_causes.append("设备启停节奏可能偏密，导致曲线稳定性下降。")
-            elif "非工作时段负荷偏高" in f"{item.get('title', '')}{text}":
-                possible_causes.append("存在夜间待机、常开或联动策略未收敛的问题。")
-        if not possible_causes:
-            possible_causes.append("建议结合设备台账、运行日程和异常时间窗进一步定位根因。")
-
-        energy_saving = [
-            f"{item['title']}：{item['detail']}"
-            for item in (insights.get("saving_opportunities") or [])[:4]
-        ]
-        if not energy_saving:
-            energy_saving.append("当前窗口未发现明确的高优先节能机会，可继续跟踪高峰和夜间负荷。")
-
-        operations = [
-            f"优先复核 {item['timestamp']} 的 {item['anomaly_name']}，偏差 {item['deviation_pct']}%，影响约 {item['estimated_loss_kwh']} kWh。"
-            for item in (insights.get("anomaly_windows") or [])[:3]
-        ]
-        if not operations:
-            operations.append("继续跟踪高峰时段与夜间基线，形成设备运行排班对照。")
+        findings = self._build_analysis_findings(insights, summary)
+        possible_causes = self._build_analysis_possible_causes(insights)
+        energy_saving = self._build_analysis_energy_saving(insights)
+        operations = self._build_analysis_operations(insights)
 
         message = str(payload.get("message", "")).strip() or f"{building_name} {metric_label} 分析"
         retrieval = self._search_knowledge(
@@ -4168,6 +4837,7 @@ class EnergyRepository:
             f"{building_name} 当前{metric_label}分析覆盖 {scope.get('data_start_time') or '-'} 至 {scope.get('data_end_time') or '-'}，"
             f"共 {scope.get('point_count', 0)} 个数据点；均值 {summary['avg_value']} kWh，"
             f"峰值 {summary['peak_value']} kWh，波动率 {summary['volatility_pct']}%。"
+            f"当前结论已结合趋势、同类差距、异常窗口和节能机会，可直接用于汇报与运维排查。"
         )
 
         return {
@@ -4282,17 +4952,18 @@ class EnergyRepository:
                         break
                 if llm_obj is None:
                     raise RuntimeError(str(last_err or "llm unknown error"))
+                template_analysis = template_result["analysis"]
                 result = {
                     "analysis": {
-                        "summary": str(llm_obj.get("summary", "")).strip() or template_result["analysis"]["summary"],
-                        "findings": llm_provider._coerce_list_of_str(llm_obj.get("findings")) or template_result["analysis"]["findings"],
-                        "possible_causes": llm_provider._coerce_list_of_str(llm_obj.get("possible_causes")) or template_result["analysis"]["possible_causes"],
-                        "energy_saving_suggestions": llm_provider._coerce_list_of_str(llm_obj.get("energy_saving_suggestions")) or template_result["analysis"]["energy_saving_suggestions"],
-                        "operations_suggestions": llm_provider._coerce_list_of_str(llm_obj.get("operations_suggestions")) or template_result["analysis"]["operations_suggestions"],
-                        "evidence": template_result["analysis"]["evidence"],
-                        "knowledge_source": template_result["analysis"].get("knowledge_source", "none"),
-                        "retrieval_hit_count": template_result["analysis"].get("retrieval_hit_count", 0),
-                        "retrieval_error_type": template_result["analysis"].get("retrieval_error_type", ""),
+                        "summary": str(llm_obj.get("summary", "")).strip() or template_analysis["summary"],
+                        "findings": self._merge_text_lists(llm_provider._coerce_list_of_str(llm_obj.get("findings")), template_analysis["findings"], max_items=5, min_items=3),
+                        "possible_causes": self._merge_text_lists(llm_provider._coerce_list_of_str(llm_obj.get("possible_causes")), template_analysis["possible_causes"], max_items=4, min_items=3),
+                        "energy_saving_suggestions": self._merge_text_lists(llm_provider._coerce_list_of_str(llm_obj.get("energy_saving_suggestions")), template_analysis["energy_saving_suggestions"], max_items=4, min_items=3),
+                        "operations_suggestions": self._merge_text_lists(llm_provider._coerce_list_of_str(llm_obj.get("operations_suggestions")), template_analysis["operations_suggestions"], max_items=4, min_items=3),
+                        "evidence": template_analysis["evidence"],
+                        "knowledge_source": template_analysis.get("knowledge_source", "none"),
+                        "retrieval_hit_count": template_analysis.get("retrieval_hit_count", 0),
+                        "retrieval_error_type": template_analysis.get("retrieval_error_type", ""),
                     },
                     "context": context,
                 }
