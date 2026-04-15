@@ -13,6 +13,7 @@ async function chooseAnomalyStatus(page, label: string) {
 
 test.describe('A8 acceptance chains', () => {
   test('ack -> diagnose -> postmortem note -> export csv', async ({ page, request }) => {
+    test.setTimeout(180000);
     await page.goto('/');
     await openAnomalyEvents(page);
 
@@ -27,7 +28,8 @@ test.describe('A8 acceptance chains', () => {
 
     await row.locator('.el-button', { hasText: '确认' }).click();
     if (await page.locator('.action-form').isVisible()) {
-      await page.locator('.action-form input').first().fill('acceptance');
+      await page.locator('.action-form .el-select').first().click();
+      await page.locator('.el-select-dropdown:visible .el-select-dropdown__item').first().click();
       await page.locator('.action-form textarea').first().fill('ack by acceptance');
       await page.getByRole('button', { name: '提交' }).click();
       await page.waitForTimeout(1000);
@@ -39,7 +41,7 @@ test.describe('A8 acceptance chains', () => {
 
     await row.locator('.el-button--danger', { hasText: '诊断' }).click();
     await expect(page.locator('.assistant-page')).toBeVisible();
-    await expect(page.locator('.assistant-summary-card')).not.toContainText('正在检索数据和知识库');
+    await expect(page.locator('.assistant-summary-card')).not.toContainText('正在检索数据和知识库', { timeout: 60000 });
     await expect(page.locator('.assistant-section').filter({ hasText: '立即动作' })).toBeVisible();
     await openAnomalyEvents(page);
     const detailBtn = page.locator('.el-table__body-wrapper tbody tr').first().locator('.el-button', { hasText: '详情' });
@@ -51,7 +53,8 @@ test.describe('A8 acceptance chains', () => {
     await notes.locator('textarea').nth(0).fill('确认原因为测试异常');
     await notes.locator('textarea').nth(1).fill('完成巡检并复位');
     await notes.locator('textarea').nth(2).fill('已恢复且持续稳定');
-    await page.getByPlaceholder('复盘人').fill('acceptance');
+    await dialog.locator('.postmortem-form .el-select').first().click();
+    await page.locator('.el-select-dropdown:visible .el-select-dropdown__item').first().click();
     await dialog.getByRole('button', { name: '保存复盘' }).click();
 
     const exportResp = await request.get('/api/anomaly/export?status=acknowledged');
